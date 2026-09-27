@@ -1,0 +1,173 @@
+name: "Terraform Monorepo Deployer"
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Find all subdirectories containing *.tf files
+  # -------------------------------------------------------------
+  detect-directories:
+    name: "Detect Terraform Directories"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Find Terraform Folders
+        id: set-matrix
+        run: |
+          DIRS=$(find . -not -path '*/.*' -type f -name '*.tf' -exec dirname {} \; | sort -u | jq -R . | jq -s -c .)
+          echo "Found directories: $DIRS"
+          echo "matrix=$DIRS" >> $GITHUB_OUTPUT
+
+  # -------------------------------------------------------------
+  # Job 2: Run Formatting, Initialization & Terraform Plan
+  # -------------------------------------------------------------
+  terraform-plan:
+    name: "Plan (${{ matrix.dir }})"
+    needs: detect-directories
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
+
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Calculate Workspace Name
+        id: workspace
+        run: |
+          CLEAN_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\./||' | tr '/' '-')
+          if [ "$CLEAN_DIR" = "." ] || [ -z "$CLEAN_DIR" ]; then
+            CLEAN_DIR="root"
+          fi
+          echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
+
+      # Cache Terraform Providers for faster runs
+      - name: Create Plugin Cache Directory
+        run: mkdir -p ${{ env.TF_PLUGIN_CACHE_DIR }}
+
+      - name: Cache Terraform Providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-provider-${{ runner.os }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', matrix.dir)) }}
+          restore-keys: |
+            terraform-provider-${{ runner.os }}-
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Init
+        env:
+          TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX }}-${{ steps.workspace.outputs.workspace_name }}"
+        run: terraform init
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Plan
+        env:
+          TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX }}-${{ steps.workspace.outputs.workspace_name }}"
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_zone: "us-west1-a"
+        run: terraform plan -input=false -no-color
+        working-directory: ${{ matrix.dir }}
+
+  # -------------------------------------------------------------
+  # Job 3: Protected Apply Step (Requires Manual Approval)
+  # -------------------------------------------------------------
+  terraform-apply:
+    name: "Apply (${{ matrix.dir }})"
+    needs: [detect-directories, terraform-plan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Points to the GitHub Environment with Required Reviewer protection
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
+
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Calculate Workspace Name
+        id: workspace
+        run: |
+          CLEAN_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\./||' | tr '/' '-')
+          if [ "$CLEAN_DIR" = "." ] || [ -z "$CLEAN_DIR" ]; then
+            CLEAN_DIR="root"
+          fi
+          echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
+
+      - name: Create Plugin Cache Directory
+        run: mkdir -p ${{ env.TF_PLUGIN_CACHE_DIR }}
+
+      - name: Cache Terraform Providers
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-provider-${{ runner.os }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', matrix.dir)) }}
+          restore-keys: |
+            terraform-provider-${{ runner.os }}-
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        env:
+          TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX }}-${{ steps.workspace.outputs.workspace_name }}"
+        run: terraform init
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Apply
+        env:
+          TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX }}-${{ steps.workspace.outputs.workspace_name }}"
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_zone: "us-west1-a"
+        run: terraform apply -auto-approve -input=false
+        working-directory: ${{ matrix.dir }}
