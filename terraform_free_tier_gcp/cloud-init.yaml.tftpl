@@ -1,34 +1,47 @@
 #cloud-config
-# Container-Optimized OS (COS) Cloud-Init with DNS64 & Host Networking
+# Container-Optimized OS (COS) Cloud-Init
+
+bootcmd:
+  # --- DNS: disable systemd-resolved clobbering and write static DNS64 resolv.conf ---
+  - systemctl stop systemd-resolved || true
+  - systemctl mask systemd-resolved || true
+  - rm -f /etc/resolv.conf
+  - printf "nameserver 2001:4860:4860::6464\nnameserver 2001:4860:4860::64\n" > /etc/resolv.conf
+  - chmod 644 /etc/resolv.conf
+
+  # --- Docker daemon DNS ---
+  - mkdir -p /etc/docker
+  - |
+    cat > /etc/docker/daemon.json <<'EOF'
+    {
+      "dns": ["2001:4860:4860::6464", "2001:4860:4860::64"],
+      "dns-opts": ["timeout:2", "attempts:3"]
+    }
+    EOF
+  - systemctl restart docker || true
+
+  # --- /dev/net/tun for Tailscale ---
+  - mkdir -p /dev/net
+  - mknod /dev/net/tun c 10 200 || true
+  - chmod 666 /dev/net/tun || true
 
 write_files:
-  # 0. Force DNS64 Nameservers on boot for IPv6-only container environment resolution
-  - path: /etc/resolv.conf
-    permissions: "0644"
-    owner: root:root
-    content: |
-      nameserver 2001:4860:4860::6464
-      nameserver 2001:4860:4860::64
-
-  # 1. Standalone Docker Compose runner script
   - path: /var/lib/docker/bin/docker-compose
     permissions: "0755"
     owner: root:root
     content: |
       #!/bin/sh
-      exec docker run --rm \
+      exec /usr/bin/docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$$PWD:$$PWD" \
-        -w "$$PWD" \
-        docker/compose:1.29.2 "$$@"
+        -v "$PWD:$PWD" \
+        -w "$PWD" \
+        docker/compose:2.24.5 "$@"
 
-  # 2. Store Portainer Password Hash securely on disk
   - path: /var/lib/portainer/password.txt
     permissions: "0600"
     owner: root:root
-    content: "${portainer_admin_password_hash}"
+    content: "${portainer_admin_password}"
 
-  # 3. Docker Compose Stack with Host Networking & DNS64 resolution
   - path: /var/lib/services/docker-compose.yml
     permissions: "0644"
     owner: root:root
@@ -76,28 +89,32 @@ write_files:
       volumes:
         portainer_data:
 
-  # 4. Systemd service runner
   - path: /etc/systemd/system/containers.service
     permissions: "0644"
     owner: root:root
+    defer: true
     content: |
       [Unit]
       Description=Portainer & Tailscale Docker Compose Service
-      After=docker.service
+      After=docker.service network-online.target
       Requires=docker.service
+      Wants=network-online.target
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
       WorkingDirectory=/var/lib/services
-      ExecStart=/var/lib/docker/bin/docker-compose up -d
-      ExecStop=/var/lib/docker/bin/docker-compose down
+      ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; echo "Docker socket not ready"; exit 1'
+      ExecStart=/var/lib/docker/bin/docker-compose -f /var/lib/services/docker-compose.yml up -d
+      ExecStop=/var/lib/docker/bin/docker-compose -f /var/lib/services/docker-compose.yml down
 
       [Install]
       WantedBy=multi-user.target
 
 runcmd:
-  - mkdir -p /var/lib/docker/bin
+  - mkdir -p /var/lib/docker/bin /var/lib/portainer /var/lib/services
+  - mkdir -p /dev/net
+  - mknod /dev/net/tun c 10 200 || true
+  - chmod 666 /dev/net/tun || true
   - systemctl daemon-reload
-  - systemctl enable containers.service
   - systemctl start containers.service
