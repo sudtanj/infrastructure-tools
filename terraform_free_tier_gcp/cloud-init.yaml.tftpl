@@ -72,11 +72,6 @@ bootcmd:
   - sysctl -w vm.vfs_cache_pressure=50 2>/dev/null || true
 
 write_files:
-  - path: /var/lib/portainer/password.txt
-    permissions: "0600"
-    owner: root:root
-    content: "${portainer_admin_password_hash}"
-
   - path: /etc/systemd/system/containers.service
     permissions: "0644"
     owner: root:root
@@ -92,7 +87,7 @@ write_files:
       RemainAfterExit=yes
       ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
 
-      # Tailscale: userspace mode (fixes host-network accessibility from tailnet)
+      # Tailscale: userspace mode
       ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
         --network host \
         --cpus 0.04 --cpu-shares 96 \
@@ -111,17 +106,15 @@ write_files:
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
-      # Portainer: management UI
+      # Portainer: setup wizard on first visit (no pre-seeded password)
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
         --cpus 0.11 --cpu-shares 288 \
         --memory 192m --memory-swap 192m \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro \
         -v portainer_data:/data \
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         portainer/portainer-ce:latest \
-        --admin-password-file /run/secrets/portainer_password \
         --snapshot-interval=15m
 
       ExecStop=/bin/sh -c 'docker rm -f portainer tailscale || true'
@@ -130,6 +123,6 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  - mkdir -p /var/lib/portainer /var/lib/tailscale
+  - mkdir -p /var/lib/tailscale
   - systemctl daemon-reload
   - systemctl start containers.service
