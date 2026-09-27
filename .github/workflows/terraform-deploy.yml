@@ -65,7 +65,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.6.0"
+          terraform_version: "1.9.8"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
       - name: Cache Terraform Plugins
@@ -75,9 +75,6 @@ jobs:
           key: ${{ runner.os }}-terraform-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
             ${{ runner.os }}-terraform-providers-
-
-      - name: Ensure Plugin Cache Directory Exists
-        run: mkdir -p ~/.terraform.d/plugin-cache
 
       - name: Terraform Format Check
         run: terraform fmt -check
@@ -138,7 +135,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.6.0"
+          terraform_version: "1.9.8"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
       - name: Cache Terraform Plugins
