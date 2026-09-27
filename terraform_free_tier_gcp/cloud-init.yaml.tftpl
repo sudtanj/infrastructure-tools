@@ -2,7 +2,7 @@
 # Container-Optimized OS (COS) Cloud-Init
 
 bootcmd:
-  # --- DNS: disable systemd-resolved clobbering and write static DNS64 resolv.conf ---
+  # --- DNS64 ---
   - systemctl stop systemd-resolved || true
   - systemctl mask systemd-resolved || true
   - rm -f /etc/resolv.conf
@@ -26,68 +26,10 @@ bootcmd:
   - chmod 666 /dev/net/tun || true
 
 write_files:
-  - path: /var/lib/docker/bin/docker-compose
-    permissions: "0755"
-    owner: root:root
-    content: |
-      #!/bin/sh
-      exec /usr/bin/docker run --rm \
-        -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$PWD:$PWD" \
-        -w "$PWD" \
-        docker/compose:2.24.5 "$@"
-
   - path: /var/lib/portainer/password.txt
     permissions: "0600"
     owner: root:root
     content: "${portainer_admin_password}"
-
-  - path: /var/lib/services/docker-compose.yml
-    permissions: "0644"
-    owner: root:root
-    content: |
-      version: '3.8'
-      services:
-        tailscale:
-          image: tailscale/tailscale:latest
-          container_name: tailscale
-          hostname: gcp-free-tier-vm
-          network_mode: host
-          cpus: 0.25
-          mem_limit: 256m
-          environment:
-            - TS_AUTHKEY=${tailscale_auth_key}
-            - TS_STATE_DIR=/var/lib/tailscale
-            - TS_USERSPACE=false
-            - TS_HOSTNAME=gcp-free-tier-vm
-            - TS_SOCKET=/var/run/tailscale/tailscaled.sock
-            - TS_EXTRA_ARGS=--advertise-tags=tag:home --accept-routes
-            - TS_AUTH_ONCE=true
-            - TS_ACCEPT_DNS=true
-            - TZ=Asia/Jakarta
-          volumes:
-            - /var/lib/tailscale:/var/lib/tailscale
-            - /dev/net/tun:/dev/net/tun
-          cap_add:
-            - NET_ADMIN
-            - NET_RAW
-          restart: always
-
-        portainer:
-          image: portainer/portainer-ce:latest
-          container_name: portainer
-          network_mode: host
-          cpus: 0.5
-          mem_limit: 256m
-          command: --admin-password-file /run/secrets/portainer_password
-          restart: always
-          volumes:
-            - /var/run/docker.sock:/var/run/docker.sock
-            - /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro
-            - portainer_data:/data
-
-      volumes:
-        portainer_data:
 
   - path: /etc/systemd/system/containers.service
     permissions: "0644"
@@ -95,7 +37,7 @@ write_files:
     defer: true
     content: |
       [Unit]
-      Description=Portainer & Tailscale Docker Compose Service
+      Description=Portainer & Tailscale
       After=docker.service network-online.target
       Requires=docker.service
       Wants=network-online.target
@@ -103,18 +45,40 @@ write_files:
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      WorkingDirectory=/var/lib/services
-      ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; echo "Docker socket not ready"; exit 1'
-      ExecStart=/var/lib/docker/bin/docker-compose -f /var/lib/services/docker-compose.yml up -d
-      ExecStop=/var/lib/docker/bin/docker-compose -f /var/lib/services/docker-compose.yml down
+      ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
+
+      ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
+        --network host \
+        --cpus 0.25 --memory 256m \
+        -e TS_AUTHKEY=${tailscale_auth_key} \
+        -e TS_STATE_DIR=/var/lib/tailscale \
+        -e TS_USERSPACE=false \
+        -e TS_HOSTNAME=gcp-free-tier-vm \
+        -e TS_SOCKET=/var/run/tailscale/tailscaled.sock \
+        -e "TS_EXTRA_ARGS=--advertise-tags=tag:home --accept-routes" \
+        -e TS_AUTH_ONCE=true \
+        -e TS_ACCEPT_DNS=true \
+        -e TZ=Asia/Jakarta \
+        -v /var/lib/tailscale:/var/lib/tailscale \
+        -v /dev/net/tun:/dev/net/tun \
+        --cap-add NET_ADMIN --cap-add NET_RAW \
+        tailscale/tailscale:latest
+
+      ExecStart=/usr/bin/docker run -d --name portainer --restart always \
+        --network host \
+        --cpus 0.5 --memory 256m \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro \
+        -v portainer_data:/data \
+        portainer/portainer-ce:latest \
+        --admin-password-file /run/secrets/portainer_password
+
+      ExecStop=/bin/sh -c 'docker rm -f portainer tailscale || true'
 
       [Install]
       WantedBy=multi-user.target
 
 runcmd:
-  - mkdir -p /var/lib/docker/bin /var/lib/portainer /var/lib/services
-  - mkdir -p /dev/net
-  - mknod /dev/net/tun c 10 200 || true
-  - chmod 666 /dev/net/tun || true
+  - mkdir -p /var/lib/portainer /var/lib/tailscale
   - systemctl daemon-reload
   - systemctl start containers.service
