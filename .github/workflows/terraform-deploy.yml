@@ -98,7 +98,8 @@ jobs:
           terraform plan \
             -input=false \
             -no-color \
-            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}"
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            > /dev/null 2>&1
         working-directory: ${{ matrix.dir }}
 
   # -------------------------------------------------------------
