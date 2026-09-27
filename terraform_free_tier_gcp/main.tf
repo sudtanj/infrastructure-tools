@@ -71,15 +71,12 @@ resource "google_compute_instance" "free_tier_vm" {
 
     stack_type = "IPV4_IPV6"
 
-    # Assign public IPv6 address
+    # Assign public IPv6 address (Strictly IPv6-only external access)
     ipv6_access_config {
       network_tier = "PREMIUM"
     }
 
-    # Assign ephemeral public IPv4 address for outbound internet access
-    access_config {
-      network_tier = "STANDARD"
-    }
+    # IPv4 public access_config block completely removed.
   }
 
   scheduling {
