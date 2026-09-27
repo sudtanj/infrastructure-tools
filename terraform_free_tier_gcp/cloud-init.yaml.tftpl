@@ -1,6 +1,7 @@
 #cloud-config
 # Container-Optimized OS (COS) Cloud-Init
-# Optimized: BBR congestion control, TCP tuning, ZRAM swap, e2-micro-aligned CPU limits
+# Optimized for GCP Always Free Tier e2-micro (0.25 vCPU, 1 GB RAM)
+# Tuned to leave headroom for additional Portainer-managed stacks
 
 bootcmd:
   # --- DNS64 ---
@@ -10,7 +11,7 @@ bootcmd:
   - printf "nameserver 2001:4860:4860::6464\nnameserver 2001:4860:4860::64\n" > /etc/resolv.conf
   - chmod 644 /etc/resolv.conf
 
-  # --- Docker daemon DNS + logging optimization ---
+  # --- Docker daemon: DNS + log rotation + live-restore ---
   - mkdir -p /etc/docker
   - |
     cat > /etc/docker/daemon.json <<'EOF'
@@ -19,7 +20,7 @@ bootcmd:
       "dns-opts": ["timeout:2", "attempts:3"],
       "log-driver": "json-file",
       "log-opts": {
-        "max-size": "10m",
+        "max-size": "5m",
         "max-file": "2"
       },
       "live-restore": true,
@@ -33,30 +34,43 @@ bootcmd:
   - mknod /dev/net/tun c 10 200 || true
   - chmod 666 /dev/net/tun || true
 
-  # --- Network stack optimizations (BBR + TCP tuning) ---
-  - modprobe tcp_bbr || true
-  - sysctl -w net.core.default_qdisc=fq
-  - sysctl -w net.ipv4.tcp_congestion_control=bbr
-  - sysctl -w net.core.rmem_max=16777216
-  - sysctl -w net.core.wmem_max=16777216
-  - sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
-  - sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
-  - sysctl -w net.ipv4.tcp_rto_min_us=5000
-  - sysctl -w net.ipv4.tcp_slow_start_after_idle=0
-  - sysctl -w net.ipv4.tcp_fastopen=3
-  - sysctl -w net.ipv4.tcp_tw_reuse=1
-  - sysctl -w net.ipv4.tcp_fin_timeout=15
-  - sysctl -w net.ipv4.ip_local_port_range="1024 65000"
-  - sysctl -w net.core.somaxconn=1024
-  - sysctl -w net.ipv4.tcp_max_syn_backlog=1024
+  # --- Network: BBR + TCP tuning ---
+  - modprobe tcp_bbr 2>/dev/null || true
+  - sysctl -w net.core.default_qdisc=fq 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
+  - sysctl -w net.core.rmem_max=16777216 2>/dev/null || true
+  - sysctl -w net.core.wmem_max=16777216 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216" 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216" 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_rto_min_us=5000 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_slow_start_after_idle=0 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_fastopen=3 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_tw_reuse=1 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_fin_timeout=15 2>/dev/null || true
+  - sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+  - sysctl -w net.core.somaxconn=1024 2>/dev/null || true
+  - sysctl -w net.ipv4.tcp_max_syn_backlog=1024 2>/dev/null || true
 
-  # --- ZRAM swap (compressed swap in RAM, no disk I/O) ---
-  - modprobe zram || true
-  - echo 536870912 > /sys/block/zram0/disksize || true
-  - mkswap /dev/zram0 || true
-  - swapon /dev/zram0 || true
-  - sysctl -w vm.swappiness=10
-  - sysctl -w vm.vfs_cache_pressure=50
+  # --- CPU scheduler tuning ---
+  - sysctl -w kernel.sched_autogroup_enabled=1 2>/dev/null || true
+  - sysctl -w kernel.sched_migration_cost_ns=5000000 2>/dev/null || true
+  - sysctl -w kernel.sched_min_granularity_ns=10000000 2>/dev/null || true
+  - sysctl -w kernel.sched_wakeup_granularity_ns=15000000 2>/dev/null || true
+  - sysctl -w kernel.sched_cfs_bandwidth_slice_us=5000 2>/dev/null || true
+
+  # --- VM memory tuning ---
+  - sysctl -w vm.dirty_ratio=5 2>/dev/null || true
+  - sysctl -w vm.dirty_background_ratio=1 2>/dev/null || true
+  - sysctl -w vm.min_free_kbytes=16384 2>/dev/null || true
+  - sysctl -w vm.overcommit_memory=1 2>/dev/null || true
+
+  # --- ZRAM swap (compressed in-RAM swap, no disk I/O) ---
+  - modprobe zram 2>/dev/null || true
+  - echo 536870912 > /sys/block/zram0/disksize 2>/dev/null || true
+  - mkswap /dev/zram0 2>/dev/null || true
+  - swapon /dev/zram0 2>/dev/null || true
+  - sysctl -w vm.swappiness=10 2>/dev/null || true
+  - sysctl -w vm.vfs_cache_pressure=50 2>/dev/null || true
 
 write_files:
   - path: /var/lib/portainer/password.txt
@@ -79,12 +93,13 @@ write_files:
       RemainAfterExit=yes
       ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
 
-      # Tailscale: lightweight VPN, minimal CPU
+      # Tailscale: minimal footprint, aggressive Go GC
       ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
         --network host \
-        --cpus 0.05 --memory 256m \
-        --memory-swap 512m \
-        --cpu-shares 128 \
+        --cpus 0.04 --cpu-shares 96 \
+        --memory 96m --memory-swap 96m \
+        -e GOGC=10 \
+        -e GOMEMLIMIT=80MiB \
         -e TS_AUTHKEY=${tailscale_auth_key} \
         -e TS_STATE_DIR=/var/lib/tailscale \
         -e TS_USERSPACE=false \
@@ -97,21 +112,21 @@ write_files:
         -v /var/lib/tailscale:/var/lib/tailscale \
         -v /dev/net/tun:/dev/net/tun \
         --cap-add NET_ADMIN --cap-add NET_RAW \
-        --log-driver json-file --log-opt max-size=10m --log-opt max-file=2 \
+        --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
-      # Portainer: gets the bulk of available CPU
+      # Portainer: management UI only — stacks run as separate containers with their own limits
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
-        --cpus 0.15 --memory 256m \
-        --memory-swap 512m \
-        --cpu-shares 384 \
+        --cpus 0.11 --cpu-shares 288 \
+        --memory 192m --memory-swap 192m \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro \
         -v portainer_data:/data \
-        --log-driver json-file --log-opt max-size=10m --log-opt max-file=2 \
+        --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         portainer/portainer-ce:latest \
-        --admin-password-file /run/secrets/portainer_password
+        --admin-password-file /run/secrets/portainer_password \
+        --snapshot-interval=15m
 
       ExecStop=/bin/sh -c 'docker rm -f portainer tailscale || true'
 
