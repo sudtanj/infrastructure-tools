@@ -1,8 +1,8 @@
 #cloud-config
-# Container-Optimized OS (COS) Cloud-Init with Secure Credentials
+# Container-Optimized OS (COS) Cloud-Init for Portainer CE + Tailscale (Host Networking)
 
 write_files:
-  # 1. Standalone Docker Compose runner script
+  # 1. Standalone Docker Compose runner script (escaped $$PWD for Terraform templatefile)
   - path: /var/lib/docker-compose/docker-compose
     permissions: "0755"
     owner: root:root
@@ -10,16 +10,15 @@ write_files:
       #!/bin/sh
       exec docker run --rm -i \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$PWD:$PWD" \
-        -w "$PWD" \
-        docker/compose:1.29.2 "$@"
+        -v "$$PWD:$$PWD" \
+        -w "$$PWD" \
+        docker/compose:1.29.2 "$$@"
 
-  # 2. Store Portainer Password Hash securely on disk (Restricted 0600 permissions)
+  # 2. Store Portainer Password Hash securely on disk (quoted to prevent YAML syntax errors)
   - path: /var/lib/portainer/password.txt
     permissions: "0600"
     owner: root:root
-    content: |
-      ${portainer_admin_password_hash}
+    content: "${portainer_admin_password_hash}"
 
   # 3. Docker Compose Stack with Host Networking
   - path: /var/lib/services/docker-compose.yml

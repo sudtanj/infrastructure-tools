@@ -32,7 +32,7 @@ resource "google_service_account" "vm_sa" {
 
 # --- Render Cloud-Init Template with Secrets ---
 locals {
-  rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml", {
+  rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     tailscale_auth_key            = var.tailscale_auth_key
     portainer_admin_password_hash = var.portainer_admin_password_hash
   })
