@@ -21,9 +21,8 @@ terraform {
 
 # --- Provider ---
 provider "google" {
-  # Omit project to allow HCP Terraform OIDC (TFC_GCP_PROVIDER_AUTH) to supply it dynamically,
-  # or fall back to var.gcp_project_id if set elsewhere.
-  project = var.gcp_project_id
+  # Coalesce empty strings ("") to null so Workload Identity OIDC supplies the project automatically
+  project = var.gcp_project_id != "" ? var.gcp_project_id : null
   zone    = var.zone
 }
 
