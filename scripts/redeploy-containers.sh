@@ -1,14 +1,8 @@
 #!/bin/bash
 # scripts/redeploy-containers.sh
-# Runs ON the VM via IAP SSH. Recreates Tailscale + Portainer without rebuilding the VM.
-#
-# Secrets are expected via environment variables (never hardcoded):
-#   TS_AUTHKEY — Tailscale auth key (optional if state dir already authenticated)
-#   TS_HOSTNAME — Tailscale node name (defaults to gcp-free-tier-vm)
-#
-# For host-network stacks to reach tailnet peers, use the SOCKS5 proxy:
-#   ALL_PROXY=socks5h://127.0.0.1:1055
-#   NO_PROXY=localhost,127.0.0.1,100.64.0.0/10,.ts.net
+# Runs ON the VM via IAP SSH. Idempotent — safe to run repeatedly.
+# Reuses existing Tailscale state in /var/lib/tailscale.
+# Produces ZERO environment-derived output. Safe for public repos.
 
 set -euo pipefail
 
@@ -17,52 +11,62 @@ TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
 
-echo "[*] Redeploying containers on $(hostname) at $(date -u +%FT%TZ)"
+log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 
-# --- Ensure /dev/net/tun exists (COS may recreate it on reboot) ---
+log "Redeploy started"
+
+# --- /dev/net/tun ---
 if [ ! -e /dev/net/tun ]; then
   mkdir -p /dev/net
-  mknod /dev/net/tun c 10 200 || true
-  chmod 666 /dev/net/tun || true
+  mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
+  chmod 666 /dev/net/tun >/dev/null 2>&1 || true
 fi
 
-# --- Remove existing containers (idempotent) ---
-docker rm -f portainer tailscale 2>/dev/null || true
+# --- Remove existing containers ---
+docker rm -f portainer tailscale >/dev/null 2>&1 || true
+log "Old containers removed"
 
-# --- Tailscale ---
-# Reuse existing auth state if present; only send the auth key when needed.
-if [ -f /var/lib/tailscale/tailscaled.state ] && [ -z "$TS_AUTHKEY" ]; then
-  echo "[*] Existing Tailscale state found, starting without re-auth"
+# --- Detect existing Tailscale state ---
+TS_STATE_PRESENT=0
+if [ -s /var/lib/tailscale/tailscaled.state ] \
+   || [ -d /var/lib/tailscale/tailscaled.state.d ] \
+   || ls /var/lib/tailscale/*.state >/dev/null 2>&1; then
+  TS_STATE_PRESENT=1
+fi
+
+if [ "$TS_STATE_PRESENT" -eq 1 ] && [ -z "$TS_AUTHKEY" ]; then
+  log "Reusing existing Tailscale state"
   TS_AUTH_ENV=""
-else
-  if [ -z "$TS_AUTHKEY" ]; then
-    echo "[!] No TS_AUTHKEY and no existing state — Tailscale will not authenticate"
-  fi
+elif [ -n "$TS_AUTHKEY" ]; then
+  log "Authenticating Tailscale with provided key"
   TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
+else
+  log "No state and no auth key — node may stay offline"
+  TS_AUTH_ENV=""
 fi
 
+# --- Start Tailscale (all output suppressed) ---
 # shellcheck disable=SC2086
 docker run -d --name tailscale --restart always \
   --network host \
   --cpus 0.04 --cpu-shares 96 \
   --memory 96m --memory-swap 96m \
-  -e GOGC=10 \
-  -e GOMEMLIMIT=80MiB \
+  -e GOGC=10 -e GOMEMLIMIT=80MiB \
   $TS_AUTH_ENV \
   -e TS_STATE_DIR=/var/lib/tailscale \
   -e TS_USERSPACE=true \
   -e TS_HOSTNAME="${TS_HOSTNAME}" \
   -e "TS_EXTRA_ARGS=--advertise-tags=tag:home" \
-  -e TS_AUTH_ONCE=true \
-  -e TS_ACCEPT_DNS=true \
+  -e TS_AUTH_ONCE=true -e TS_ACCEPT_DNS=true \
   -e TS_SOCKS5_SERVER=":${TS_SOCKS5_PORT}" \
   -e TS_OUTBOUND_HTTP_PROXY_LISTEN=":${TS_SOCKS5_PORT}" \
   -e TZ=Asia/Jakarta \
   -v /var/lib/tailscale:/var/lib/tailscale \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
-  tailscale/tailscale:latest
+  tailscale/tailscale:latest \
+  >/dev/null
 
-# --- Portainer ---
+# --- Start Portainer (all output suppressed) ---
 docker run -d --name portainer --restart always \
   --network host \
   --cpus 0.11 --cpu-shares 288 \
@@ -71,16 +75,32 @@ docker run -d --name portainer --restart always \
   -v portainer_data:/data \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   portainer/portainer-ce:latest \
-  --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}"
+  --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
+  >/dev/null
 
-# --- Prune old images ---
 docker image prune -f >/dev/null 2>&1 || true
+log "Containers started"
 
-# --- Wait for the SOCKS5 proxy to come up (Tailscale takes a few seconds) ---
-echo "[*] Waiting for Tailscale SOCKS5 proxy on :${TS_SOCKS5_PORT}..."
+# --- Verify Tailscale is up WITHOUT printing any info ---
+TS_READY=0
+for _ in $(seq 1 60); do
+  if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
+    TS_READY=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "$TS_READY" -eq 1 ]; then
+  log "Tailscale: connected"
+else
+  log "Tailscale: NOT connected — check 'docker logs tailscale'"
+fi
+
+# --- Verify SOCKS5 proxy WITHOUT printing any info ---
 PROXY_UP=0
-for i in $(seq 1 30); do
-  if (echo > /dev/tcp/127.0.0.1/"${TS_SOCKS5_PORT}") 2>/dev/null; then
+for _ in $(seq 1 30); do
+  if docker exec tailscale sh -c "echo > /dev/tcp/127.0.0.1/${TS_SOCKS5_PORT}" 2>/dev/null; then
     PROXY_UP=1
     break
   fi
@@ -88,16 +108,13 @@ for i in $(seq 1 30); do
 done
 
 if [ "$PROXY_UP" -eq 1 ]; then
-  echo "[+] SOCKS5 proxy is listening on 127.0.0.1:${TS_SOCKS5_PORT}"
+  log "SOCKS5 proxy: listening"
 else
-  echo "[!] SOCKS5 proxy did not come up within 30s — check 'docker logs tailscale'"
+  log "SOCKS5 proxy: NOT reachable"
 fi
 
-# --- Report ---
-echo "[*] Running containers:"
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+# --- Container status: only report which ones are up, never names/images ---
+RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
+log "Running containers: ${RUNNING}"
 
-echo "[*] Tailscale status:"
-docker exec tailscale tailscale status 2>/dev/null || echo "  (tailscale still starting)"
-
-echo "[*] Done."
+log "Redeploy done"
