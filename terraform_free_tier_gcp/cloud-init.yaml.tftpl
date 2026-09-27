@@ -1,6 +1,6 @@
 #cloud-config
 # Container-Optimized OS (COS) Cloud-Init
-# Optimized: BBR congestion control, TCP tuning, ZRAM swap, resource limits
+# Optimized: BBR congestion control, TCP tuning, ZRAM swap, e2-micro-aligned CPU limits
 
 bootcmd:
   # --- DNS64 ---
@@ -34,8 +34,6 @@ bootcmd:
   - chmod 666 /dev/net/tun || true
 
   # --- Network stack optimizations (BBR + TCP tuning) ---
-  # BBR is Google's congestion control algorithm, used on all Google/YouTube
-  # servers and the GCP backbone. It improves throughput and reduces latency.
   - modprobe tcp_bbr || true
   - sysctl -w net.core.default_qdisc=fq
   - sysctl -w net.ipv4.tcp_congestion_control=bbr
@@ -81,11 +79,12 @@ write_files:
       RemainAfterExit=yes
       ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
 
+      # Tailscale: lightweight VPN, minimal CPU
       ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
         --network host \
-        --cpus 0.25 --memory 256m \
+        --cpus 0.05 --memory 256m \
         --memory-swap 512m \
-        --cpu-shares 256 \
+        --cpu-shares 128 \
         -e TS_AUTHKEY=${tailscale_auth_key} \
         -e TS_STATE_DIR=/var/lib/tailscale \
         -e TS_USERSPACE=false \
@@ -101,11 +100,12 @@ write_files:
         --log-driver json-file --log-opt max-size=10m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
+      # Portainer: gets the bulk of available CPU
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
-        --cpus 0.5 --memory 256m \
+        --cpus 0.15 --memory 256m \
         --memory-swap 512m \
-        --cpu-shares 512 \
+        --cpu-shares 384 \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro \
         -v portainer_data:/data \
