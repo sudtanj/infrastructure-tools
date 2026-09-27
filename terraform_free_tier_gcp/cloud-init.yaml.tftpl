@@ -64,6 +64,8 @@ write_files:
           image: portainer/portainer-ce:latest
           container_name: portainer
           network_mode: host
+          cpus: 0.5
+          mem_limit: 256m
           command: --admin-password-file /run/secrets/portainer_password
           restart: always
           volumes:
