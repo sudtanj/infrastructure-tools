@@ -21,8 +21,8 @@ terraform {
 
 # --- Provider ---
 provider "google" {
-  # Coalesce empty strings ("") to null so Workload Identity OIDC supplies the project automatically
-  project = var.gcp_project_id != "" ? var.gcp_project_id : null
+  # Force any empty string (""), whitespace, or null to evaluate as absolute null
+  project = (var.gcp_project_id != null && var.gcp_project_id != "") ? var.gcp_project_id : null
   zone    = var.zone
 }
 
