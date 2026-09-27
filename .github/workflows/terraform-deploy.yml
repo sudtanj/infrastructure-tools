@@ -109,9 +109,9 @@ jobs:
   terraform-apply:
     name: "Apply (${{ matrix.dir }})"
     needs: [detect-directories, terraform-plan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # FIXED: Allows execution on both automated pushes to main AND manual workflow_dispatch triggers
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    # Points to the GitHub Environment with Required Reviewer protection
     environment: production
     strategy:
       fail-fast: false
