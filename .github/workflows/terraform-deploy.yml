@@ -43,9 +43,6 @@ jobs:
       matrix:
         dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
 
-    env:
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -71,16 +68,29 @@ jobs:
           terraform_version: "1.6.0"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-providers-
+
+      - name: Ensure Plugin Cache Directory Exists
+        run: mkdir -p ~/.terraform.d/plugin-cache
+
       - name: Terraform Format Check
         run: terraform fmt -check
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Init
         env:
+          TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-          # Default to 'gcp' prefix if secret is unset to avoid starting with a hyphen
           TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-        run: terraform init
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Plan
@@ -106,9 +116,6 @@ jobs:
       matrix:
         dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
 
-    env:
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -134,11 +141,22 @@ jobs:
           terraform_version: "1.6.0"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-providers-
+
       - name: Terraform Init
         env:
+          TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
           TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-        run: terraform init
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Apply
