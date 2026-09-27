@@ -29,7 +29,7 @@ write_files:
   - path: /var/lib/portainer/password.txt
     permissions: "0600"
     owner: root:root
-    content: "${portainer_admin_password}"
+    content: "${portainer_admin_password_hash}"
 
   - path: /etc/systemd/system/containers.service
     permissions: "0644"
