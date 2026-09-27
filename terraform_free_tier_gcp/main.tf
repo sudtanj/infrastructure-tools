@@ -45,7 +45,7 @@ locals {
 
 # --- Trigger to force VM recreation when cloud-init changes ---
 resource "terraform_data" "cloud_init_trigger" {
-  input = hashicorp_md5(file("${path.module}/cloud-init.yaml"))
+  input = md5(file("${path.module}/cloud-init.yaml"))
 }
 
 # --- Compute Instance (Container-Optimized OS) ---
