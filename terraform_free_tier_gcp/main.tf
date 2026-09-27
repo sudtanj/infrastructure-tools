@@ -21,6 +21,8 @@ terraform {
 
 # --- Provider ---
 provider "google" {
+  # Omit project to allow HCP Terraform OIDC (TFC_GCP_PROVIDER_AUTH) to supply it dynamically,
+  # or fall back to var.gcp_project_id if set elsewhere.
   project = var.gcp_project_id
   zone    = var.zone
 }
@@ -45,7 +47,7 @@ locals {
 
 # --- Trigger to force VM recreation when cloud-init changes ---
 resource "terraform_data" "cloud_init_trigger" {
-  input = md5(file("${path.module}/cloud-init.yaml"))
+  input = filemd5("${path.module}/cloud-init.yaml")
 }
 
 # --- Compute Instance (Container-Optimized OS) ---

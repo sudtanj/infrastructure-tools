@@ -94,9 +94,11 @@ jobs:
         env:
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
           TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_zone: "us-west1-a"
-        run: terraform plan -input=false -no-color
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}"
         working-directory: ${{ matrix.dir }}
 
   # -------------------------------------------------------------
@@ -160,7 +162,9 @@ jobs:
         env:
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
           TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_zone: "us-west1-a"
-        run: terraform apply -auto-approve -input=false
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}"
         working-directory: ${{ matrix.dir }}
