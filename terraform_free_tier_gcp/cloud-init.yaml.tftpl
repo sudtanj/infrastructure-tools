@@ -1,5 +1,6 @@
 #cloud-config
 # Container-Optimized OS (COS) Cloud-Init
+# Optimized: BBR congestion control, TCP tuning, ZRAM swap, resource limits
 
 bootcmd:
   # --- DNS64 ---
@@ -9,13 +10,20 @@ bootcmd:
   - printf "nameserver 2001:4860:4860::6464\nnameserver 2001:4860:4860::64\n" > /etc/resolv.conf
   - chmod 644 /etc/resolv.conf
 
-  # --- Docker daemon DNS ---
+  # --- Docker daemon DNS + logging optimization ---
   - mkdir -p /etc/docker
   - |
     cat > /etc/docker/daemon.json <<'EOF'
     {
       "dns": ["2001:4860:4860::6464", "2001:4860:4860::64"],
-      "dns-opts": ["timeout:2", "attempts:3"]
+      "dns-opts": ["timeout:2", "attempts:3"],
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "10m",
+        "max-file": "2"
+      },
+      "live-restore": true,
+      "iptables": false
     }
     EOF
   - systemctl restart docker || true
@@ -24,6 +32,33 @@ bootcmd:
   - mkdir -p /dev/net
   - mknod /dev/net/tun c 10 200 || true
   - chmod 666 /dev/net/tun || true
+
+  # --- Network stack optimizations (BBR + TCP tuning) ---
+  # BBR is Google's congestion control algorithm, used on all Google/YouTube
+  # servers and the GCP backbone. It improves throughput and reduces latency.
+  - modprobe tcp_bbr || true
+  - sysctl -w net.core.default_qdisc=fq
+  - sysctl -w net.ipv4.tcp_congestion_control=bbr
+  - sysctl -w net.core.rmem_max=16777216
+  - sysctl -w net.core.wmem_max=16777216
+  - sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
+  - sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
+  - sysctl -w net.ipv4.tcp_rto_min_us=5000
+  - sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+  - sysctl -w net.ipv4.tcp_fastopen=3
+  - sysctl -w net.ipv4.tcp_tw_reuse=1
+  - sysctl -w net.ipv4.tcp_fin_timeout=15
+  - sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+  - sysctl -w net.core.somaxconn=1024
+  - sysctl -w net.ipv4.tcp_max_syn_backlog=1024
+
+  # --- ZRAM swap (compressed swap in RAM, no disk I/O) ---
+  - modprobe zram || true
+  - echo 536870912 > /sys/block/zram0/disksize || true
+  - mkswap /dev/zram0 || true
+  - swapon /dev/zram0 || true
+  - sysctl -w vm.swappiness=10
+  - sysctl -w vm.vfs_cache_pressure=50
 
 write_files:
   - path: /var/lib/portainer/password.txt
@@ -34,7 +69,6 @@ write_files:
   - path: /etc/systemd/system/containers.service
     permissions: "0644"
     owner: root:root
-    defer: true
     content: |
       [Unit]
       Description=Portainer & Tailscale
@@ -50,6 +84,8 @@ write_files:
       ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
         --network host \
         --cpus 0.25 --memory 256m \
+        --memory-swap 512m \
+        --cpu-shares 256 \
         -e TS_AUTHKEY=${tailscale_auth_key} \
         -e TS_STATE_DIR=/var/lib/tailscale \
         -e TS_USERSPACE=false \
@@ -62,14 +98,18 @@ write_files:
         -v /var/lib/tailscale:/var/lib/tailscale \
         -v /dev/net/tun:/dev/net/tun \
         --cap-add NET_ADMIN --cap-add NET_RAW \
+        --log-driver json-file --log-opt max-size=10m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
         --cpus 0.5 --memory 256m \
+        --memory-swap 512m \
+        --cpu-shares 512 \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro \
         -v portainer_data:/data \
+        --log-driver json-file --log-opt max-size=10m --log-opt max-file=2 \
         portainer/portainer-ce:latest \
         --admin-password-file /run/secrets/portainer_password
 
