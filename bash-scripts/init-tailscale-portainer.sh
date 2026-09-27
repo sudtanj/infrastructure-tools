@@ -1,29 +1,44 @@
 #!/bin/bash
-# scripts/redeploy-containers.sh
+# bash-scripts/init-tailscale-portainer.sh
 # Runs ON the VM via IAP SSH. Idempotent — safe to run repeatedly.
 # Reuses existing Tailscale state in /var/lib/tailscale.
-# Produces ZERO environment-derived output. Safe for public repos.
+#
+# Starts:
+#   - tailscale        (userspace mode, SOCKS5 proxy on :1055)
+#   - ts-proxy         (transparent proxy sidecar via gost + iptables)
+#   - portainer        (management UI on bridge network)
+#
+# App stacks get transparent tailnet access with:
+#   network_mode: "service:ts-proxy"
+#
+# Fully silent by default. Set VERBOSE=1 for diagnostic output (stderr only).
 
 set -euo pipefail
 
+VERBOSE="${VERBOSE:-0}"
 TS_AUTHKEY="${TS_AUTHKEY:-}"
 TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
+TS_NETWORK="${TS_NETWORK:-tailscale-net}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
 
-log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
+log() { if [ "$VERBOSE" = "1" ]; then printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; fi; }
 
-log "Redeploy started"
+log "Init started"
 
-# --- /dev/net/tun ---
+# --- /dev/net/tun (unused in userspace mode, kept for compatibility) ---
 if [ ! -e /dev/net/tun ]; then
   mkdir -p /dev/net
   mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
   chmod 666 /dev/net/tun >/dev/null 2>&1 || true
 fi
 
+# --- Docker network ---
+docker network create "$TS_NETWORK" >/dev/null 2>&1 || true
+log "Network ready: $TS_NETWORK"
+
 # --- Remove existing containers ---
-docker rm -f portainer tailscale >/dev/null 2>&1 || true
+docker rm -f portainer ts-proxy tailscale >/dev/null 2>&1 || true
 log "Old containers removed"
 
 # --- Detect existing Tailscale state ---
@@ -41,14 +56,14 @@ elif [ -n "$TS_AUTHKEY" ]; then
   log "Authenticating Tailscale with provided key"
   TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
 else
-  log "No state and no auth key — node may stay offline"
+  log "No state and no auth key"
   TS_AUTH_ENV=""
 fi
 
-# --- Start Tailscale (all output suppressed) ---
+# --- Tailscale (userspace, SOCKS5 proxy bound to 0.0.0.0) ---
 # shellcheck disable=SC2086
 docker run -d --name tailscale --restart always \
-  --network host \
+  --network "$TS_NETWORK" \
   --cpus 0.04 --cpu-shares 96 \
   --memory 96m --memory-swap 96m \
   -e GOGC=10 -e GOMEMLIMIT=80MiB \
@@ -58,30 +73,15 @@ docker run -d --name tailscale --restart always \
   -e TS_HOSTNAME="${TS_HOSTNAME}" \
   -e "TS_EXTRA_ARGS=--advertise-tags=tag:home" \
   -e TS_AUTH_ONCE=true -e TS_ACCEPT_DNS=true \
-  -e TS_SOCKS5_SERVER=":${TS_SOCKS5_PORT}" \
-  -e TS_OUTBOUND_HTTP_PROXY_LISTEN=":${TS_SOCKS5_PORT}" \
+  -e TS_SOCKS5_SERVER="0.0.0.0:${TS_SOCKS5_PORT}" \
+  -e TS_OUTBOUND_HTTP_PROXY_LISTEN="0.0.0.0:${TS_SOCKS5_PORT}" \
   -e TZ=Asia/Jakarta \
   -v /var/lib/tailscale:/var/lib/tailscale \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   tailscale/tailscale:latest \
-  >/dev/null
+  >/dev/null 2>&1
 
-# --- Start Portainer (all output suppressed) ---
-docker run -d --name portainer --restart always \
-  --network host \
-  --cpus 0.11 --cpu-shares 288 \
-  --memory 192m --memory-swap 192m \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v portainer_data:/data \
-  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
-  portainer/portainer-ce:latest \
-  --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
-  >/dev/null
-
-docker image prune -f >/dev/null 2>&1 || true
-log "Containers started"
-
-# --- Verify Tailscale is up WITHOUT printing any info ---
+# --- Wait for Tailscale to be ready ---
 TS_READY=0
 for _ in $(seq 1 60); do
   if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
@@ -90,14 +90,40 @@ for _ in $(seq 1 60); do
   fi
   sleep 2
 done
+log "Tailscale ready: ${TS_READY}"
 
-if [ "$TS_READY" -eq 1 ]; then
-  log "Tailscale: connected"
-else
-  log "Tailscale: NOT connected — check 'docker logs tailscale'"
-fi
+# --- Transparent proxy sidecar (gost + iptables) ---
+# Shares its netns with any app that sets network_mode: "service:ts-proxy".
+docker run -d --name ts-proxy --restart always \
+  --network "$TS_NETWORK" \
+  --cap-add NET_ADMIN --cap-add NET_RAW \
+  --cpus 0.03 --cpu-shares 64 \
+  --memory 64m --memory-swap 64m \
+  -e PROXY_SERVER=tailscale \
+  -e PROXY_PORT="${TS_SOCKS5_PORT}" \
+  -e PROXY_TYPE=socks5 \
+  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
+  ghcr.io/xavierlam/proxy-sidecar:latest \
+  >/dev/null 2>&1
+log "ts-proxy started"
 
-# --- Verify SOCKS5 proxy WITHOUT printing any info ---
+# --- Portainer (own bridge network, published ports) ---
+docker run -d --name portainer --restart always \
+  --network bridge \
+  -p 9000:9000 -p 9443:9443 \
+  --cpus 0.11 --cpu-shares 288 \
+  --memory 192m --memory-swap 192m \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v portainer_data:/data \
+  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
+  portainer/portainer-ce:latest \
+  --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
+  >/dev/null 2>&1
+log "Portainer started"
+
+docker image prune -f >/dev/null 2>&1 || true
+
+# --- Verify SOCKS5 proxy is reachable ---
 PROXY_UP=0
 for _ in $(seq 1 30); do
   if docker exec tailscale sh -c "echo > /dev/tcp/127.0.0.1/${TS_SOCKS5_PORT}" 2>/dev/null; then
@@ -106,15 +132,11 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
+log "SOCKS5 ready: ${PROXY_UP}"
 
-if [ "$PROXY_UP" -eq 1 ]; then
-  log "SOCKS5 proxy: listening"
-else
-  log "SOCKS5 proxy: NOT reachable"
+if [ "$TS_READY" -ne 1 ] || [ "$PROXY_UP" -ne 1 ]; then
+  exit 1
 fi
 
-# --- Container status: only report which ones are up, never names/images ---
-RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
-log "Running containers: ${RUNNING}"
-
-log "Redeploy done"
+log "Init done"
+exit 0

@@ -1,0 +1,168 @@
+name: "Run Bash Scripts on GCP VM"
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Script name from bash-scripts/ (or 'all')"
+        required: true
+        default: "all"
+        type: string
+  push:
+    paths:
+      - 'bash-scripts/**'
+      - '.github/workflows/run-bash-scripts.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+  GCP_VM_NAME: ${{ secrets.GCP_VM_NAME }}
+  GCP_ZONE: ${{ secrets.GCP_ZONE }}
+
+jobs:
+  discover:
+    name: "Discover scripts"
+    runs-on: ubuntu-latest
+    outputs:
+      scripts: ${{ steps.list.outputs.scripts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: List scripts
+        id: list
+        env:
+          REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.script || 'all' }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' | sort)
+          else
+            name="${REQUESTED%.sh}"
+            files=("bash-scripts/${name}.sh")
+          fi
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "scripts=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=()
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing script(s): ${missing[*]}"
+            exit 1
+          fi
+          json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
+          echo "scripts=$json" >> "$GITHUB_OUTPUT"
+
+  run:
+    name: "Run"
+    needs: discover
+    if: needs.discover.outputs.scripts != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        script: ${{ fromJson(needs.discover.outputs.scripts) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required config
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in GCP_PROJECT_ID GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT GCP_VM_NAME GCP_ZONE; do
+            [ -z "${!v:-}" ] && missing+=("$v") || true
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Mask sensitive values
+        run: |
+          echo "::add-mask::${GCP_PROJECT_ID}"
+          echo "::add-mask::${GCP_VM_NAME}"
+          echo "::add-mask::${GCP_ZONE}"
+          echo "::add-mask::${GCP_SERVICE_ACCOUNT}"
+          echo "::add-mask::${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+
+      - name: Restore gcloud SDK cache
+        id: gcloud-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/google-cloud-sdk
+            ~/.config/gcloud
+          key: gcloud-sdk-${{ runner.os }}-v1
+          restore-keys: |
+            gcloud-sdk-${{ runner.os }}-
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          create_credentials_file: true
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          skip_install: ${{ steps.gcloud-cache.outputs.cache-hit == 'true' }}
+
+      - name: Configure gcloud and SSH
+        run: |
+          {
+            gcloud config set project "${GCP_PROJECT_ID}" --quiet
+            gcloud config set compute/zone "${GCP_ZONE}" --quiet
+            gcloud config set core/verbosity error --quiet
+          } >/dev/null 2>&1
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          cat > ~/.ssh/config <<'EOF'
+          StrictHostKeyChecking=no
+          UserKnownHostsFile=/dev/null
+          LogLevel=ERROR
+          ServerAliveInterval=30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Run script via IAP SSH
+        env:
+          SCRIPT_PATH: ${{ matrix.script }}
+        run: |
+          set +e
+          LOG=$(mktemp)
+          gcloud compute ssh "${GCP_VM_NAME}" \
+            --zone="${GCP_ZONE}" \
+            --tunnel-through-iap \
+            --quiet \
+            --ssh-key-expire-after=5m \
+            --command="TS_HOSTNAME='${GCP_VM_NAME}' VERBOSE=0 bash -s" \
+            < "${SCRIPT_PATH}" \
+            > "$LOG" 2>&1
+          RC=$?
+          set -e
+
+          if [ "$RC" -eq 0 ]; then
+            grep -E '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}Z\]' "$LOG" || true
+            rm -f "$LOG"
+            exit 0
+          fi
+
+          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC})"
+          grep -E '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}Z\]' "$LOG" || true
+          echo "---- diagnostic (redacted) ----"
+          grep -vE 'Your (identification|public key)|key fingerprint|randomart|SHA256:|SSH keygen|WARNING|NumPy|Updating project|Waiting for SSH|Permanently added|external IP|To increase the performance|\+---|^\|' "$LOG" | tail -40 || true
+          rm -f "$LOG"
+          exit "$RC"
