@@ -20,11 +20,7 @@ terraform {
 }
 
 # --- Provider ---
-provider "google" {
-  # Force any empty string (""), whitespace, or null to evaluate as absolute null
-  project = (var.gcp_project_id != null && var.gcp_project_id != "") ? var.gcp_project_id : null
-  zone    = var.zone
-}
+provider "google" {}
 
 # --- Random ID Generator for Collision Prevention ---
 resource "random_id" "hex" {
