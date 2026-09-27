@@ -1,7 +1,6 @@
 #cloud-config
 # Container-Optimized OS (COS) Cloud-Init
 # Optimized for GCP Always Free Tier e2-micro (0.25 vCPU, 1 GB RAM)
-# Includes: BBR, TCP tuning, ZRAM, CPU/RAM limits, Tailscale userspace fix, Portainer trusted origins
 
 bootcmd:
   # --- DNS64 ---
@@ -29,7 +28,7 @@ bootcmd:
     EOF
   - systemctl restart docker || true
 
-  # --- /dev/net/tun (kept for other potential containers, but not used by Tailscale userspace) ---
+  # --- /dev/net/tun ---
   - mkdir -p /dev/net
   - mknod /dev/net/tun c 10 200 || true
   - chmod 666 /dev/net/tun || true
@@ -64,7 +63,7 @@ bootcmd:
   - sysctl -w vm.min_free_kbytes=16384 2>/dev/null || true
   - sysctl -w vm.overcommit_memory=1 2>/dev/null || true
 
-  # --- ZRAM swap (compressed in-RAM swap, no disk I/O) ---
+  # --- ZRAM swap ---
   - modprobe zram 2>/dev/null || true
   - echo 536870912 > /sys/block/zram0/disksize 2>/dev/null || true
   - mkswap /dev/zram0 2>/dev/null || true
@@ -112,7 +111,7 @@ write_files:
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
-      # Portainer: management UI (trusted origins fix for Tailscale access)
+      # Portainer: management UI
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
         --cpus 0.11 --cpu-shares 288 \
@@ -123,8 +122,7 @@ write_files:
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         portainer/portainer-ce:latest \
         --admin-password-file /run/secrets/portainer_password \
-        --snapshot-interval=15m \
-        --trusted-origins "http://${tailscale_hostname}:9000,https://${tailscale_hostname}:9443,http://${tailscale_ip}:9000,https://${tailscale_ip}:9443"
+        --snapshot-interval=15m
 
       ExecStop=/bin/sh -c 'docker rm -f portainer tailscale || true'
 
