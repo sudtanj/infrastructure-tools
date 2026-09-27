@@ -59,16 +59,6 @@ jobs:
           fi
           echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
 
-      - name: Create Plugin Cache Directory
-        run: mkdir -p ${{ env.TF_PLUGIN_CACHE_DIR }}
-
-      - name: Cache Terraform Providers
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          # Explicit key based on runner OS, TF version, and lockfile hash
-          key: terraform-provider-${{ runner.os }}-1.6.0-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', matrix.dir)) }}
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -131,15 +121,6 @@ jobs:
             CLEAN_DIR="root"
           fi
           echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
-
-      - name: Create Plugin Cache Directory
-        run: mkdir -p ${{ env.TF_PLUGIN_CACHE_DIR }}
-
-      - name: Cache Terraform Providers
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: terraform-provider-${{ runner.os }}-1.6.0-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', matrix.dir)) }}
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
