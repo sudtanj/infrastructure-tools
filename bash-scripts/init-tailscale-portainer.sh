@@ -1,17 +1,17 @@
 #!/bin/bash
 # bash-scripts/init-tailscale-portainer.sh
-# Runs ON the VM via IAP SSH. Idempotent — safe to run repeatedly.
+# Runs ON the VM via IAP SSH. Idempotent.
 # Reuses existing Tailscale state in /var/lib/tailscale.
 #
 # Starts:
-#   - tailscale        (userspace mode, SOCKS5 proxy on :1055)
-#   - ts-proxy         (transparent proxy sidecar via gost + iptables)
-#   - portainer        (management UI on bridge network)
+#   - tailscale   (userspace mode, SOCKS5 proxy on :1055)
+#   - ts-proxy    (transparent proxy sidecar — xavierlam/proxy-sidecar)
+#   - portainer   (management UI on bridge network)
 #
 # App stacks get transparent tailnet access with:
 #   network_mode: "service:ts-proxy"
 #
-# Fully silent by default. Set VERBOSE=1 for diagnostic output (stderr only).
+# Fully silent by default. VERBOSE=1 for diagnostic output (stderr only).
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ log() { if [ "$VERBOSE" = "1" ]; then printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)"
 
 log "Init started"
 
-# --- /dev/net/tun (unused in userspace mode, kept for compatibility) ---
+# --- /dev/net/tun ---
 if [ ! -e /dev/net/tun ]; then
   mkdir -p /dev/net
   mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
@@ -92,8 +92,11 @@ for _ in $(seq 1 60); do
 done
 log "Tailscale ready: ${TS_READY}"
 
-# --- Transparent proxy sidecar (gost + iptables) ---
-# Shares its netns with any app that sets network_mode: "service:ts-proxy".
+# --- Transparent proxy sidecar ---
+# xavierlam/proxy-sidecar intercepts outbound TCP via iptables and
+# forwards through the upstream SOCKS5 proxy (Tailscale's :1055).
+# It must share its network namespace with the app containers that
+# want transparent access — they use network_mode: "service:ts-proxy".
 docker run -d --name ts-proxy --restart always \
   --network "$TS_NETWORK" \
   --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -103,7 +106,7 @@ docker run -d --name ts-proxy --restart always \
   -e PROXY_PORT="${TS_SOCKS5_PORT}" \
   -e PROXY_TYPE=socks5 \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
-  ghcr.io/xavierlam/proxy-sidecar:latest \
+  xavierlam/proxy-sidecar:latest \
   >/dev/null 2>&1
 log "ts-proxy started"
 
