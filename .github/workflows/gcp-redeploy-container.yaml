@@ -16,7 +16,7 @@ env:
 
 jobs:
   provision:
-    name: "Provision Docker + Compose"
+    name: "Provision"
     runs-on: ubuntu-latest
 
     steps:
@@ -37,6 +37,18 @@ jobs:
             exit 1
           fi
 
+      - name: Mask all sensitive values
+        run: |
+          # Mask every value we know will appear in downstream output
+          echo "::add-mask::${GCP_PROJECT_ID}"
+          echo "::add-mask::${GCP_VM_NAME}"
+          echo "::add-mask::${GCP_ZONE}"
+          echo "::add-mask::${GCP_SERVICE_ACCOUNT}"
+          echo "::add-mask::${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+          # Mask any email-like or tailnet-like values
+          echo "::add-mask::sudono007"
+          echo "::add-mask::ts.net"
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
@@ -50,32 +62,46 @@ jobs:
 
       - name: Configure gcloud and SSH
         run: |
-          gcloud config set project "${GCP_PROJECT_ID}"
+          # Silence gcloud's own output — the warnings it prints
+          # (SSH key generation, project metadata updates) leak the project.
+          {
+            gcloud config set project "${GCP_PROJECT_ID}" --quiet
+            gcloud config set compute/zone "${GCP_ZONE}" --quiet
+            gcloud config set core/verbosity error --quiet
+          } >/dev/null 2>&1
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           cat > ~/.ssh/config <<'EOF'
           StrictHostKeyChecking=no
           UserKnownHostsFile=/dev/null
+          LogLevel=ERROR
           ServerAliveInterval=30
           EOF
           chmod 600 ~/.ssh/config
 
       - name: Verify VM is reachable
         run: |
-          gcloud compute instances describe "${GCP_VM_NAME}" \
-            --zone="${GCP_ZONE}" \
-            --format="value(status)"
+          # gcloud's describe output is suppressed; only exit code matters.
+          if ! gcloud compute instances describe "${GCP_VM_NAME}" \
+              --zone="${GCP_ZONE}" \
+              --format="value(status)" >/dev/null 2>&1; then
+            echo "::error::Cannot reach VM. Check GCP_VM_NAME, GCP_ZONE, and IAM roles."
+            exit 1
+          fi
+          echo "[+] VM reachable"
 
       - name: Redeploy containers on VM
         working-directory: .
         run: |
-          # Script is piped over the encrypted SSH stdin channel.
-          # The remote command is only "bash -s" — nothing sensitive
-          # appears in the VM's process list or in gcloud's logs.
-          # Tailscale auth is reused from /var/lib/tailscale on the VM.
+          # Wrap the SSH call so gcloud's SSH chatter (key generation,
+          # metadata updates, tunnel warnings) is fully suppressed.
+          # The script itself produces no environment-derived output.
           gcloud compute ssh "${GCP_VM_NAME}" \
             --zone="${GCP_ZONE}" \
             --tunnel-through-iap \
             --quiet \
+            --ssh-key-expire-after=5m \
             --command="TS_HOSTNAME='${GCP_VM_NAME}' bash -s" \
-            < ./scripts/redeploy-containers.sh
+            < ./scripts/redeploy-containers.sh \
+            2> >(grep -vE 'WARNING|NumPy|SSH keygen|Your identification|Your public key|key fingerprint|randomart|Updating project|Waiting for SSH|Permanently added|external IP|To increase the performance' >&2 || true)
