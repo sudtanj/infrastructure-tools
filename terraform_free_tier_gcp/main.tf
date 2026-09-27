@@ -8,11 +8,7 @@ terraform {
   }
 }
 
-provider "google" {
-  project = var.gcp_project_id
-  region  = var.gcp_region
-  zone    = var.gcp_zone
-}
+provider "google" {}
 
 # ==============================================================================
 # Template Rendering & Rebuild Trigger
@@ -58,7 +54,6 @@ resource "google_compute_firewall" "allow_iap_ssh" {
 resource "google_compute_instance" "free_tier_vm" {
   name         = "gcp-free-tier-vm"
   machine_type = "e2-micro" # Eligible for GCP Always Free Tier in US regions
-  zone         = var.gcp_zone
 
   tags = ["free-tier-vm"]
 
