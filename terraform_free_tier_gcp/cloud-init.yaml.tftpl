@@ -1,7 +1,7 @@
 #cloud-config
 # Container-Optimized OS (COS) Cloud-Init
 # Optimized for GCP Always Free Tier e2-micro (0.25 vCPU, 1 GB RAM)
-# Tuned to leave headroom for additional Portainer-managed stacks
+# Includes: BBR, TCP tuning, ZRAM, CPU/RAM limits, Tailscale userspace fix, Portainer trusted origins
 
 bootcmd:
   # --- DNS64 ---
@@ -29,7 +29,7 @@ bootcmd:
     EOF
   - systemctl restart docker || true
 
-  # --- /dev/net/tun for Tailscale ---
+  # --- /dev/net/tun (kept for other potential containers, but not used by Tailscale userspace) ---
   - mkdir -p /dev/net
   - mknod /dev/net/tun c 10 200 || true
   - chmod 666 /dev/net/tun || true
@@ -93,7 +93,7 @@ write_files:
       RemainAfterExit=yes
       ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
 
-      # Tailscale: minimal footprint, aggressive Go GC
+      # Tailscale: userspace mode (fixes host-network accessibility from tailnet)
       ExecStart=/usr/bin/docker run -d --name tailscale --restart always \
         --network host \
         --cpus 0.04 --cpu-shares 96 \
@@ -102,20 +102,17 @@ write_files:
         -e GOMEMLIMIT=80MiB \
         -e TS_AUTHKEY=${tailscale_auth_key} \
         -e TS_STATE_DIR=/var/lib/tailscale \
-        -e TS_USERSPACE=false \
+        -e TS_USERSPACE=true \
         -e TS_HOSTNAME=gcp-free-tier-vm \
-        -e TS_SOCKET=/var/run/tailscale/tailscaled.sock \
-        -e "TS_EXTRA_ARGS=--advertise-tags=tag:home --accept-routes" \
+        -e "TS_EXTRA_ARGS=--advertise-tags=tag:home" \
         -e TS_AUTH_ONCE=true \
         -e TS_ACCEPT_DNS=true \
         -e TZ=Asia/Jakarta \
         -v /var/lib/tailscale:/var/lib/tailscale \
-        -v /dev/net/tun:/dev/net/tun \
-        --cap-add NET_ADMIN --cap-add NET_RAW \
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         tailscale/tailscale:latest
 
-      # Portainer: management UI only — stacks run as separate containers with their own limits
+      # Portainer: management UI (trusted origins fix for Tailscale access)
       ExecStart=/usr/bin/docker run -d --name portainer --restart always \
         --network host \
         --cpus 0.11 --cpu-shares 288 \
@@ -126,7 +123,8 @@ write_files:
         --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
         portainer/portainer-ce:latest \
         --admin-password-file /run/secrets/portainer_password \
-        --snapshot-interval=15m
+        --snapshot-interval=15m \
+        --trusted-origins "http://${tailscale_hostname}:9000,https://${tailscale_hostname}:9443,http://${tailscale_ip}:9000,https://${tailscale_ip}:9443"
 
       ExecStop=/bin/sh -c 'docker rm -f portainer tailscale || true'
 
