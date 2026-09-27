@@ -1,26 +1,34 @@
 #cloud-config
-# Container-Optimized OS (COS) Cloud-Init for Portainer CE + Tailscale (Host Networking)
+# Container-Optimized OS (COS) Cloud-Init with DNS64 & Host Networking
 
 write_files:
-  # 1. Standalone Docker Compose runner script (escaped $$PWD for Terraform templatefile)
-  - path: /var/lib/docker-compose/docker-compose
+  # 0. Force DNS64 Nameservers on boot for IPv6-only container environment resolution
+  - path: /etc/resolv.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      nameserver 2001:4860:4860::6464
+      nameserver 2001:4860:4860::64
+
+  # 1. Standalone Docker Compose runner script
+  - path: /var/lib/docker/bin/docker-compose
     permissions: "0755"
     owner: root:root
     content: |
       #!/bin/sh
-      exec docker run --rm -i \
+      exec docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "$$PWD:$$PWD" \
         -w "$$PWD" \
         docker/compose:1.29.2 "$$@"
 
-  # 2. Store Portainer Password Hash securely on disk (quoted to prevent YAML syntax errors)
+  # 2. Store Portainer Password Hash securely on disk
   - path: /var/lib/portainer/password.txt
     permissions: "0600"
     owner: root:root
     content: "${portainer_admin_password_hash}"
 
-  # 3. Docker Compose Stack with Host Networking
+  # 3. Docker Compose Stack with Host Networking & DNS64 resolution
   - path: /var/lib/services/docker-compose.yml
     permissions: "0644"
     owner: root:root
@@ -32,10 +40,18 @@ write_files:
           container_name: tailscale
           hostname: gcp-free-tier-vm
           network_mode: host
+          cpus: 0.25
+          mem_limit: 256m
           environment:
             - TS_AUTHKEY=${tailscale_auth_key}
             - TS_STATE_DIR=/var/lib/tailscale
             - TS_USERSPACE=false
+            - TS_HOSTNAME=gcp-free-tier-vm
+            - TS_SOCKET=/var/run/tailscale/tailscaled.sock
+            - TS_EXTRA_ARGS=--advertise-tags=tag:home --accept-routes
+            - TS_AUTH_ONCE=true
+            - TS_ACCEPT_DNS=true
+            - TZ=Asia/Jakarta
           volumes:
             - /var/lib/tailscale:/var/lib/tailscale
             - /dev/net/tun:/dev/net/tun
@@ -72,14 +88,14 @@ write_files:
       Type=oneshot
       RemainAfterExit=yes
       WorkingDirectory=/var/lib/services
-      ExecStart=/usr/local/bin/docker-compose up -d
-      ExecStop=/usr/local/bin/docker-compose down
+      ExecStart=/var/lib/docker/bin/docker-compose up -d
+      ExecStop=/var/lib/docker/bin/docker-compose down
 
       [Install]
       WantedBy=multi-user.target
 
 runcmd:
-  - ln -sf /var/lib/docker-compose/docker-compose /usr/local/bin/docker-compose
+  - mkdir -p /var/lib/docker/bin
   - systemctl daemon-reload
   - systemctl enable containers.service
   - systemctl start containers.service
