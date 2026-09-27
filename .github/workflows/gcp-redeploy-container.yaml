@@ -1,0 +1,83 @@
+name: "Redeploy Containers via IAP"
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for redeploy (optional)"
+        required: false
+        default: "manual trigger"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  redeploy:
+    name: "Redeploy Containers"
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ secrets.GCP_ZONE }}
+      VM_NAME: ${{ secrets.GCP_VM_NAME }}
+      TS_HOSTNAME: ${{ secrets.GCP_VM_NAME }}   # reuse VM name as Tailscale hostname
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # Avoid the host-key prompt; IAP tunnels are already encrypted end-to-end
+          echo "StrictHostKeyChecking=no" > ~/.ssh/config
+          echo "UserKnownHostsFile=/dev/null" >> ~/.ssh/config
+
+      - name: Verify VM is running
+        run: |
+          gcloud compute instances describe "${VM_NAME}" \
+            --zone="${GCP_ZONE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format="value(status)"
+
+      - name: Redeploy containers via IAP SSH
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          # Secret is delivered over the encrypted SSH stdin channel.
+          # The remote command is only "bash -s" — nothing sensitive
+          # appears in the VM's process list or in SSH logs.
+          #
+          # The preamble exports TS_AUTHKEY, then the script body follows.
+          {
+            printf 'export TS_AUTHKEY=%q\n' "${TS_AUTHKEY}"
+            printf 'export TS_HOSTNAME=%q\n' "${VM_NAME}"
+            cat scripts/redeploy-containers.sh
+          } | gcloud compute ssh "${VM_NAME}" \
+                --zone="${GCP_ZONE}" \
+                --project="${GCP_PROJECT_ID}" \
+                --tunnel-through-iap \
+                --quiet \
+                --command="bash -s"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Redeploy summary"
+            echo "- **VM**: \`${VM_NAME}\`"
+            echo "- **Zone**: \`${GCP_ZONE}\`"
+            echo "- **Reason**: ${{ inputs.reason }}"
+            echo "- **Status**: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
