@@ -1,98 +1,95 @@
 terraform {
   required_version = ">= 1.5.0"
-
-  # Dynamic HCP Terraform Remote State Backend
-  # Values for organization and workspace are injected via environment variables:
-  # - TF_CLOUD_ORGANIZATION
-  # - TF_WORKSPACE
-  cloud {}
-
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.45.3" # Re-signed version post-key rotation (or ~> 6.0)
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = ">= 3.6.0"
+      version = "~> 5.0"
     }
   }
 }
 
-# --- Provider ---
-provider "google" {}
-
-# --- Random ID Generator for Collision Prevention ---
-resource "random_id" "hex" {
-  byte_length = 4
+provider "google" {
+  project = var.gcp_project_id
+  region  = var.gcp_region
+  zone    = var.gcp_zone
 }
 
-# --- Service Account for VM ---
-resource "google_service_account" "vm_sa" {
-  account_id   = "free-tier-vm-sa-${random_id.hex.hex}"
-  display_name = "Free Tier VM Service Account"
-}
-
-# --- Local Metadata Configuration ---
+# ==============================================================================
+# Template Rendering & Rebuild Trigger
+# ==============================================================================
 locals {
-  vm_metadata = {
-    user-data = file("${path.module}/cloud-init.yaml")
-  }
+  rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
+    tailscale_auth_key            = var.tailscale_auth_key
+    portainer_admin_password_hash = var.portainer_admin_password_hash
+  })
 }
 
-# --- Trigger to force VM recreation when cloud-init changes ---
+# Generates a hash of the rendered cloud-init to trigger instance recreation on config changes
 resource "terraform_data" "cloud_init_trigger" {
-  input = filemd5("${path.module}/cloud-init.yaml")
+  input = sha256(local.rendered_cloud_init)
 }
 
-# --- Compute Instance (Container-Optimized OS) ---
-resource "google_compute_instance" "free_tier_vm" {
-  name                = "gcp-free-tier-vm-${random_id.hex.hex}"
-  machine_type        = "e2-micro" # Always Free Tier eligible
-  zone                = var.zone
-  deletion_protection = false
+# ==============================================================================
+# Networking & Security
+# ==============================================================================
+resource "google_compute_network" "vpc_network" {
+  name                    = "free-tier-vpc"
+  auto_create_subnetworks = true
+}
 
-  tags = ["free-tier-instance"]
+# Allow GCP IAP (Identity-Aware Proxy) for secure SSH access without public IP exposure
+resource "google_compute_firewall" "allow_iap_ssh" {
+  name    = "allow-iap-ssh"
+  network = google_compute_network.vpc_network.name
 
-  labels = {
-    environment = "free-tier"
-    managed_by  = "terraform"
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
   }
+
+  # GCP Identity-Aware Proxy IP range
+  source_ranges = ["35.235.240.0/20"]
+  target_tags   = ["free-tier-vm"]
+}
+
+# ==============================================================================
+# Compute Instance (GCP Always Free Tier Compliant)
+# ==============================================================================
+resource "google_compute_instance" "free_tier_vm" {
+  name         = "gcp-free-tier-vm"
+  machine_type = "e2-micro" # Eligible for GCP Always Free Tier in US regions
+  zone         = var.gcp_zone
+
+  tags = ["free-tier-vm"]
 
   boot_disk {
+    auto_delete = true
     initialize_params {
-      image = "cos-cloud/cos-stable" # Container-Optimized OS
-      size  = 30                     # Max 30 GB pd-standard (Free Tier limit)
+      # Container-Optimized OS (COS) stable image
+      image = "cos-cloud/cos-stable"
+      size  = 30 # Max free tier disk allocation is 30GB Standard Persistent Disk
       type  = "pd-standard"
     }
   }
 
   network_interface {
-    network    = "default"
-    subnetwork = "default"
+    network = google_compute_network.vpc_network.name
 
-    stack_type = "IPV4_IPV6"
-
-    # Assign public IPv6 address
-    ipv6_access_config {
-      network_tier = "PREMIUM"
+    # Assigns an ephemeral public IP for outbound internet access (required for Tailscale/Docker image pulls)
+    access_config {
+      network_tier = "STANDARD"
     }
+  }
 
-    # Omitted external access_config block prevents public IPv4 address charges ($0 cost)
+  metadata = {
+    # sensitive() masks rendered cloud-init contents (including secrets) from terraform plan outputs
+    user-data = sensitive(local.rendered_cloud_init)
   }
 
   scheduling {
-    automatic_restart   = true
-    on_host_maintenance = "MIGRATE"
-    preemptible         = false
+    preemptible       = false
+    automatic_restart = true
   }
-
-  service_account {
-    email  = google_service_account.vm_sa.email
-    scopes = ["cloud-platform"]
-  }
-
-  metadata = local.vm_metadata
 
   lifecycle {
     create_before_destroy = false
@@ -100,44 +97,15 @@ resource "google_compute_instance" "free_tier_vm" {
   }
 }
 
-# --- Firewall: Allow IAP SSH Access (IPv4 Ingress for gcloud compute ssh) ---
-resource "google_compute_firewall" "allow_iap_ssh" {
-  name        = "allow-iap-ssh-${random_id.hex.hex}"
-  network     = "default"
-  description = "Allow SSH access through GCP Identity-Aware Proxy (IAP)"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["22"]
-  }
-
-  # Official GCP IAP ingress range
-  source_ranges = ["35.235.240.0/20"]
-  target_tags   = ["free-tier-instance"]
-}
-
-# --- Firewall: Allow Portainer Web UI (IPv6) ---
-resource "google_compute_firewall" "allow_portainer_ipv6" {
-  name        = "allow-portainer-ipv6-${random_id.hex.hex}"
-  network     = "default"
-  description = "Allow inbound Portainer Web UI access over IPv6"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["9000", "9443"]
-  }
-
-  source_ranges = ["::/0"]
-  target_tags   = ["free-tier-instance"]
-}
-
-# --- Outputs ---
-output "vm_name" {
+# ==============================================================================
+# Outputs
+# ==============================================================================
+output "instance_name" {
+  description = "The name of the VM instance created"
   value       = google_compute_instance.free_tier_vm.name
-  description = "The name of the deployed compute instance."
 }
 
-output "instance_ipv6" {
-  value       = google_compute_instance.free_tier_vm.network_interface[0].ipv6_access_config[0].external_ipv6
-  description = "Public IPv6 address of the instance."
+output "instance_id" {
+  description = "The server-assigned unique identifier for the instance"
+  value       = google_compute_instance.free_tier_vm.instance_id
 }

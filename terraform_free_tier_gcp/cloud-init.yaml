@@ -1,54 +1,78 @@
 #cloud-config
-# Container-Optimized OS (COS) Cloud-Init for Docker Compose & Portainer
+# Container-Optimized OS (COS) Cloud-Init with Secure Credentials
 
 write_files:
-  # 1. Standalone Docker Compose runner script (uses official docker/compose container)
+  # 1. Standalone Docker Compose runner script
   - path: /var/lib/docker-compose/docker-compose
     permissions: "0755"
     owner: root:root
     content: |
       #!/bin/sh
-      exec docker run --rm -it \
+      exec docker run --rm -i \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "$PWD:$PWD" \
         -w "$PWD" \
         docker/compose:1.29.2 "$@"
 
-  # 2. Portainer Docker Compose configuration file
-  - path: /var/lib/portainer/docker-compose.yml
+  # 2. Store Portainer Password Hash securely on disk (Restricted 0600 permissions)
+  - path: /var/lib/portainer/password.txt
+    permissions: "0600"
+    owner: root:root
+    content: |
+      ${portainer_admin_password_hash}
+
+  # 3. Docker Compose Stack with Host Networking
+  - path: /var/lib/services/docker-compose.yml
     permissions: "0644"
     owner: root:root
     content: |
       version: '3.8'
       services:
+        tailscale:
+          image: tailscale/tailscale:latest
+          container_name: tailscale
+          hostname: gcp-free-tier-vm
+          network_mode: host
+          environment:
+            - TS_AUTHKEY=${tailscale_auth_key}
+            - TS_STATE_DIR=/var/lib/tailscale
+            - TS_USERSPACE=false
+          volumes:
+            - /var/lib/tailscale:/var/lib/tailscale
+            - /dev/net/tun:/dev/net/tun
+          cap_add:
+            - NET_ADMIN
+            - NET_RAW
+          restart: always
+
         portainer:
           image: portainer/portainer-ce:latest
           container_name: portainer
+          network_mode: host
+          command: --admin-password-file /run/secrets/portainer_password
           restart: always
-          ports:
-            - "9000:9000"
-            - "9443:9443"
           volumes:
             - /var/run/docker.sock:/var/run/docker.sock
+            - /var/lib/portainer/password.txt:/run/secrets/portainer_password:ro
             - portainer_data:/data
 
       volumes:
         portainer_data:
 
-  # 3. Systemd service to auto-start Portainer on boot via docker-compose
-  - path: /etc/systemd/system/portainer.service
+  # 4. Systemd service runner
+  - path: /etc/systemd/system/containers.service
     permissions: "0644"
     owner: root:root
     content: |
       [Unit]
-      Description=Portainer Docker Compose Service
+      Description=Portainer & Tailscale Docker Compose Service
       After=docker.service
       Requires=docker.service
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      WorkingDirectory=/var/lib/portainer
+      WorkingDirectory=/var/lib/services
       ExecStart=/usr/local/bin/docker-compose up -d
       ExecStop=/usr/local/bin/docker-compose down
 
@@ -56,10 +80,7 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  # 1. Symlink docker-compose wrapper script to global PATH
   - ln -sf /var/lib/docker-compose/docker-compose /usr/local/bin/docker-compose
-
-  # 2. Enable and start the Portainer systemd service
   - systemctl daemon-reload
-  - systemctl enable portainer.service
-  - systemctl start portainer.service
+  - systemctl enable containers.service
+  - systemctl start containers.service
