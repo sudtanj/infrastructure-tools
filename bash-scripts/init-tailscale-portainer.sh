@@ -3,18 +3,14 @@
 # Runs ON the VM via IAP SSH. Idempotent.
 # Reuses existing Tailscale state in /var/lib/tailscale.
 #
-# Builds a custom transparent proxy sidecar locally (no external image),
-# then starts: tailscale, ts-sidecar, portainer.
+# Builds a redsocks-based transparent proxy sidecar locally, then starts:
+#   tailscale, ts-sidecar, portainer.
 #
 # App stacks get transparent tailnet access with:
 #   network_mode: "service:ts-sidecar"
-#
-# All output is a fixed set of status lines. No IPs, hostnames, peer names,
-# container names, image tags, paths, or command output are ever printed.
 
 set -euo pipefail
 
-VERBOSE="${VERBOSE:-0}"
 TS_AUTHKEY="${TS_AUTHKEY:-}"
 TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
@@ -28,18 +24,15 @@ fail()   { printf '[!] %s\n' "$*" >&2; exit 1; }
 
 status "init start"
 
-# --- /dev/net/tun ---
 if [ ! -e /dev/net/tun ]; then
   sudo mkdir -p /dev/net 2>/dev/null || true
   sudo mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
   sudo chmod 666 /dev/net/tun >/dev/null 2>&1 || true
 fi
 
-# --- Docker network ---
 docker network create "$TS_NETWORK" >/dev/null 2>&1 || true
 status "network ready"
 
-# --- Remove existing containers ---
 docker rm -f portainer ts-sidecar tailscale >/dev/null 2>&1 || true
 status "old containers removed"
 
@@ -50,12 +43,7 @@ mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
 FROM alpine:3.20
 
-RUN apk add --no-cache iptables iproute2 curl
-
-ARG GOST_VERSION=v2.11.5
-RUN curl -fsSL "https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION#v}.gz" \
-    | gunzip > /usr/local/bin/gost \
-    && chmod +x /usr/local/bin/gost
+RUN apk add --no-cache redsocks iptables iproute2
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -69,11 +57,30 @@ set -e
 
 PROXY_SERVER="${PROXY_SERVER:-tailscale}"
 PROXY_PORT="${PROXY_PORT:-1055}"
+LOCAL_PORT="${LOCAL_PORT:-12345}"
 
-gost -L "redirect://:12345" -F "socks5://${PROXY_SERVER}:${PROXY_PORT}" &
+cat > /etc/redsocks.conf <<EOF
+base {
+    log_debug = off;
+    log_info = off;
+    log = "stderr";
+    daemon = off;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = ${LOCAL_PORT};
+    ip = ${PROXY_SERVER};
+    port = ${PROXY_PORT};
+    type = socks5;
+}
+EOF
+
+redsocks -c /etc/redsocks.conf &
 
 for i in $(seq 1 30); do
-  if (echo > /dev/tcp/127.0.0.1/12345) 2>/dev/null; then
+  if (echo > /dev/tcp/127.0.0.1/${LOCAL_PORT}) 2>/dev/null; then
     break
   fi
   sleep 1
@@ -88,7 +95,7 @@ for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
   iptables -t nat -A REDSOCKS -d "$cidr" -j RETURN
 done
 
-iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
+iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports ${LOCAL_PORT}
 iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
 
 exec tail -f /dev/null
@@ -118,7 +125,6 @@ else
   TS_AUTH_ENV=""
 fi
 
-# --- Start Tailscale ---
 # shellcheck disable=SC2086
 docker run -d --name tailscale --restart always \
   --network "$TS_NETWORK" \
@@ -154,7 +160,6 @@ else
   status "tailscale: NOT connected"
 fi
 
-# --- Start the sidecar ---
 docker run -d --name ts-sidecar --restart always \
   --network "$TS_NETWORK" \
   --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -174,7 +179,6 @@ else
   status "sidecar: NOT running"
 fi
 
-# --- Start Portainer ---
 docker run -d --name portainer --restart always \
   --network bridge \
   -p 9000:9000 -p 9443:9443 \
@@ -190,7 +194,6 @@ status "portainer: started"
 
 docker image prune -f >/dev/null 2>&1 || true
 
-# --- Verify SOCKS5 proxy ---
 PROXY_UP=0
 for _ in $(seq 1 30); do
   if docker exec tailscale sh -c "echo > /dev/tcp/127.0.0.1/${TS_SOCKS5_PORT}" 2>/dev/null; then
