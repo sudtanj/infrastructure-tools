@@ -4,7 +4,7 @@
 # Reuses existing Tailscale state in /var/lib/tailscale.
 #
 # Builds a redsocks-based transparent proxy sidecar locally, then starts:
-#   tailscale, ts-sidecar, portainer.
+#   tailscale (host network), ts-sidecar (bridge), portainer (bridge).
 #
 # App stacks get transparent tailnet access with:
 #   network_mode: "service:ts-sidecar"
@@ -31,7 +31,6 @@ redact() {
     || true
 }
 
-# Returns the container's state (running / exited / missing), never its name.
 container_state() {
   docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo "missing"
 }
@@ -179,13 +178,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Start Tailscale
+# 5. Start Tailscale on host network
+#    Host network is required because the VM's resolv.conf is IPv6-only DNS64,
+#    and Docker bridge networks are IPv4-only — Tailscale can't reach its
+#    control plane otherwise.
 # ---------------------------------------------------------------------------
 step "starting tailscale"
 
 # shellcheck disable=SC2086
 if ! docker run -d --name tailscale --restart always \
-  --network "$TS_NETWORK" \
+  --network host \
   --cpus 0.04 --cpu-shares 96 \
   --memory 96m --memory-swap 96m \
   -e GOGC=10 -e GOMEMLIMIT=80MiB \
@@ -206,7 +208,6 @@ if ! docker run -d --name tailscale --restart always \
 fi
 ok "tailscale container started"
 
-# Give the container a moment to either stabilize or crash
 sleep 5
 STATE=$(container_state tailscale)
 if [ "$STATE" != "running" ]; then
@@ -220,7 +221,6 @@ ok "tailscale container stayed up"
 step "waiting for tailscale to connect"
 TS_READY=0
 for i in $(seq 1 60); do
-  # Re-check the container hasn't crashed while we wait
   STATE=$(container_state tailscale)
   if [ "$STATE" != "running" ]; then
     warn "tailscale container died while waiting (state=${STATE})"
@@ -243,12 +243,15 @@ fi
 
 # ---------------------------------------------------------------------------
 # 7. Start the sidecar
+#    Uses --add-host to map the "tailscale" name to the Docker host gateway,
+#    so it can reach the SOCKS5 proxy on the host's port 1055 without DNS.
 # ---------------------------------------------------------------------------
 step "starting sidecar"
 
 if ! docker run -d --name ts-sidecar --restart always \
   --network "$TS_NETWORK" \
   --cap-add NET_ADMIN --cap-add NET_RAW \
+  --add-host=tailscale:host-gateway \
   --cpus 0.05 --cpu-shares 128 \
   --memory 128m --memory-swap 128m \
   -e PROXY_SERVER=tailscale \
@@ -299,7 +302,7 @@ docker image prune -f >/dev/null 2>&1 || true
 ok "prune done"
 
 # ---------------------------------------------------------------------------
-# 10. Verify SOCKS5 proxy is reachable
+# 10. Verify SOCKS5 proxy is reachable from inside Tailscale
 # ---------------------------------------------------------------------------
 step "verifying socks5 proxy"
 PROXY_UP=0
@@ -324,7 +327,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Summary
+# 11. Verify the sidecar can reach the SOCKS5 proxy through the host gateway
+# ---------------------------------------------------------------------------
+step "verifying sidecar to proxy path"
+SIDECAR_PATH=0
+if [ "$(container_state ts-sidecar)" = "running" ]; then
+  if docker exec ts-sidecar sh -c "echo > /dev/tcp/tailscale/${TS_SOCKS5_PORT}" 2>/dev/null; then
+    SIDECAR_PATH=1
+    ok "sidecar can reach proxy"
+  else
+    warn "sidecar cannot reach proxy via host gateway"
+  fi
+else
+  warn "sidecar not running — cannot check path"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. Summary
 # ---------------------------------------------------------------------------
 step "summary"
 
@@ -332,8 +351,12 @@ RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 status "containers running: ${RUNNING}"
 status "tailscale ready: ${TS_READY}"
 status "socks5 ready: ${PROXY_UP}"
+status "sidecar path ready: ${SIDECAR_PATH}"
 
 if [ "$PROXY_UP" -ne 1 ]; then
+  fail "init failed"
+fi
+if [ "$SIDECAR_PATH" -ne 1 ]; then
   fail "init failed"
 fi
 
