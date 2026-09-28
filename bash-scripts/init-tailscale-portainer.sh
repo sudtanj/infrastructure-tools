@@ -9,7 +9,8 @@
 # App stacks get transparent tailnet access with:
 #   network_mode: "service:ts-sidecar"
 #
-# Emits minimal status lines. No IPs, peer names, container names, or paths.
+# All output is a fixed set of status lines. No IPs, hostnames, peer names,
+# container names, image tags, paths, or command output are ever printed.
 
 set -euo pipefail
 
@@ -23,16 +24,15 @@ PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
 BUILD_DIR="/tmp/ts-sidecar-build"
 
 status() { printf '[*] %s\n' "$*"; }
-debug() { if [ "$VERBOSE" = "1" ]; then printf '[dbg] %s\n' "$*" >&2; fi; }
+fail()   { printf '[!] %s\n' "$*" >&2; exit 1; }
 
 status "init start"
 
 # --- /dev/net/tun ---
 if [ ! -e /dev/net/tun ]; then
-  mkdir -p /dev/net 2>/dev/null || sudo mkdir -p /dev/net
+  sudo mkdir -p /dev/net 2>/dev/null || true
   sudo mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
   sudo chmod 666 /dev/net/tun >/dev/null 2>&1 || true
-  debug "created /dev/net/tun"
 fi
 
 # --- Docker network ---
@@ -45,12 +45,17 @@ status "old containers removed"
 
 # --- Build the sidecar image locally ---
 status "building sidecar image"
-mkdir -p "$BUILD_DIR"
+mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 
 cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
 FROM alpine:3.20
 
-RUN apk add --no-cache gost iptables iproute2
+RUN apk add --no-cache iptables iproute2 curl
+
+ARG GOST_VERSION=v2.11.5
+RUN curl -fsSL "https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION#v}.gz" \
+    | gunzip > /usr/local/bin/gost \
+    && chmod +x /usr/local/bin/gost
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -65,7 +70,6 @@ set -e
 PROXY_SERVER="${PROXY_SERVER:-tailscale}"
 PROXY_PORT="${PROXY_PORT:-1055}"
 
-echo "starting gost proxy"
 gost -L "redirect://:12345" -F "socks5://${PROXY_SERVER}:${PROXY_PORT}" &
 
 for i in $(seq 1 30); do
@@ -74,8 +78,6 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
-
-echo "configuring iptables"
 
 iptables -t nat -N REDSOCKS 2>/dev/null || true
 iptables -t nat -F REDSOCKS
@@ -89,11 +91,12 @@ done
 iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
 iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
 
-echo "sidecar ready"
 exec tail -f /dev/null
 ENTRYPOINT
 
-docker build -t "$SIDECAR_IMAGE" "$BUILD_DIR" >/dev/null 2>&1
+if ! docker build -t "$SIDECAR_IMAGE" "$BUILD_DIR" >/dev/null 2>&1; then
+  fail "sidecar build failed"
+fi
 status "sidecar image built"
 
 # --- Detect existing Tailscale state ---
@@ -111,11 +114,11 @@ elif [ -n "$TS_AUTHKEY" ]; then
   status "tailscale: authenticating with provided key"
   TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
 else
-  status "tailscale: no state and no auth key (may stay offline)"
+  status "tailscale: no state and no auth key"
   TS_AUTH_ENV=""
 fi
 
-# --- Start Tailscale on the dedicated network ---
+# --- Start Tailscale ---
 # shellcheck disable=SC2086
 docker run -d --name tailscale --restart always \
   --network "$TS_NETWORK" \
@@ -134,7 +137,7 @@ docker run -d --name tailscale --restart always \
   -v /var/lib/tailscale:/var/lib/tailscale \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   tailscale/tailscale:latest \
-  >/dev/null 2>&1
+  >/dev/null 2>&1 || fail "tailscale failed to start"
 
 TS_READY=0
 for _ in $(seq 1 60); do
@@ -161,14 +164,14 @@ docker run -d --name ts-sidecar --restart always \
   -e PROXY_PORT="${TS_SOCKS5_PORT}" \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   "$SIDECAR_IMAGE" \
-  >/dev/null 2>&1
+  >/dev/null 2>&1 || fail "sidecar failed to start"
 
 sleep 5
 SIDECAR_STATE=$(docker inspect -f '{{.State.Status}}' ts-sidecar 2>/dev/null || echo "missing")
 if [ "$SIDECAR_STATE" = "running" ]; then
   status "sidecar: running"
 else
-  status "sidecar: NOT running (state=${SIDECAR_STATE})"
+  status "sidecar: NOT running"
 fi
 
 # --- Start Portainer ---
@@ -182,7 +185,7 @@ docker run -d --name portainer --restart always \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   portainer/portainer-ce:latest \
   --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
-  >/dev/null 2>&1
+  >/dev/null 2>&1 || fail "portainer failed to start"
 status "portainer: started"
 
 docker image prune -f >/dev/null 2>&1 || true
