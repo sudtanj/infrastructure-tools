@@ -46,11 +46,12 @@ status "building sidecar image"
 mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 
 cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
-FROM alpine:3.20
+FROM debian:bookworm-slim
 
-RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.20/community" >> /etc/apk/repositories \
-    && apk update \
-    && apk add --no-cache redsocks iptables iproute2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       redsocks iptables iproute2 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -84,7 +85,7 @@ redsocks {
 }
 EOF
 
-redsocks -c /etc/redsocks.conf &
+/usr/sbin/redsocks -c /etc/redsocks.conf &
 
 for i in $(seq 1 30); do
   if (echo > /dev/tcp/127.0.0.1/${LOCAL_PORT}) 2>/dev/null; then
