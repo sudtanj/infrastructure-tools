@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       script:
-        description: "Script name from bash-scripts/ (or 'all')"
+        description: "Script to run"
         required: true
         default: "all"
-        type: string
-  push:
-    paths:
-      - 'bash-scripts/**'
-      - '.github/workflows/run-bash-scripts.yml'
-
+        type: choice
+        options:
+          - all
+          - init-tailscale-portainer
+          - init-paseo-codex
+          # add new script names here as you create them
 permissions:
   id-token: write
   contents: read
@@ -67,12 +67,6 @@ jobs:
     if: needs.discover.outputs.scripts != '[]'
     runs-on: ubuntu-latest
 
-    # --- Per-matrix approval gate ---
-    # Each script gets its own environment name, so GitHub prompts for
-    # approval separately for each one. Create matching environments under
-    # Settings → Environments with required reviewers:
-    #   approve-init-tailscale-portainer
-    #   approve-<your-other-script>
     environment:
       name: "approve-${{ matrix.script }}"
 
@@ -147,23 +141,30 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
+      - name: Verify script exists locally
+        env:
+          SCRIPT_PATH: ${{ matrix.script }}
+        run: |
+          if [ ! -f "${SCRIPT_PATH}" ]; then
+            echo "::error::Script not found: ${SCRIPT_PATH}"
+            ls -la bash-scripts/ || true
+            exit 1
+          fi
+          echo "[*] script: ${SCRIPT_PATH}"
+
       - name: Run script via IAP SSH
         env:
-          SCRIPT_PATH: "${{ matrix.script }}.sh"
-          SCRIPT_DIR: "bash-scripts"
+          SCRIPT_PATH: ${{ matrix.script }}
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           set +e
           LOG=$(mktemp)
 
-          # Prepend exports to the script body. The secret travels over
-          # the encrypted SSH stdin channel, never on the command line,
-          # so it can't appear in `ps` on the VM or in gcloud's logs.
           {
             printf 'export TS_AUTHKEY=%q\n' "${TAILSCALE_AUTH_KEY:-}"
             printf 'export TS_HOSTNAME=%q\n' "${GCP_VM_NAME}"
             printf 'export VERBOSE=0\n'
-            cat "${SCRIPT_DIR}/${SCRIPT_PATH}"
+            cat "${SCRIPT_PATH}"
           } | gcloud compute ssh "${GCP_VM_NAME}" \
                 --zone="${GCP_ZONE}" \
                 --tunnel-through-iap \
