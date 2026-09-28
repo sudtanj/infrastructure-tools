@@ -19,11 +19,9 @@ SIDECAR_IMAGE="${SIDECAR_IMAGE:-ts-sidecar:local}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
 BUILD_DIR="/tmp/ts-sidecar-build"
 
-status() { printf '[*] %s\n' "$*"; }
-fail()   { printf '[!] %s\n' "$*" >&2; exit 1; }
+status() { printf '%s\n' "[*] $*"; }
+fail()   { printf '%s\n' "[!] $*" >&2; exit 1; }
 
-# Redact anything that could leak environment info from diagnostic tails.
-# Keeps: docker build steps, apk errors, container state — all public-safe.
 redact() {
   grep -vE \
     '([0-9]{1,3}\.){3}[0-9]{1,3}|@[A-Za-z0-9.-]+\.|ts\.net|\.googleapis\.com|projects/[0-9]+|zones/[a-z0-9-]+|instances/[A-Za-z0-9-]+|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer [A-Za-z0-9._-]+' \
@@ -44,14 +42,12 @@ status "network ready"
 docker rm -f portainer ts-sidecar tailscale >/dev/null 2>&1 || true
 status "old containers removed"
 
-# --- Build the sidecar image locally ---
 status "building sidecar image"
 mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 
 cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
 FROM alpine:3.20
 
-# Enable the community repo — redsocks lives there, not in main.
 RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.20/community" >> /etc/apk/repositories \
     && apk add --no-cache redsocks iptables iproute2
 
@@ -113,17 +109,16 @@ ENTRYPOINT
 
 BUILD_LOG=$(mktemp)
 if ! docker build -t "$SIDECAR_IMAGE" "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
-  printf '[!] sidecar build failed\n' >&2
-  printf '---- build tail (redacted) ----\n' >&2
+  printf '%s\n' "[!] sidecar build failed" >&2
+  printf '%s\n' "---- build tail (redacted) ----" >&2
   tail -40 "$BUILD_LOG" | redact >&2
-  printf '---- end ----\n' >&2
+  printf '%s\n' "---- end ----" >&2
   rm -f "$BUILD_LOG"
   exit 1
 fi
 rm -f "$BUILD_LOG"
 status "sidecar image built"
 
-# --- Detect existing Tailscale state ---
 TS_STATE_PRESENT=0
 if [ -s /var/lib/tailscale/tailscaled.state ] \
    || [ -d /var/lib/tailscale/tailscaled.state.d ] \
@@ -194,9 +189,9 @@ if [ "$SIDECAR_STATE" = "running" ]; then
   status "sidecar: running"
 else
   status "sidecar: NOT running"
-  printf '---- sidecar logs (redacted) ----\n' >&2
+  printf '%s\n' "---- sidecar logs (redacted) ----" >&2
   docker logs --tail 30 ts-sidecar 2>&1 | redact >&2 || true
-  printf '---- end ----\n' >&2
+  printf '%s\n' "---- end ----" >&2
 fi
 
 docker run -d --name portainer --restart always \
