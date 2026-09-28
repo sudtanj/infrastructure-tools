@@ -1,0 +1,94 @@
+name: "Terraform OCI Free Tier - Apply"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only one apply for this folder at a time
+concurrency:
+  group: oci-free-tier-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: "Apply oci-free-tier"
+    runs-on: ubuntu-latest
+
+    env:
+      TF_DIR: "terraform_free_tier_oci"
+      TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+      TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-terraform_free_tier_oci"
+      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tf-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-tf-providers-
+
+      - name: Sanity check folder exists
+        run: |
+          if [ ! -d "$TF_DIR" ]; then
+            echo "❌ Folder '$TF_DIR' does not exist. Aborting."
+            exit 1
+          fi
+
+      - name: Debug TF env (names only)
+        run: env | grep -E '^(TF|TFE)_' | sed 's/=.*/=<redacted>/' | sort
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -input=false
+
+      # -------------------------------------------------------------
+      # Guard: if the instance is already in remote state, do nothing.
+      # Protects an already-acquired free-tier VM from any subsequent
+      # run of this workflow.
+      # -------------------------------------------------------------
+      - name: Check remote state
+        id: guard
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          INSTANCE_ADDR="oci_core_instance.free_tier_instance"
+          if terraform state list 2>/dev/null | grep -qx "$INSTANCE_ADDR"; then
+            echo "already_exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Instance already tracked in remote state. Nothing to do."
+            terraform output || true
+          else
+            echo "already_exists=false" >> "$GITHUB_OUTPUT"
+            echo "No instance in state. Proceeding with single apply attempt."
+          fi
+
+      # -------------------------------------------------------------
+      # Single apply attempt. No retry. If capacity is unavailable,
+      # the job fails and you re-run it manually later.
+      # -------------------------------------------------------------
+      - name: Terraform Apply (single attempt)
+        if: ${{ steps.guard.outputs.already_exists == 'false' }}
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -no-color \
+            -var="availability_domain_index=0"
+
+      - name: Print outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform output
