@@ -8,9 +8,6 @@
 #
 # App stacks get transparent tailnet access with:
 #   network_mode: "service:ts-sidecar"
-#
-# All output uses fixed prefixes. No IPs, hostnames, peer names, container
-# names, image tags, or command output ever appear in the log.
 
 set -euo pipefail
 
@@ -28,14 +25,40 @@ ok()     { printf '%s\n' "[+] $*"; }
 warn()   { printf '%s\n' "[!] $*" >&2; }
 fail()   { printf '%s\n' "[x] $*" >&2; exit 1; }
 
-# Strip anything that could leak environment info from diagnostic output.
 redact() {
   grep -vE \
     '([0-9]{1,3}\.){3}[0-9]{1,3}|@[A-Za-z0-9.-]+\.|ts\.net|\.googleapis\.com|projects/[0-9]+|zones/[a-z0-9-]+|instances/[A-Za-z0-9-]+|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer [A-Za-z0-9._-]+|tskey-[A-Za-z0-9-]+' \
     || true
 }
 
+# Returns the container's state (running / exited / missing), never its name.
+container_state() {
+  docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo "missing"
+}
+
 status "init start"
+
+# ---------------------------------------------------------------------------
+# 0. Pre-flight: verify we have something to authenticate with
+# ---------------------------------------------------------------------------
+step "checking tailscale credentials"
+
+TS_STATE_PRESENT=0
+if [ -s /var/lib/tailscale/tailscaled.state ] \
+   || [ -d /var/lib/tailscale/tailscaled.state.d ] \
+   || ls /var/lib/tailscale/*.state >/dev/null 2>&1; then
+  TS_STATE_PRESENT=1
+fi
+
+TS_AUTH_ENV=""
+if [ -n "$TS_AUTHKEY" ]; then
+  ok "auth key provided"
+  TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
+elif [ "$TS_STATE_PRESENT" -eq 1 ]; then
+  ok "existing state found"
+else
+  fail "no auth key and no existing state — nothing to authenticate with"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. /dev/net/tun
@@ -156,31 +179,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Detect existing Tailscale state
-# ---------------------------------------------------------------------------
-step "checking tailscale state"
-
-TS_STATE_PRESENT=0
-if [ -s /var/lib/tailscale/tailscaled.state ] \
-   || [ -d /var/lib/tailscale/tailscaled.state.d ] \
-   || ls /var/lib/tailscale/*.state >/dev/null 2>&1; then
-  TS_STATE_PRESENT=1
-fi
-
-TS_AUTH_ENV=""
-if [ "$TS_STATE_PRESENT" -eq 1 ] && [ -z "$TS_AUTHKEY" ]; then
-  ok "state file present, reusing existing state"
-elif [ -n "$TS_AUTHKEY" ]; then
-  ok "auth key provided"
-  TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
-elif [ "$TS_STATE_PRESENT" -eq 1 ]; then
-  ok "state file present, no key needed"
-else
-  warn "no state file and no auth key — tailscale will stay offline"
-fi
-
-# ---------------------------------------------------------------------------
-# 6. Start Tailscale
+# 5. Start Tailscale
 # ---------------------------------------------------------------------------
 step "starting tailscale"
 
@@ -205,14 +204,29 @@ if ! docker run -d --name tailscale --restart always \
   >/dev/null 2>&1; then
   fail "tailscale container failed to start"
 fi
-ok "tailscale container running"
+ok "tailscale container started"
+
+# Give the container a moment to either stabilize or crash
+sleep 5
+STATE=$(container_state tailscale)
+if [ "$STATE" != "running" ]; then
+  fail "tailscale container exited immediately (state=${STATE})"
+fi
+ok "tailscale container stayed up"
 
 # ---------------------------------------------------------------------------
-# 7. Wait for Tailscale to connect
+# 6. Wait for Tailscale to connect
 # ---------------------------------------------------------------------------
 step "waiting for tailscale to connect"
 TS_READY=0
 for i in $(seq 1 60); do
+  # Re-check the container hasn't crashed while we wait
+  STATE=$(container_state tailscale)
+  if [ "$STATE" != "running" ]; then
+    warn "tailscale container died while waiting (state=${STATE})"
+    break
+  fi
+
   if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
     TS_READY=1
     break
@@ -223,11 +237,12 @@ done
 if [ "$TS_READY" -eq 1 ]; then
   ok "tailscale connected"
 else
-  warn "tailscale not connected after 120s"
+  warn "tailscale did not connect within timeout"
+  fail "aborting — sidecar and portainer need a working tailscale"
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Start the sidecar
+# 7. Start the sidecar
 # ---------------------------------------------------------------------------
 step "starting sidecar"
 
@@ -245,7 +260,7 @@ if ! docker run -d --name ts-sidecar --restart always \
 fi
 
 sleep 5
-SIDECAR_STATE=$(docker inspect -f '{{.State.Status}}' ts-sidecar 2>/dev/null || echo "missing")
+SIDECAR_STATE=$(container_state ts-sidecar)
 if [ "$SIDECAR_STATE" = "running" ]; then
   ok "sidecar running"
 else
@@ -253,10 +268,11 @@ else
   printf '%s\n' "---- sidecar logs (redacted) ----" >&2
   docker logs --tail 30 ts-sidecar 2>&1 | redact >&2 || true
   printf '%s\n' "---- end ----" >&2
+  fail "sidecar not stable"
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Start Portainer
+# 8. Start Portainer
 # ---------------------------------------------------------------------------
 step "starting portainer"
 
@@ -276,18 +292,24 @@ fi
 ok "portainer running"
 
 # ---------------------------------------------------------------------------
-# 10. Prune unused images
+# 9. Prune unused images
 # ---------------------------------------------------------------------------
 step "pruning unused images"
 docker image prune -f >/dev/null 2>&1 || true
 ok "prune done"
 
 # ---------------------------------------------------------------------------
-# 11. Verify SOCKS5 proxy is reachable
+# 10. Verify SOCKS5 proxy is reachable
 # ---------------------------------------------------------------------------
 step "verifying socks5 proxy"
 PROXY_UP=0
 for i in $(seq 1 30); do
+  STATE=$(container_state tailscale)
+  if [ "$STATE" != "running" ]; then
+    warn "tailscale container died before proxy check"
+    break
+  fi
+
   if docker exec tailscale sh -c "echo > /dev/tcp/127.0.0.1/${TS_SOCKS5_PORT}" 2>/dev/null; then
     PROXY_UP=1
     break
@@ -302,7 +324,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 12. Summary
+# 11. Summary
 # ---------------------------------------------------------------------------
 step "summary"
 
@@ -311,14 +333,7 @@ status "containers running: ${RUNNING}"
 status "tailscale ready: ${TS_READY}"
 status "socks5 ready: ${PROXY_UP}"
 
-if [ "$TS_READY" -ne 1 ]; then
-  warn "one or more checks failed (tailscale)"
-fi
 if [ "$PROXY_UP" -ne 1 ]; then
-  warn "one or more checks failed (socks5)"
-fi
-
-if [ "$TS_READY" -ne 1 ] || [ "$PROXY_UP" -ne 1 ]; then
   fail "init failed"
 fi
 
