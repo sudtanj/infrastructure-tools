@@ -10,7 +10,7 @@ on:
         type: choice
         options:
           - all
-          - init-tailscale-portainer
+          - init-portainer
           - init-paseo-codex
           - init-tailscale
           # add new script names here as you create them
