@@ -1,6 +1,6 @@
 #!/bin/bash
 # bash-scripts/init-tailscale-portainer.sh
-# Runs ON the VM via IAP SSH. Idempotent.
+# Self-contained: configures Docker DNS64, builds sidecar, runs all containers.
 
 set -euo pipefail
 
@@ -11,6 +11,10 @@ TS_NETWORK="${TS_NETWORK:-tailscale-net}"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-ts-sidecar:local}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
 BUILD_DIR="/tmp/ts-sidecar-build"
+DAEMON_JSON="/etc/docker/daemon.json"
+
+DNS64_PRIMARY="2001:4860:4860::6464"
+DNS64_SECONDARY="2001:4860:4860::64"
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -29,7 +33,42 @@ container_netmode() { docker inspect -f '{{.HostConfig.NetworkMode}}' "$1" 2>/de
 
 status "init start"
 
-# --- Pre-flight: credentials ---
+# ---------------------------------------------------------------------------
+# 1. Configure Docker daemon DNS64 (self-contained, no cloud-init dependency)
+# ---------------------------------------------------------------------------
+step "configuring docker daemon DNS64"
+
+WANT_DNS='["'"$DNS64_PRIMARY"'","'"$DNS64_SECONDARY"'"]'
+CURRENT_DNS=""
+if sudo test -f "$DAEMON_JSON"; then
+  CURRENT_DNS=$(sudo cat "$DAEMON_JSON" | grep -o '"dns":[^]]*]' || true)
+fi
+
+if [ "$CURRENT_DNS" = "\"dns\":$WANT_DNS" ]; then
+  ok "docker daemon already has DNS64"
+else
+  sudo mkdir -p /etc/docker
+  sudo tee "$DAEMON_JSON" >/dev/null <<EOF
+{
+  "dns": ["$DNS64_PRIMARY", "$DNS64_SECONDARY"],
+  "dns-opts": ["timeout:2", "attempts:3"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "5m",
+    "max-file": "2"
+  },
+  "live-restore": true,
+  "iptables": false
+}
+EOF
+  sudo systemctl restart docker >/dev/null 2>&1 || fail "docker restart failed"
+  sleep 3
+  ok "docker daemon restarted with DNS64"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Pre-flight credentials
+# ---------------------------------------------------------------------------
 step "checking credentials"
 TS_STATE_PRESENT=0
 if [ -s /var/lib/tailscale/tailscaled.state ] \
@@ -48,12 +87,14 @@ else
   fail "no auth key and no existing state"
 fi
 
-# --- Verify host has IPv6 connectivity (required for Tailscale control plane) ---
+# ---------------------------------------------------------------------------
+# 3. Host IPv6 check
+# ---------------------------------------------------------------------------
 step "checking host IPv6 connectivity"
 if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
   ok "host has global IPv6 address"
 else
-  fail "host has no global IPv6 address — Tailscale cannot reach its control plane"
+  fail "host has no global IPv6 address"
 fi
 
 if ip -6 route show default 2>/dev/null | grep -q "default"; then
@@ -62,23 +103,34 @@ else
   fail "host has no IPv6 default route"
 fi
 
-# --- /dev/net/tun ---
+# ---------------------------------------------------------------------------
+# 4. /dev/net/tun
+# ---------------------------------------------------------------------------
 if [ ! -e /dev/net/tun ]; then
   sudo mkdir -p /dev/net 2>/dev/null || true
   sudo mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
   sudo chmod 666 /dev/net/tun >/dev/null 2>&1 || true
 fi
 
-# --- Docker network for the sidecar ---
-docker network inspect "$TS_NETWORK" >/dev/null 2>&1 || docker network create "$TS_NETWORK" >/dev/null 2>&1 || fail "network create failed"
-ok "network ready"
+# ---------------------------------------------------------------------------
+# 5. Docker network with DNS64
+# ---------------------------------------------------------------------------
+step "ensuring docker network with DNS64"
 
-# --- Cleanup ---
-step "removing existing containers"
 docker rm -f portainer ts-sidecar tailscale >/dev/null 2>&1 || true
-ok "cleanup done"
+docker network rm "$TS_NETWORK" >/dev/null 2>&1 || true
 
-# --- Build sidecar ---
+docker network create \
+  --driver bridge \
+  --dns "$DNS64_PRIMARY" \
+  --dns "$DNS64_SECONDARY" \
+  "$TS_NETWORK" >/dev/null 2>&1 || fail "network create failed"
+
+ok "network created with DNS64"
+
+# ---------------------------------------------------------------------------
+# 6. Build sidecar
+# ---------------------------------------------------------------------------
 step "building sidecar image"
 mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 
@@ -87,7 +139,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       redsocks iptables iproute2 ca-certificates \
+       redsocks iptables iproute2 ca-certificates dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
@@ -159,7 +211,9 @@ else
   exit 1
 fi
 
-# --- Start Tailscale with EXPLICIT host network ---
+# ---------------------------------------------------------------------------
+# 7. Tailscale on host network
+# ---------------------------------------------------------------------------
 step "starting tailscale on host network"
 
 # shellcheck disable=SC2086
@@ -183,27 +237,22 @@ docker run -d --name tailscale --restart always \
   tailscale/tailscale:latest \
   >/dev/null 2>&1 || fail "docker run failed"
 
-# --- VERIFY the network mode is actually host ---
-sleep 2
+sleep 3
 NETMODE=$(container_netmode tailscale)
 if [ "$NETMODE" != "host" ]; then
-  warn "container network mode is '${NETMODE}', expected 'host'"
-  fail "tailscale is not on host network — cannot reach IPv6 internet"
+  fail "tailscale network mode is '${NETMODE}', expected 'host'"
 fi
 ok "tailscale network mode verified: host"
 
-# --- Verify container has IPv6 inside ---
 if docker exec tailscale sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q inet6' 2>/dev/null; then
   ok "tailscale container has IPv6"
 else
-  warn "tailscale container has no IPv6 — control plane will be unreachable"
   fail "container lacks IPv6"
 fi
 
-# --- Wait for connection (short timeout, fail fast) ---
 step "waiting for tailscale to connect"
 TS_READY=0
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   STATE=$(container_state tailscale)
   if [ "$STATE" != "running" ]; then
     warn "tailscale container died (state=${STATE})"
@@ -217,7 +266,7 @@ for i in $(seq 1 30); do
 done
 
 if [ "$TS_READY" -ne 1 ]; then
-  warn "tailscale did not connect in 60s"
+  warn "tailscale did not connect in 120s"
   printf '%s\n' "---- tailscale last 20 lines (redacted) ----" >&2
   docker logs --tail 20 tailscale 2>&1 | redact >&2 || true
   printf '%s\n' "---- end ----" >&2
@@ -225,7 +274,9 @@ if [ "$TS_READY" -ne 1 ]; then
 fi
 ok "tailscale connected"
 
-# --- Start sidecar ---
+# ---------------------------------------------------------------------------
+# 8. Sidecar
+# ---------------------------------------------------------------------------
 step "starting sidecar"
 docker run -d --name ts-sidecar --restart always \
   --network "$TS_NETWORK" \
@@ -248,7 +299,9 @@ else
   fail "sidecar not stable"
 fi
 
-# --- Start Portainer ---
+# ---------------------------------------------------------------------------
+# 9. Portainer
+# ---------------------------------------------------------------------------
 step "starting portainer"
 docker run -d --name portainer --restart always \
   --network bridge \
@@ -265,7 +318,9 @@ ok "portainer running"
 
 docker image prune -f >/dev/null 2>&1 || true
 
-# --- Verify SOCKS5 ---
+# ---------------------------------------------------------------------------
+# 10. Verifications
+# ---------------------------------------------------------------------------
 step "verifying socks5"
 PROXY_UP=0
 for i in $(seq 1 30); do
@@ -282,7 +337,6 @@ else
   warn "socks5 not reachable"
 fi
 
-# --- Verify sidecar can reach the proxy ---
 step "verifying sidecar path"
 SIDECAR_PATH=0
 if docker exec ts-sidecar sh -c "echo > /dev/tcp/tailscale/${TS_SOCKS5_PORT}" 2>/dev/null; then
@@ -292,13 +346,25 @@ else
   warn "sidecar cannot reach proxy"
 fi
 
-# --- Summary ---
+step "verifying DNS64 resolution from sidecar"
+DNS_OK=0
+if docker exec ts-sidecar sh -c "nslookup google.com >/dev/null 2>&1"; then
+  DNS_OK=1
+  ok "DNS resolution works"
+else
+  warn "DNS resolution failed"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Summary
+# ---------------------------------------------------------------------------
 step "summary"
 RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 status "containers running: ${RUNNING}"
 status "tailscale ready: ${TS_READY}"
 status "socks5 ready: ${PROXY_UP}"
 status "sidecar path ready: ${SIDECAR_PATH}"
+status "dns resolution ready: ${DNS_OK}"
 
 if [ "$TS_READY" -ne 1 ] || [ "$PROXY_UP" -ne 1 ] || [ "$SIDECAR_PATH" -ne 1 ]; then
   fail "init failed"
