@@ -47,7 +47,7 @@ docker run -d --name paseo-codex --restart always \
   --dns 2a00:1098:2b::1 \
   --dns 2a01:4f9:c010:3f02::1 \
   -v paseo-home:/home/paseo \
-  -v paseo-workspace:/workspace \
+  -v paseo-workspace:/workspace:rw \
   -e CODEX_BASE_URL="$CODEX_BASE_URL" \
   -e CODEX_API_KEY="$CODEX_API_KEY" \
   -e CODEX_MODEL="$CODEX_MODEL" \
