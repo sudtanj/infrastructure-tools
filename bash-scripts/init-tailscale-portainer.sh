@@ -15,16 +15,14 @@ ok()     { printf '%s\n' "[+] $*"; }
 warn()   { printf '%s\n' "[!] $*" >&2; }
 fail()   { printf '%s\n' "[x] $*" >&2; exit 1; }
 
-container_state() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo "missing"; }
+container_state()   { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo "missing"; }
 container_netmode() { docker inspect -f '{{.HostConfig.NetworkMode}}' "$1" 2>/dev/null || echo "missing"; }
 
 status "init start"
 
-# ---------------------------------------------------------------------------
-# 0. Neutralize any competing systemd unit
-# ---------------------------------------------------------------------------
+# 0. Kill competing systemd unit
 step "disabling competing systemd units"
-if systemctl list-unit-files 2>/dev/null | grep -q '^containers.service'; then
+if systemctl list-unit-files 2>/dev/null | grep -q '^containers\.service'; then
   sudo systemctl stop containers.service 2>/dev/null || true
   sudo systemctl disable containers.service 2>/dev/null || true
   sudo rm -f /etc/systemd/system/containers.service
@@ -34,9 +32,7 @@ else
   ok "no competing unit"
 fi
 
-# ---------------------------------------------------------------------------
 # 1. Credentials
-# ---------------------------------------------------------------------------
 step "checking credentials"
 TS_STATE_PRESENT=0
 if [ -s /var/lib/tailscale/tailscaled.state ] \
@@ -55,16 +51,12 @@ else
   fail "no auth key and no existing state"
 fi
 
-# ---------------------------------------------------------------------------
-# 2. Clean up ALL competing containers
-# ---------------------------------------------------------------------------
+# 2. Cleanup
 step "cleaning up containers"
 docker rm -f portainer tailscale ts-sidecar ts-proxy >/dev/null 2>&1 || true
 ok "cleanup done"
 
-# ---------------------------------------------------------------------------
 # 3. Start Tailscale on host network
-# ---------------------------------------------------------------------------
 step "starting tailscale on host network"
 
 # shellcheck disable=SC2086
@@ -89,36 +81,27 @@ docker run -d --name tailscale --restart always \
 
 sleep 3
 
-# ---------------------------------------------------------------------------
-# 4. Verify it's actually on host network
-# ---------------------------------------------------------------------------
+# 4. Verify host network
 step "verifying host network"
-
 NETMODE=$(container_netmode tailscale)
 if [ "$NETMODE" != "host" ]; then
-  fail "container is on network '${NETMODE}', expected 'host'"
+  fail "network mode '${NETMODE}', expected 'host'"
 fi
 ok "network mode: host"
 
-# Verify IPv6 is visible inside the container
 if ! docker exec tailscale sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q inet6'; then
-  warn "container has no IPv6 — check host IPv6 config"
+  warn "container has no IPv6"
   docker exec tailscale ip -6 addr show 2>&1 | head -20 >&2 || true
-  fail "IPv6 unavailable in container"
+  fail "IPv6 unavailable"
 fi
-ok "IPv6 visible in container"
+ok "IPv6 visible"
 
-# ---------------------------------------------------------------------------
-# 5. Wait for Tailscale to connect
-# ---------------------------------------------------------------------------
+# 5. Wait for connection
 step "waiting for tailscale to connect"
 TS_READY=0
 for i in $(seq 1 60); do
   STATE=$(container_state tailscale)
-  if [ "$STATE" != "running" ]; then
-    warn "container died (state=${STATE})"
-    break
-  fi
+  [ "$STATE" = "running" ] || { warn "container died (${STATE})"; break; }
   if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
     TS_READY=1
     break
@@ -127,17 +110,15 @@ for i in $(seq 1 60); do
 done
 
 if [ "$TS_READY" -ne 1 ]; then
-  warn "tailscale did not connect in 120s"
-  printf '%s\n' "---- tailscale logs (last 30 lines) ----" >&2
+  warn "tailscale not connected in 120s"
+  printf '%s\n' "---- tailscale logs ----" >&2
   docker logs --tail 30 tailscale >&2 || true
   printf '%s\n' "---- end ----" >&2
-  fail "tailscale connection failed"
+  fail "connection failed"
 fi
 ok "tailscale connected"
 
-# ---------------------------------------------------------------------------
-# 6. Start Portainer
-# ---------------------------------------------------------------------------
+# 6. Portainer
 step "starting portainer"
 docker run -d --name portainer --restart always \
   --network bridge \
@@ -149,14 +130,12 @@ docker run -d --name portainer --restart always \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   portainer/portainer-ce:latest \
   --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
-  >/dev/null 2>&1 || fail "portainer failed to start"
+  >/dev/null 2>&1 || fail "portainer failed"
 ok "portainer running"
 
 docker image prune -f >/dev/null 2>&1 || true
 
-# ---------------------------------------------------------------------------
-# 7. Verify SOCKS5
-# ---------------------------------------------------------------------------
+# 7. SOCKS5
 step "verifying socks5"
 PROXY_UP=0
 for i in $(seq 1 30); do
@@ -166,21 +145,13 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
+[ "$PROXY_UP" -eq 1 ] || fail "socks5 not reachable"
+ok "socks5 listening"
 
-if [ "$PROXY_UP" -eq 1 ]; then
-  ok "socks5 listening"
-else
-  fail "socks5 not reachable"
-fi
-
-# ---------------------------------------------------------------------------
-# 8. Final check: re-verify network mode (catch anything that tried to recreate)
-# ---------------------------------------------------------------------------
+# 8. Final re-check
 sleep 10
-FINAL_MODE=$(container_netmode tailscale)
-if [ "$FINAL_MODE" != "host" ]; then
-  fail "tailscale was re-created on network '${FINAL_MODE}' — something is respawning it"
-fi
+FINAL=$(container_netmode tailscale)
+[ "$FINAL" = "host" ] || fail "re-created on '${FINAL}' — something is respawning it"
 
 RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 status "running containers: ${RUNNING}"
