@@ -23,6 +23,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
+│   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
 │   └── init-tailscale-portainer.sh   # Standalone Tailscale & Portainer deployment script
 └── terraform_free_tier_gcp/
     ├── cloud-init.yaml.tftpl         # Cloud-config for COS startup, Tailscale & Portainer setup
@@ -47,12 +48,13 @@ Provisions a zero-cost `e2-micro` Google Compute Engine instance in US regions (
 ### 2. Startup & Management Scripts (`bash-scripts/`)
 
 - **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates.
-- **`init-tailscale-portainer.sh`**: Helper script for manual host setup of Tailscale VPN and Portainer container management UI.
+- **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
+- **`init-tailscale-portainer.sh`**: Standalone host setup script for Tailscale VPN and Portainer container management UI.
 
 ### 3. GitHub Actions CI/CD (`.github/workflows/`)
 
 - **`terraform-deploy.yml`**: Automatically detects directories with `.tf` files and runs matrixed `fmt`, `plan`, and manual-approval `apply` using HCP Terraform remote backends and GCP Workload Identity Federation.
-- **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (e.g., `init-paseo-codex.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
+- **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (e.g., `init-paseo-codex.sh`, `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
 
 ---
@@ -69,7 +71,7 @@ Provisions a zero-cost `e2-micro` Google Compute Engine instance in US regions (
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/infrastructure-tools.git
+   git clone https://github.com/sudtanj/infrastructure-tools.git
    cd infrastructure-tools/terraform_free_tier_gcp
    ```
 
