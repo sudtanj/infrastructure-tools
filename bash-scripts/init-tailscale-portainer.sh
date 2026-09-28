@@ -1,102 +1,197 @@
 #!/bin/bash
 # bash-scripts/init-tailscale-portainer.sh
+# Runs ON the VM via IAP SSH. Idempotent.
+# Tailscale = static binary on host (kernel mode). Portainer = Docker. No Tailscale container.
 
 set -euo pipefail
 
 TS_AUTHKEY="${TS_AUTHKEY:-}"
 TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
+PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
+
+TS_BIN_DIR="/mnt/disks/tailscale"
+TS_STATE_DIR="/var/lib/tailscale"
+TS_SOCKET="/run/tailscale/tailscaled.sock"
+TS_VERSION="1.68.1"
 
 echo "[*] init start"
 
-# Mask systemd unit so it can never respawn the container
+# ---------------------------------------------------------------------------
+# 0. Remove any old Tailscale containers / systemd units
+# ---------------------------------------------------------------------------
+echo "[>] removing old tailscale containers and units"
+docker rm -f tailscale ts-sidecar ts-proxy 2>/dev/null || true
+docker network rm tailscale-net 2>/dev/null || true
 sudo systemctl mask containers.service 2>/dev/null || true
 sudo systemctl stop containers.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/containers.service
-sudo systemctl daemon-reload 2>/dev/null || true
-echo "[+] systemd unit masked"
-
-# Remove all containers and the bridge network
-docker rm -f tailscale portainer ts-sidecar ts-proxy 2>/dev/null || true
-docker network rm tailscale-net 2>/dev/null || true
 echo "[+] cleanup done"
 
-# Start tailscale on host network
-if [ -n "$TS_AUTHKEY" ]; then
-  TS_AUTH_ENV="-e TS_AUTHKEY=${TS_AUTHKEY}"
+# ---------------------------------------------------------------------------
+# 1. Ensure /dev/net/tun exists (needed for kernel mode)
+# ---------------------------------------------------------------------------
+echo "[>] ensuring /dev/net/tun"
+if [ ! -e /dev/net/tun ]; then
+  sudo mkdir -p /dev/net
+  sudo mknod /dev/net/tun c 10 200
+  sudo chmod 666 /dev/net/tun
+fi
+echo "[+] tun ready"
+
+# ---------------------------------------------------------------------------
+# 2. Mount executable tmpfs for the binary
+#    COS mounts /var and most of /mnt/disks as noexec, but a tmpfs on top
+#    of a directory is exec. This is the only place we can run the binary.
+# ---------------------------------------------------------------------------
+echo "[>] preparing executable binary directory"
+sudo mkdir -p "$TS_BIN_DIR"
+if ! mountpoint -q "$TS_BIN_DIR"; then
+  sudo mount -t tmpfs -o exec,mode=0755 tmpfs "$TS_BIN_DIR"
+fi
+echo "[+] tmpfs mounted at ${TS_BIN_DIR}"
+
+# ---------------------------------------------------------------------------
+# 3. Download static Tailscale binary if not present
+# ---------------------------------------------------------------------------
+echo "[>] installing tailscale binary"
+if [ ! -x "${TS_BIN_DIR}/tailscaled" ]; then
+  ARCH="amd64"
+  TARBALL="tailscale_${TS_VERSION}_${ARCH}.tgz"
+  URL="https://pkgs.tailscale.com/stable/${TARBALL}"
+  TMP="/var/tmp/${TARBALL}"
+
+  [ -f "$TMP" ] || curl -fsSL -o "$TMP" "$URL"
+
+  sudo tar -xzf "$TMP" -C "$TS_BIN_DIR" --strip-components=1 \
+    "tailscale_${TS_VERSION}_${ARCH}/tailscale" \
+    "tailscale_${TS_VERSION}_${ARCH}/tailscaled"
+
+  sudo chmod +x "${TS_BIN_DIR}/tailscaled" "${TS_BIN_DIR}/tailscale"
+  rm -f "$TMP"
+fi
+echo "[+] binary ready"
+
+# ---------------------------------------------------------------------------
+# 4. Prepare state directory
+# ---------------------------------------------------------------------------
+sudo mkdir -p "$TS_STATE_DIR"
+sudo chmod 700 "$TS_STATE_DIR"
+sudo mkdir -p /run/tailscale
+sudo chmod 755 /run/tailscale
+
+# ---------------------------------------------------------------------------
+# 5. Write systemd unit for tailscaled (kernel mode, no --tun=userspace)
+# ---------------------------------------------------------------------------
+echo "[>] writing tailscaled.service"
+sudo tee /etc/systemd/system/tailscaled.service >/dev/null <<EOF
+[Unit]
+Description=Tailscale node agent
+Wants=network-pre.target
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=notify
+ExecStartPre=${TS_BIN_DIR}/tailscaled --cleanup
+ExecStart=${TS_BIN_DIR}/tailscaled \\
+  --state=${TS_STATE_DIR}/tailscaled.state \\
+  --socket=${TS_SOCKET} \\
+  --port=41641
+ExecStopPost=${TS_BIN_DIR}/tailscaled --cleanup
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable tailscaled.service >/dev/null 2>&1
+sudo systemctl restart tailscaled.service
+sleep 5
+
+# ---------------------------------------------------------------------------
+# 6. Verify tailscaled is up and running in kernel mode
+# ---------------------------------------------------------------------------
+echo "[>] verifying tailscaled"
+if ! sudo systemctl is-active --quiet tailscaled.service; then
+  echo "[x] tailscaled not running" >&2
+  sudo journalctl -u tailscaled.service -n 30 --no-pager >&2 || true
+  exit 1
+fi
+echo "[+] tailscaled running"
+
+# ---------------------------------------------------------------------------
+# 7. Authenticate if not already connected
+# ---------------------------------------------------------------------------
+echo "[>] checking tailscale connection"
+if sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" status >/dev/null 2>&1; then
+  echo "[+] already connected"
 else
-  TS_AUTH_ENV=""
-fi
-
-# shellcheck disable=SC2086
-docker run -d --name tailscale --restart always \
-  --network=host \
-  -e GOGC=10 -e GOMEMLIMIT=80MiB \
-  $TS_AUTH_ENV \
-  -e TS_STATE_DIR=/var/lib/tailscale \
-  -e TS_USERSPACE=true \
-  -e TS_HOSTNAME="${TS_HOSTNAME}" \
-  -e TS_EXTRA_ARGS="--advertise-tags=tag:home" \
-  -e TS_AUTH_ONCE=true \
-  -e TS_ACCEPT_DNS=true \
-  -e TS_SOCKS5_SERVER=0.0.0.0:1055 \
-  -e TS_OUTBOUND_HTTP_PROXY_LISTEN=0.0.0.0:1055 \
-  -e TZ=Asia/Jakarta \
-  -v /var/lib/tailscale:/var/lib/tailscale \
-  tailscale/tailscale:latest >/dev/null 2>&1
-
-sleep 3
-
-# Verify host network
-NETMODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' tailscale 2>/dev/null || echo "missing")
-echo "[+] network mode: ${NETMODE}"
-if [ "$NETMODE" != "host" ]; then
-  echo "[x] not on host network — aborting" >&2
-  exit 1
-fi
-
-# Verify IPv6 inside
-if ! docker exec tailscale sh -c 'ip -6 addr show scope global | grep -q inet6'; then
-  echo "[x] no IPv6 in container" >&2
-  docker exec tailscale ip -6 addr show >&2 || true
-  exit 1
-fi
-echo "[+] IPv6 visible"
-
-# Wait for connection
-echo "[*] waiting for connection"
-READY=0
-for i in $(seq 1 60); do
-  if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
-    READY=1
-    break
+  if [ -z "$TS_AUTHKEY" ]; then
+    echo "[x] not connected and no TS_AUTHKEY provided" >&2
+    exit 1
   fi
-  sleep 2
-done
+  sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" up \
+    --authkey="$TS_AUTHKEY" \
+    --hostname="$TS_HOSTNAME" \
+    --advertise-tags=tag:home \
+    --accept-dns=true \
+    --accept-routes=false
+  sleep 3
+fi
 
-if [ "$READY" -ne 1 ]; then
+# Verify connection
+if ! sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" ip -4 >/dev/null 2>&1; then
   echo "[x] tailscale did not connect" >&2
-  docker logs --tail 30 tailscale >&2 || true
+  sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" status >&2 || true
   exit 1
 fi
 echo "[+] tailscale connected"
 
-# Start portainer
+# ---------------------------------------------------------------------------
+# 8. Verify tailscale0 interface exists (proves kernel mode)
+# ---------------------------------------------------------------------------
+echo "[>] verifying tailscale0 interface"
+if ! ip link show tailscale0 >/dev/null 2>&1; then
+  echo "[x] tailscale0 interface missing — not in kernel mode" >&2
+  exit 1
+fi
+echo "[+] tailscale0 interface present"
+
+# ---------------------------------------------------------------------------
+# 9. Start Portainer
+# ---------------------------------------------------------------------------
+echo "[>] starting portainer"
+docker rm -f portainer >/dev/null 2>&1 || true
 docker run -d --name portainer --restart always \
   --network bridge \
   -p 9000:9000 -p 9443:9443 \
+  --cpus 0.11 --cpu-shares 288 \
+  --memory 192m --memory-swap 192m \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
+  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   portainer/portainer-ce:latest \
-  --snapshot-interval=15m >/dev/null 2>&1
-echo "[+] portainer running"
+  --snapshot-interval="${PORTAINER_SNAPSHOT_INTERVAL}" \
+  >/dev/null 2>&1
 
-# Final check — nothing recreated the container
-sleep 10
-FINAL=$(docker inspect -f '{{.HostConfig.NetworkMode}}' tailscale 2>/dev/null || echo "missing")
-if [ "$FINAL" != "host" ]; then
-  echo "[x] recreated on '${FINAL}'" >&2
+sleep 3
+if [ "$(docker inspect -f '{{.State.Status}}' portainer 2>/dev/null)" != "running" ]; then
+  echo "[x] portainer not running" >&2
+  docker logs --tail 20 portainer >&2 || true
   exit 1
 fi
+echo "[+] portainer running"
 
+docker image prune -f >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# 10. Final state
+# ---------------------------------------------------------------------------
+echo "[>] summary"
+TS_IP=$(sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" ip -4 | head -1)
+echo "[*] tailscale IP: ${TS_IP}"
+echo "[*] portainer: http://[${TS_IP}]:9000"
 echo "[+] init done"
 exit 0
