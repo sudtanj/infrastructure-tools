@@ -20,7 +20,7 @@ TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
 TS_NETWORK="${TS_NETWORK:-tailscale-net}"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-ts-sidecar:local}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
-BUILD_DIR="/var/lib/ts-sidecar-build"
+BUILD_DIR="/tmp/ts-sidecar-build"
 
 status() { printf '[*] %s\n' "$*"; }
 debug() { if [ "$VERBOSE" = "1" ]; then printf '[dbg] %s\n' "$*" >&2; fi; }
@@ -29,9 +29,9 @@ status "init start"
 
 # --- /dev/net/tun ---
 if [ ! -e /dev/net/tun ]; then
-  mkdir -p /dev/net
-  mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
-  chmod 666 /dev/net/tun >/dev/null 2>&1 || true
+  mkdir -p /dev/net 2>/dev/null || sudo mkdir -p /dev/net
+  sudo mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
+  sudo chmod 666 /dev/net/tun >/dev/null 2>&1 || true
   debug "created /dev/net/tun"
 fi
 
@@ -68,7 +68,6 @@ PROXY_PORT="${PROXY_PORT:-1055}"
 echo "starting gost proxy"
 gost -L "redirect://:12345" -F "socks5://${PROXY_SERVER}:${PROXY_PORT}" &
 
-# Wait for gost to be listening
 for i in $(seq 1 30); do
   if (echo > /dev/tcp/127.0.0.1/12345) 2>/dev/null; then
     break
@@ -137,7 +136,6 @@ docker run -d --name tailscale --restart always \
   tailscale/tailscale:latest \
   >/dev/null 2>&1
 
-# --- Wait for Tailscale to be ready ---
 TS_READY=0
 for _ in $(seq 1 60); do
   if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
@@ -153,7 +151,7 @@ else
   status "tailscale: NOT connected"
 fi
 
-# --- Start the sidecar (shares network with apps via network_mode: service:ts-sidecar) ---
+# --- Start the sidecar ---
 docker run -d --name ts-sidecar --restart always \
   --network "$TS_NETWORK" \
   --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -165,7 +163,6 @@ docker run -d --name ts-sidecar --restart always \
   "$SIDECAR_IMAGE" \
   >/dev/null 2>&1
 
-# --- Verify sidecar came up (not in a restart loop) ---
 sleep 5
 SIDECAR_STATE=$(docker inspect -f '{{.State.Status}}' ts-sidecar 2>/dev/null || echo "missing")
 if [ "$SIDECAR_STATE" = "running" ]; then
@@ -190,7 +187,7 @@ status "portainer: started"
 
 docker image prune -f >/dev/null 2>&1 || true
 
-# --- Verify SOCKS5 proxy is reachable from inside the Tailscale container ---
+# --- Verify SOCKS5 proxy ---
 PROXY_UP=0
 for _ in $(seq 1 30); do
   if docker exec tailscale sh -c "echo > /dev/tcp/127.0.0.1/${TS_SOCKS5_PORT}" 2>/dev/null; then
@@ -206,7 +203,6 @@ else
   status "socks5: NOT reachable"
 fi
 
-# --- Final summary ---
 RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 status "running containers: ${RUNNING}"
 status "init done"
