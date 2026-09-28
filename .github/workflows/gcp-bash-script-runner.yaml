@@ -155,13 +155,26 @@ jobs:
       - name: Run script via IAP SSH
         env:
           SCRIPT_PATH: ${{ matrix.script }}
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          # Optional: comma-separated prefixes to filter. Empty = export everything.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY"
         run: |
           set +e
           LOG=$(mktemp)
 
+          # Parse the secrets JSON into `export KEY='value'` lines.
+          # @sh does shell-safe quoting so values with spaces / quotes / newlines survive.
+          # Filter by prefix list (or pass everything if SECRET_FILTER is empty).
           {
-            printf 'export TS_AUTHKEY=%q\n' "${TAILSCALE_AUTH_KEY:-}"
+            if [ -z "${SECRET_FILTER:-}" ]; then
+              echo "$ALL_SECRETS" | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"'
+            else
+              IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
+              for p in "${PREFIXES[@]}"; do
+                echo "$ALL_SECRETS" | jq -r --arg p "$p" \
+                  'to_entries[] | select(.key | startswith($p)) | "export \(.key)=\(.value|@sh)"'
+              done
+            fi
             printf 'export TS_HOSTNAME=%q\n' "${GCP_VM_NAME}"
             printf 'export VERBOSE=0\n'
             cat "${SCRIPT_PATH}"
