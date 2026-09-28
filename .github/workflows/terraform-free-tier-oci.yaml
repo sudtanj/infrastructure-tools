@@ -8,130 +8,131 @@ on:
 permissions:
   contents: read
 
-# Prevents overlap between a slow run and the next scheduled one.
 concurrency:
   group: oci-free-tier-grab
   cancel-in-progress: false
 
 jobs:
   grab:
-    name: "Single attempt"
+    name: "Single Terraform apply"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     env:
-      # OCI CLI reads these automatically — no ~/.oci/config file needed.
-      OCI_CLI_USER:        ${{ secrets.OCI_USER_OCID }}
-      OCI_CLI_TENANCY:     ${{ secrets.OCI_TENANCY_OCID }}
-      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY }}
-      OCI_CLI_REGION:      ${{ secrets.OCI_REGION }}
-
-      COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_OCID }}
-      SUBNET_ID:      ${{ secrets.OCI_SUBNET_OCID }}
-      IMAGE_ID:       ${{ secrets.OCI_IMAGE_OCID }}
-      SSH_KEY:        ${{ secrets.OCI_SSH_PUBLIC_KEY }}
-      INSTANCE_NAME:  "oci-free-tier-vm"
+      TF_DIR: "terraform_free_tier_oci"
+      TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+      TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-terraform_free_tier_oci"
+      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
 
     steps:
-      - name: Install OCI CLI
-        run: pip install --quiet oci-cli
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: ${{ runner.os }}-tf-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-tf-providers-
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -input=false
 
       # ---------------------------------------------------------------
-      # Guard: if a VM with this display name is already RUNNING, stop.
+      # Guard: if the instance is already in remote state, stop.
+      # Once you win, every future scheduled run exits here in seconds.
       # ---------------------------------------------------------------
-      - name: Check if instance already exists
+      - name: Check remote state
         id: guard
+        working-directory: ${{ env.TF_DIR }}
         run: |
-          EXISTING=$(oci compute instance list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --display-name "$INSTANCE_NAME" \
-            --lifecycle-state RUNNING \
-            --query 'data[0].id' --raw-output 2>/dev/null || echo "")
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
+          INSTANCE_ADDR="oci_core_instance.free_tier_instance"
+          if terraform state list 2>/dev/null | grep -qx "$INSTANCE_ADDR"; then
             echo "already_exists=true" >> "$GITHUB_OUTPUT"
-            echo "instance_id=$EXISTING" >> "$GITHUB_OUTPUT"
-            echo "✅ Instance already running: $EXISTING"
+            echo "✅ Instance already in state. Nothing to do."
           else
             echo "already_exists=false" >> "$GITHUB_OUTPUT"
-            echo "No instance found. Proceeding with single launch attempt."
+            echo "No instance in state. Proceeding with single apply attempt."
           fi
 
       # ---------------------------------------------------------------
-      # Single launch attempt. Rotates AD across scheduled runs so
+      # Single apply attempt. AD rotates across scheduled runs so
       # consecutive runs target different availability domains.
       # ---------------------------------------------------------------
-      - name: Single launch attempt
-        id: launch
+      - name: Terraform Apply (single attempt)
+        id: apply
         if: ${{ steps.guard.outputs.already_exists == 'false' }}
+        working-directory: ${{ env.TF_DIR }}
         run: |
           set -uo pipefail
 
-          # AD rotation: run_number % 3 -> AD-1 / AD-2 / AD-3
           RUN_NUM=${{ github.run_number }}
           case $((RUN_NUM % 3)) in
-            0) AD="AD-1" ;;
-            1) AD="AD-2" ;;
-            2) AD="AD-3" ;;
+            0) AD_INDEX=0 ;;
+            1) AD_INDEX=1 ;;
+            2) AD_INDEX=2 ;;
           esac
-          echo "Run #$RUN_NUM → AD: $AD"
+          echo "Run #$RUN_NUM → availability_domain_index=$AD_INDEX"
 
           set +e
-          OUTPUT=$(oci compute instance launch \
-            --availability-domain "$AD" \
-            --compartment-id "$COMPARTMENT_ID" \
-            --shape VM.Standard.A1.Flex \
-            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-            --source-details "{\"sourceType\":\"image\",\"imageId\":\"$IMAGE_ID\",\"bootVolumeSizeInGBs\":50}" \
-            --subnet-id "$SUBNET_ID" \
-            --assign-public-ip true \
-            --display-name "$INSTANCE_NAME" \
-            --metadata "{\"ssh_authorized_keys\":\"$SSH_KEY\"}" \
-            --output json 2>&1)
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -no-color \
+            -compact-warnings \
+            -var="availability_domain_index=$AD_INDEX" \
+            > /tmp/apply.log 2>&1
           RC=$?
           set -e
 
           if [ "$RC" -eq 0 ]; then
-            INSTANCE_ID=$(echo "$OUTPUT" | jq -r '.data.id')
-            echo "✅ Instance created: $INSTANCE_ID"
-            echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+            echo "✅ Apply complete."
+            grep -E 'Apply complete!|Resources: [0-9]+ added' /tmp/apply.log || true
             exit 0
           fi
 
-          if echo "$OUTPUT" | grep -qiE "out of (host )?capacity|InternalError|LimitExceeded|TooManyRequests"; then
-            echo "⚠️  No capacity in $AD this run. Next attempt at next schedule."
-            exit 0   # soft exit — not a workflow failure
+          # prevent_destroy fired → hard fail, never retry
+          if grep -qi "prevent_destroy\|cannot be destroyed" /tmp/apply.log; then
+            echo "🛑 prevent_destroy blocked a destroy."
+            grep -A 20 'Error:' /tmp/apply.log || tail -30 /tmp/apply.log
+            exit 1
           fi
 
+          # capacity error → soft exit, next scheduled run tries again
+          if grep -qiE "out of (host )?capacity|500-InternalError|LimitExceeded|TooManyRequests" /tmp/apply.log; then
+            echo "⚠️  No capacity in AD index $AD_INDEX this run. Next attempt at next schedule."
+            grep -A 3 'Error:' /tmp/apply.log | head -10 || true
+            exit 0
+          fi
+
+          # anything else → real failure, surface it
           echo "❌ Non-retryable error:"
-          echo "$OUTPUT" | tail -30
+          grep -A 20 'Error:' /tmp/apply.log || tail -40 /tmp/apply.log
           exit 1
 
-      # ---------------------------------------------------------------
-      # Job summary: shows next steps if the VM was just acquired.
-      # ---------------------------------------------------------------
       - name: Summary
         if: always()
         run: |
-          if [ "${{ steps.launch.outputs.instance_id }}" != "" ]; then
-            {
-              echo "### ✅ VM acquired"
-              echo ""
-              echo "Instance OCID: \`${{ steps.launch.outputs.instance_id }}\`"
-              echo ""
-              echo "Import to Terraform state locally:"
-              echo ""
-              echo '```bash'
-              echo "cd terraform_free_tier_oci"
-              echo "terraform login"
-              echo "terraform init"
-              echo "terraform import oci_core_instance.free_tier_instance ${{ steps.launch.outputs.instance_id }}"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.apply.outcome }}" = "success" ]; then
+            echo "### ✅ VM acquired" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Check outputs locally:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+            echo "cd terraform_free_tier_oci" >> "$GITHUB_STEP_SUMMARY"
+            echo "terraform output" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
-            {
-              echo "### 🕐 Missed this window"
-              echo ""
-              echo "No capacity in the targeted AD. Next attempt runs automatically at the next 15-minute tick."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "### 🕐 Missed this window" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No capacity in the targeted AD. Next attempt runs automatically at the next 15-minute tick." >> "$GITHUB_STEP_SUMMARY"
           fi
