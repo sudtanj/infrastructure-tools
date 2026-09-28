@@ -62,10 +62,20 @@ jobs:
           echo "scripts=$json" >> "$GITHUB_OUTPUT"
 
   run:
-    name: "Run"
+    name: "Run (${{ matrix.script }})"
     needs: discover
     if: needs.discover.outputs.scripts != '[]'
     runs-on: ubuntu-latest
+
+    # --- Per-matrix approval gate ---
+    # Each script gets its own environment name, so GitHub prompts for
+    # approval separately for each one. Create matching environments under
+    # Settings → Environments with required reviewers:
+    #   approve-init-tailscale-portainer
+    #   approve-<your-other-script>
+    environment:
+      name: "approve-${{ matrix.script }}"
+
     strategy:
       fail-fast: false
       matrix:
