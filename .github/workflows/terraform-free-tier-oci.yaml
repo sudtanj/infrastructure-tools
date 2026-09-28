@@ -48,10 +48,6 @@ jobs:
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           terraform init -input=false
 
-      # ---------------------------------------------------------------
-      # Guard: if the instance is already in remote state, stop.
-      # Once you win, every future scheduled run exits here in seconds.
-      # ---------------------------------------------------------------
       - name: Check remote state
         id: guard
         working-directory: ${{ env.TF_DIR }}
@@ -65,10 +61,6 @@ jobs:
             echo "No instance in state. Proceeding with single apply attempt."
           fi
 
-      # ---------------------------------------------------------------
-      # Single apply attempt. AD rotates across scheduled runs so
-      # consecutive runs target different availability domains.
-      # ---------------------------------------------------------------
       - name: Terraform Apply (single attempt)
         id: apply
         if: ${{ steps.guard.outputs.already_exists == 'false' }}
@@ -76,13 +68,8 @@ jobs:
         run: |
           set -uo pipefail
 
-          RUN_NUM=${{ github.run_number }}
-          case $((RUN_NUM % 3)) in
-            0) AD_INDEX=0 ;;
-            1) AD_INDEX=1 ;;
-            2) AD_INDEX=2 ;;
-          esac
-          echo "Run #$RUN_NUM → availability_domain_index=$AD_INDEX"
+          # ap-singapore-1 has a single availability domain → always index 0
+          echo "Using availability_domain_index=0"
 
           set +e
           terraform apply \
@@ -90,7 +77,7 @@ jobs:
             -input=false \
             -no-color \
             -compact-warnings \
-            -var="availability_domain_index=$AD_INDEX" \
+            -var="availability_domain_index=0" \
             > /tmp/apply.log 2>&1
           RC=$?
           set -e
@@ -101,21 +88,18 @@ jobs:
             exit 0
           fi
 
-          # prevent_destroy fired → hard fail, never retry
           if grep -qi "prevent_destroy\|cannot be destroyed" /tmp/apply.log; then
             echo "🛑 prevent_destroy blocked a destroy."
             grep -A 20 'Error:' /tmp/apply.log || tail -30 /tmp/apply.log
             exit 1
           fi
 
-          # capacity error → soft exit, next scheduled run tries again
           if grep -qiE "out of (host )?capacity|500-InternalError|LimitExceeded|TooManyRequests" /tmp/apply.log; then
-            echo "⚠️  No capacity in AD index $AD_INDEX this run. Next attempt at next schedule."
+            echo "⚠️  No capacity this run. Next attempt at next schedule."
             grep -A 3 'Error:' /tmp/apply.log | head -10 || true
             exit 0
           fi
 
-          # anything else → real failure, surface it
           echo "❌ Non-retryable error:"
           grep -A 20 'Error:' /tmp/apply.log || tail -40 /tmp/apply.log
           exit 1
@@ -134,5 +118,5 @@ jobs:
           else
             echo "### 🕐 Missed this window" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "No capacity in the targeted AD. Next attempt runs automatically at the next 15-minute tick." >> "$GITHUB_STEP_SUMMARY"
+            echo "No capacity. Next attempt runs automatically at the next 15-minute tick." >> "$GITHUB_STEP_SUMMARY"
           fi

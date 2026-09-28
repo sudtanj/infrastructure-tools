@@ -31,12 +31,12 @@ variable "compartment_ocid" {
 
 variable "availability_domain_index" {
   type        = number
-  description = "Availability domain index (0 = AD-1)"
+  description = "Availability domain index. Singapore (ap-singapore-1) has 1 AD → use 0."
   default     = 0
 
   validation {
-    condition     = var.availability_domain_index >= 0 && var.availability_domain_index <= 2
-    error_message = "availability_domain_index must be 0, 1, or 2."
+    condition     = var.availability_domain_index == 0
+    error_message = "ap-singapore-1 has only one availability domain. Set availability_domain_index = 0."
   }
 }
 
