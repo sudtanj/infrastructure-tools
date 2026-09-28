@@ -1,7 +1,6 @@
 #cloud-config
-# Container-Optimized OS (COS) on GCP Always Free Tier e2-micro
-# Tailscale runs DIRECTLY on the host in kernel mode (static binary).
-# No userspace mode, no SOCKS5 proxy, no sidecar. Portainer on host network.
+# COS + kernel-mode Tailscale (host) + Portainer
+# Binary on boot disk at /var/lib/docker/tailscale-bin — persists, no extra disk.
 
 bootcmd:
   # --- DNS64 ---
@@ -77,7 +76,8 @@ bootcmd:
   - sysctl -w vm.vfs_cache_pressure=50 2>/dev/null || true
 
 write_files:
-  # --- Tailscale installer script (runs at boot, re-downloads into tmpfs) ---
+  # --- Tailscale installer script ---
+  # NOTE: $${VAR} escapes Terraform interpolation so bash sees ${VAR}.
   - path: /tmp/install-tailscale.sh
     permissions: "0755"
     owner: root:root
@@ -86,9 +86,9 @@ write_files:
       set -euo pipefail
       VERSION="$1"
       DEST="$2"
-      TMPDIR="${TMPDIR:-/var/tmp}"
-      dirname="tailscale_${VERSION}_amd64"
-      tarname="${dirname}.tgz"
+      TMPDIR="$${TMPDIR:-/var/tmp}"
+      dirname="tailscale_$${VERSION}_amd64"
+      tarname="$${dirname}.tgz"
       if [[ ! -e "$TMPDIR/$tarname" ]]; then
         mkdir -p "$TMPDIR"
         curl -fsSLo "$TMPDIR/$tarname" \
@@ -96,7 +96,7 @@ write_files:
       fi
       mkdir -p "$DEST"
       tar -xzf "$TMPDIR/$tarname" -C "$DEST" --strip-components=1 \
-        "$dirname/tailscale" "$dirname/tailscaled"
+        "$${dirname}/tailscale" "$${dirname}/tailscaled"
       chmod +x "$DEST/tailscale" "$DEST/tailscaled"
 
   # --- Tailscale systemd unit (kernel mode, host-level) ---
@@ -112,12 +112,12 @@ write_files:
 
       [Service]
       Type=notify
-      ExecStartPre=/mnt/disks/tailscale/tailscaled --cleanup
-      ExecStart=/mnt/disks/tailscale/tailscaled \
+      ExecStartPre=/var/lib/docker/tailscale-bin/tailscaled --cleanup
+      ExecStart=/var/lib/docker/tailscale-bin/tailscaled \
         --state=/var/lib/tailscale/tailscaled.state \
         --socket=/run/tailscale/tailscaled.sock \
         --port=41641
-      ExecStopPost=/mnt/disks/tailscale/tailscaled --cleanup
+      ExecStopPost=/var/lib/docker/tailscale-bin/tailscaled --cleanup
       Restart=on-failure
       RestartSec=5
       RuntimeDirectory=tailscale
@@ -160,22 +160,19 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  # --- Allow sshd on both IPv4 and IPv6 (needed for tailscale SSH) ---
+  # --- Allow sshd on both IPv4 and IPv6 ---
   - sed -i -e '/^AddressFamily/d' /etc/ssh/sshd_config
   - systemctl reload sshd.service || true
 
-  # --- Ensure state dir exists ---
+  # --- State dirs ---
   - mkdir -p /var/lib/tailscale
   - chmod 700 /var/lib/tailscale
   - mkdir -p /run/tailscale
   - chmod 755 /run/tailscale
 
-  # --- Mount executable tmpfs and install Tailscale binary into it ---
-  # COS mounts /mnt/disks as noexec, but a tmpfs on top is always exec.
-  - mkdir -p /mnt/disks/tailscale
-  - mount -t tmpfs -o exec,mode=0755 tmpfs /mnt/disks/tailscale
-  - TMPDIR=/var/tmp bash /tmp/install-tailscale.sh 1.90.6 /mnt/disks/tailscale
-  - chmod +x /mnt/disks/tailscale/tailscale /mnt/disks/tailscale/tailscaled
+  # --- Install Tailscale binary to boot-disk path (survives reboot, exec allowed) ---
+  - mkdir -p /var/lib/docker/tailscale-bin
+  - TMPDIR=/var/tmp bash /tmp/install-tailscale.sh 1.90.6 /var/lib/docker/tailscale-bin
 
   # --- Enable and start Tailscale ---
   - systemctl daemon-reload
@@ -184,7 +181,7 @@ runcmd:
   - sleep 5
 
   # --- Authenticate Tailscale ---
-  - /mnt/disks/tailscale/tailscale up \
+  - /var/lib/docker/tailscale-bin/tailscale up \
       --authkey=${tailscale_auth_key} \
       --hostname=gcp-free-tier-vm \
       --advertise-tags=tag:home \
