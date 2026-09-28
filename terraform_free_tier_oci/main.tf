@@ -19,6 +19,8 @@ provider "oci" {
   private_key  = var.api_key_private_key
 }
 
+# --- Data lookups ---
+
 data "oci_identity_availability_domains" "ad" {
   compartment_id = var.tenancy_ocid
 }
@@ -37,6 +39,9 @@ data "oci_core_subnets" "public_subnets" {
   }
 }
 
+# Latest Oracle Linux 8 ARM image for A1.Flex, refreshed every plan.
+# Safe to leave dynamic because lifecycle.ignore_changes pins source_id
+# on the resource once the VM exists.
 data "oci_core_images" "oracle_linux_arm" {
   compartment_id           = var.compartment_ocid
   operating_system         = "Oracle Linux"
@@ -45,6 +50,8 @@ data "oci_core_images" "oracle_linux_arm" {
   sort_by                  = "TIMECREATED"
   sort_order               = "DESC"
 }
+
+# --- Compute instance ---
 
 resource "oci_core_instance" "free_tier_instance" {
   compartment_id      = var.compartment_ocid
@@ -72,6 +79,14 @@ resource "oci_core_instance" "free_tier_instance" {
     ssh_authorized_keys = var.ssh_public_key
   } : {}
 
+  # Faster state transitions — Terraform considers the resource
+  # created as soon as the API accepts the launch.
+  timeouts {
+    create = "10m"
+    update = "10m"
+    delete = "10m"
+  }
+
   lifecycle {
     prevent_destroy = true
     ignore_changes = [
@@ -80,6 +95,8 @@ resource "oci_core_instance" "free_tier_instance" {
     ]
   }
 }
+
+# --- Outputs (sensitive — OCIDs / IPs not shown in CI logs) ---
 
 output "instance_public_ip" {
   value     = oci_core_instance.free_tier_instance.public_ip

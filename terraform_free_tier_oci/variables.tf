@@ -6,31 +6,26 @@ variable "region" {
 
 variable "tenancy_ocid" {
   type        = string
-  description = "OCID of the tenancy"
   sensitive   = true
 }
 
 variable "user_ocid" {
   type        = string
-  description = "OCID of the OCI user"
   sensitive   = true
 }
 
 variable "api_key_fingerprint" {
   type        = string
-  description = "Fingerprint of the OCI API public key"
   sensitive   = true
 }
 
 variable "api_key_private_key" {
   type        = string
-  description = "Private key content for the OCI API"
   sensitive   = true
 }
 
 variable "compartment_ocid" {
   type        = string
-  description = "OCID of the compartment"
   sensitive   = true
 }
 
@@ -53,14 +48,12 @@ variable "instance_name" {
 
 variable "boot_volume_size_in_gbs" {
   type        = number
-  description = "Boot volume size in GB"
   default     = 50
 }
 
 variable "instance_ocpus" {
-  type        = number
-  description = "OCPUs for the A1.Flex instance"
-  default     = 2
+  type    = number
+  default = 2
 
   validation {
     condition     = var.instance_ocpus >= 1 && var.instance_ocpus <= 4
@@ -69,9 +62,8 @@ variable "instance_ocpus" {
 }
 
 variable "instance_memory_in_gbs" {
-  type        = number
-  description = "Memory in GB for the A1.Flex instance"
-  default     = 12
+  type    = number
+  default = 12
 
   validation {
     condition     = var.instance_memory_in_gbs >= 1 && var.instance_memory_in_gbs <= 24
