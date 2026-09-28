@@ -24,7 +24,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
 │   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
-│   └── init-tailscale-portainer.sh   # Standalone Tailscale & Portainer deployment script
+│   └── init-portainer.sh             # Deploy latest Portainer CE only
 └── terraform_free_tier_gcp/
     ├── cloud-init.yaml.tftpl         # Cloud-config for COS startup, Tailscale & Portainer setup
     ├── main.tf                       # GCP e2-micro instance, firewall, and SA definitions
@@ -49,7 +49,7 @@ Provisions a zero-cost `e2-micro` Google Compute Engine instance in US regions (
 
 - **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
-- **`init-tailscale-portainer.sh`**: Standalone host setup script for Tailscale VPN and Portainer container management UI.
+- **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
 
 ### 3. GitHub Actions CI/CD (`.github/workflows/`)
 
