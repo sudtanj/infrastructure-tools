@@ -8,12 +8,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   pull-requests: write
 
 jobs:
   # -------------------------------------------------------------
-  # Job 1: Find all subdirectories containing *.tf files
+  # Job 1: Find deployable folders (those with a cloud {} block)
   # -------------------------------------------------------------
   detect-directories:
     name: "Detect Terraform Directories"
@@ -27,16 +26,23 @@ jobs:
       - name: Find Terraform Folders
         id: set-matrix
         run: |
-          DIRS=$(find . -not -path '*/.*' -type f -name '*.tf' -exec dirname {} \; | sort -u | jq -R . | jq -s -c .)
+          # Only folders that declare an HCP Terraform cloud {} block are
+          # deployable units. Reusable modules and plain provider-only
+          # folders are ignored.
+          DIRS=$(find . -not -path '*/.*' -type f -name '*.tf' \
+                   -exec grep -l 'cloud[[:space:]]*{' {} + \
+                 | xargs -n1 dirname | sort -u \
+                 | jq -R . | jq -s -c .)
           echo "Found directories: $DIRS"
-          echo "matrix=$DIRS" >> $GITHUB_OUTPUT
+          echo "matrix=$DIRS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------
-  # Job 2: Run Formatting, Initialization & Terraform Plan
+  # Job 2: Format, Init & Plan
   # -------------------------------------------------------------
   terraform-plan:
     name: "Plan (${{ matrix.dir }})"
     needs: detect-directories
+    if: ${{ needs.detect-directories.outputs.matrix != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -54,13 +60,8 @@ jobs:
           if [ "$CLEAN_DIR" = "." ] || [ -z "$CLEAN_DIR" ]; then
             CLEAN_DIR="root"
           fi
-          echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          echo "workspace_name=$CLEAN_DIR" >> "$GITHUB_OUTPUT"
+          echo "Resolved workspace: ${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-$CLEAN_DIR"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -76,39 +77,40 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-terraform-providers-
 
+      - name: Debug TF env (names only, no values)
+        run: env | grep -E '^(TF|TFE)_' | sed 's/=.*/=<redacted>/' | sort
+
       - name: Terraform Format Check
         run: terraform fmt -check
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Init
         env:
-          TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+          TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-${{ steps.workspace.outputs.workspace_name }}"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          terraform init
+          terraform init -input=false
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Plan
         env:
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-        run: |
-          terraform plan \
-            -input=false \
-            -no-color \
-            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
-            > /dev/null 2>&1
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-${{ steps.workspace.outputs.workspace_name }}"
+        run: terraform plan -input=false -no-color
         working-directory: ${{ matrix.dir }}
 
   # -------------------------------------------------------------
-  # Job 3: Protected Apply Step (Requires Manual Approval)
+  # Job 3: Protected Apply (manual approval via "production" env)
   # -------------------------------------------------------------
   terraform-apply:
     name: "Apply (${{ matrix.dir }})"
     needs: [detect-directories, terraform-plan]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.detect-directories.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     environment: production
     strategy:
@@ -127,13 +129,7 @@ jobs:
           if [ "$CLEAN_DIR" = "." ] || [ -z "$CLEAN_DIR" ]; then
             CLEAN_DIR="root"
           fi
-          echo "workspace_name=$CLEAN_DIR" >> $GITHUB_OUTPUT
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          echo "workspace_name=$CLEAN_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -151,22 +147,17 @@ jobs:
 
       - name: Terraform Init
         env:
-          TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform.d/plugin-cache
+          TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-${{ steps.workspace.outputs.workspace_name }}"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          terraform init
+          terraform init -input=false
         working-directory: ${{ matrix.dir }}
 
       - name: Terraform Apply
         env:
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'gcp' }}-${{ steps.workspace.outputs.workspace_name }}"
-        run: |
-          terraform apply \
-            -auto-approve \
-            -input=false \
-            -var="gcp_project_id=${{ secrets.GCP_PROJECT_ID }}" \
-            > /dev/null 2>&1
+          TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-${{ steps.workspace.outputs.workspace_name }}"
+        run: terraform apply -auto-approve -input=false -no-color
         working-directory: ${{ matrix.dir }}
