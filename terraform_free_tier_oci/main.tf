@@ -5,12 +5,7 @@ terraform {
   # HCP Terraform (cloud backend). Replaces local state entirely.
   # org + workspace names are not secrets — safe to commit.
   # ---------------------------------------------------------------------------
-  cloud {
-    organization = "YOUR_HCP_TERRAFORM_ORG"
-    workspaces {
-      name = "oci-free-tier"
-    }
-  }
+  cloud {}
 
   required_providers {
     oci = {
