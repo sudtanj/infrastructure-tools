@@ -12,6 +12,7 @@ on:
           - all
           - init-tailscale-portainer
           - init-paseo-codex
+          - init-tailscale
           # add new script names here as you create them
 permissions:
   id-token: write
