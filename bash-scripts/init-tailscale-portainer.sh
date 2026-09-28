@@ -110,7 +110,7 @@ exec tail -f /dev/null
 ENTRYPOINT
 
 BUILD_LOG=$(mktemp)
-if ! docker build -t "$SIDECAR_IMAGE" "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
+if ! docker build --network host -t "$SIDECAR_IMAGE" "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
   printf '%s\n' "[!] sidecar build failed" >&2
   printf '%s\n' "---- build tail (redacted) ----" >&2
   tail -40 "$BUILD_LOG" | redact >&2
