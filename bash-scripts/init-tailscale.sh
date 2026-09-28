@@ -1,11 +1,10 @@
 #!/bin/bash
 # bash-scripts/upsert-tailscale.sh
-# Upsert Tailscale. Handles COS noexec by mounting tmpfs on the bin dir.
-# Idempotent: install / update / no-op depending on state.
+# Upsert Tailscale. Uses /var/lib/cloud (exec + permissive SELinux context).
 
 set -euo pipefail
 
-TS_BIN_DIR="/var/lib/docker/tailscale-bin"
+TS_BIN_DIR="/var/lib/cloud/tailscale-bin"
 TS_STATE_DIR="/var/lib/tailscale"
 TS_SOCKET="/run/tailscale/tailscaled.sock"
 TS_UNIT="/etc/systemd/system/tailscaled.service"
@@ -16,25 +15,20 @@ TS_AUTHKEY="${TS_AUTHKEY:-}"
 
 echo "[*] upsert-tailscale start"
 
-# ---------------------------------------------------------------------------
-# 1. Ensure bin dir exists and is executable (tmpfs mount)
-# ---------------------------------------------------------------------------
+# --- Executable bin directory ---
 echo "[>] ensuring executable bin directory"
 sudo mkdir -p "$TS_BIN_DIR"
 if ! sudo mountpoint -q "$TS_BIN_DIR"; then
   echo "[>] mounting tmpfs (exec) on ${TS_BIN_DIR}"
   sudo mount -t tmpfs -o exec,mode=0755 tmpfs "$TS_BIN_DIR"
 fi
+sudo chmod 755 "$TS_BIN_DIR"
 echo "[+] bin dir ready"
 
-# ---------------------------------------------------------------------------
-# 2. Persistent tarball cache (so re-installs skip the download)
-# ---------------------------------------------------------------------------
+# --- Persistent tarball cache ---
 sudo mkdir -p "$TS_CACHE_DIR"
 
-# ---------------------------------------------------------------------------
-# 3. Determine latest version
-# ---------------------------------------------------------------------------
+# --- Latest version ---
 echo "[>] fetching latest version"
 LATEST=$(curl -fsSL https://pkgs.tailscale.com/stable/ \
   | grep -oE 'tailscale_[0-9]+\.[0-9]+\.[0-9]+_amd64\.tgz' \
@@ -44,9 +38,7 @@ LATEST=$(curl -fsSL https://pkgs.tailscale.com/stable/ \
 [ -n "$LATEST" ] || { echo "[x] cannot determine latest version" >&2; exit 1; }
 echo "[+] latest: ${LATEST}"
 
-# ---------------------------------------------------------------------------
-# 4. Detect current state
-# ---------------------------------------------------------------------------
+# --- Current state ---
 INSTALLED=""
 if [ -x "${TS_BIN_DIR}/tailscaled" ]; then
   INSTALLED=$("${TS_BIN_DIR}/tailscaled" --version 2>/dev/null | awk '{print $1}' || echo "")
@@ -63,9 +55,7 @@ else
   ACTION="update"
 fi
 
-# ---------------------------------------------------------------------------
-# 5. Write installer if missing
-# ---------------------------------------------------------------------------
+# --- Installer ---
 if [ ! -x "$TS_INSTALLER" ]; then
   echo "[>] writing installer to ${TS_INSTALLER}"
   sudo tee "$TS_INSTALLER" >/dev/null <<'INSTALLER'
@@ -84,14 +74,12 @@ fi
 mkdir -p "$DEST"
 tar -xzf "$TMPDIR/$tarname" -C "$DEST" --strip-components=1 \
   "$dirname/tailscale" "$dirname/tailscaled"
-chmod +x "$DEST/tailscale" "$DEST/tailscaled"
+chmod 755 "$DEST/tailscale" "$DEST/tailscaled"
 INSTALLER
   sudo chmod +x "$TS_INSTALLER"
 fi
 
-# ---------------------------------------------------------------------------
-# 6. Install or update
-# ---------------------------------------------------------------------------
+# --- Install or update ---
 if [ "$ACTION" != "none" ]; then
   if [ "$ACTION" = "update" ]; then
     echo "[>] stopping tailscaled for update"
@@ -132,17 +120,13 @@ else
   echo "[+] binary already correct"
 fi
 
-# ---------------------------------------------------------------------------
-# 7. State and socket directories
-# ---------------------------------------------------------------------------
+# --- State dirs ---
 sudo mkdir -p "$TS_STATE_DIR"
 sudo chmod 700 "$TS_STATE_DIR"
 sudo mkdir -p /run/tailscale
 sudo chmod 755 /run/tailscale
 
-# ---------------------------------------------------------------------------
-# 8. Systemd unit
-# ---------------------------------------------------------------------------
+# --- Systemd unit ---
 WANT_UNIT=1
 if [ -f "$TS_UNIT" ] && grep -q "ExecStart=${TS_BIN_DIR}/tailscaled" "$TS_UNIT" 2>/dev/null; then
   WANT_UNIT=0
@@ -184,9 +168,7 @@ fi
 
 sudo systemctl enable tailscaled.service >/dev/null 2>&1
 
-# ---------------------------------------------------------------------------
-# 9. Service
-# ---------------------------------------------------------------------------
+# --- Service ---
 if [ "$ACTION" != "none" ] || ! sudo systemctl is-active --quiet tailscaled.service; then
   echo "[>] starting tailscaled"
   sudo systemctl restart tailscaled.service
@@ -200,9 +182,7 @@ if ! sudo systemctl is-active --quiet tailscaled.service; then
 fi
 echo "[+] tailscaled running"
 
-# ---------------------------------------------------------------------------
-# 10. Authenticate if not already
-# ---------------------------------------------------------------------------
+# --- Auth ---
 if sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" ip -4 >/dev/null 2>&1; then
   TS_IP=$(sudo "${TS_BIN_DIR}/tailscale" --socket="$TS_SOCKET" ip -4 | head -1)
   echo "[+] already authenticated: ${TS_IP}"
@@ -228,9 +208,7 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# 11. Summary
-# ---------------------------------------------------------------------------
+# --- Summary ---
 FINAL=$("${TS_BIN_DIR}/tailscaled" --version 2>/dev/null | awk '{print $1}')
 echo "[>] summary"
 echo "[*] action: ${ACTION}"
