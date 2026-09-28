@@ -48,10 +48,9 @@ mkdir -p "$BUILD_DIR" || fail "build dir not writable"
 cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
 FROM alpine:3.20
 
-RUN apk add --no-cache \
-      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
-      redsocks iptables iproute2
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.20/community" >> /etc/apk/repositories \
+    && apk update \
+    && apk add --no-cache redsocks iptables iproute2
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
