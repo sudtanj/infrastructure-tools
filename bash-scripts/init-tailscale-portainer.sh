@@ -1,20 +1,13 @@
 #!/bin/bash
 # bash-scripts/init-tailscale-portainer.sh
-# Self-contained: configures Docker DNS64, builds sidecar, runs all containers.
+# Runs ON the VM via IAP SSH. Idempotent.
 
 set -euo pipefail
 
 TS_AUTHKEY="${TS_AUTHKEY:-}"
 TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
-TS_NETWORK="${TS_NETWORK:-tailscale-net}"
-SIDECAR_IMAGE="${SIDECAR_IMAGE:-ts-sidecar:local}"
 PORTAINER_SNAPSHOT_INTERVAL="${PORTAINER_SNAPSHOT_INTERVAL:-15m}"
-BUILD_DIR="/tmp/ts-sidecar-build"
-DAEMON_JSON="/etc/docker/daemon.json"
-
-DNS64_PRIMARY="2001:4860:4860::6464"
-DNS64_SECONDARY="2001:4860:4860::64"
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -22,52 +15,27 @@ ok()     { printf '%s\n' "[+] $*"; }
 warn()   { printf '%s\n' "[!] $*" >&2; }
 fail()   { printf '%s\n' "[x] $*" >&2; exit 1; }
 
-redact() {
-  grep -vE \
-    '([0-9]{1,3}\.){3}[0-9]{1,3}|@[A-Za-z0-9.-]+\.|ts\.net|\.googleapis\.com|projects/[0-9]+|zones/[a-z0-9-]+|instances/[A-Za-z0-9-]+|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer [A-Za-z0-9._-]+|tskey-[A-Za-z0-9-]+' \
-    || true
-}
-
 container_state() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo "missing"; }
 container_netmode() { docker inspect -f '{{.HostConfig.NetworkMode}}' "$1" 2>/dev/null || echo "missing"; }
 
 status "init start"
 
 # ---------------------------------------------------------------------------
-# 1. Configure Docker daemon DNS64 (self-contained, no cloud-init dependency)
+# 0. Neutralize any competing systemd unit
 # ---------------------------------------------------------------------------
-step "configuring docker daemon DNS64"
-
-WANT_DNS='["'"$DNS64_PRIMARY"'","'"$DNS64_SECONDARY"'"]'
-CURRENT_DNS=""
-if sudo test -f "$DAEMON_JSON"; then
-  CURRENT_DNS=$(sudo cat "$DAEMON_JSON" | grep -o '"dns":[^]]*]' || true)
-fi
-
-if [ "$CURRENT_DNS" = "\"dns\":$WANT_DNS" ]; then
-  ok "docker daemon already has DNS64"
+step "disabling competing systemd units"
+if systemctl list-unit-files 2>/dev/null | grep -q '^containers.service'; then
+  sudo systemctl stop containers.service 2>/dev/null || true
+  sudo systemctl disable containers.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/containers.service
+  sudo systemctl daemon-reload 2>/dev/null || true
+  ok "containers.service removed"
 else
-  sudo mkdir -p /etc/docker
-  sudo tee "$DAEMON_JSON" >/dev/null <<EOF
-{
-  "dns": ["$DNS64_PRIMARY", "$DNS64_SECONDARY"],
-  "dns-opts": ["timeout:2", "attempts:3"],
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "5m",
-    "max-file": "2"
-  },
-  "live-restore": true,
-  "iptables": false
-}
-EOF
-  sudo systemctl restart docker >/dev/null 2>&1 || fail "docker restart failed"
-  sleep 3
-  ok "docker daemon restarted with DNS64"
+  ok "no competing unit"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Pre-flight credentials
+# 1. Credentials
 # ---------------------------------------------------------------------------
 step "checking credentials"
 TS_STATE_PRESENT=0
@@ -88,131 +56,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Host IPv6 check
+# 2. Clean up ALL competing containers
 # ---------------------------------------------------------------------------
-step "checking host IPv6 connectivity"
-if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
-  ok "host has global IPv6 address"
-else
-  fail "host has no global IPv6 address"
-fi
-
-if ip -6 route show default 2>/dev/null | grep -q "default"; then
-  ok "host has IPv6 default route"
-else
-  fail "host has no IPv6 default route"
-fi
+step "cleaning up containers"
+docker rm -f portainer tailscale ts-sidecar ts-proxy >/dev/null 2>&1 || true
+ok "cleanup done"
 
 # ---------------------------------------------------------------------------
-# 4. /dev/net/tun
-# ---------------------------------------------------------------------------
-if [ ! -e /dev/net/tun ]; then
-  sudo mkdir -p /dev/net 2>/dev/null || true
-  sudo mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
-  sudo chmod 666 /dev/net/tun >/dev/null 2>&1 || true
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Docker network with DNS64
-# ---------------------------------------------------------------------------
-step "ensuring docker network with DNS64"
-
-docker rm -f portainer ts-sidecar tailscale >/dev/null 2>&1 || true
-docker network rm "$TS_NETWORK" >/dev/null 2>&1 || true
-
-docker network create \
-  --driver bridge \
-  --dns "$DNS64_PRIMARY" \
-  --dns "$DNS64_SECONDARY" \
-  "$TS_NETWORK" >/dev/null 2>&1 || fail "network create failed"
-
-ok "network created with DNS64"
-
-# ---------------------------------------------------------------------------
-# 6. Build sidecar
-# ---------------------------------------------------------------------------
-step "building sidecar image"
-mkdir -p "$BUILD_DIR" || fail "build dir not writable"
-
-cat > "${BUILD_DIR}/Dockerfile" <<'DOCKERFILE'
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       redsocks iptables iproute2 ca-certificates dnsutils \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-ENTRYPOINT ["/entrypoint.sh"]
-DOCKERFILE
-
-cat > "${BUILD_DIR}/entrypoint.sh" <<'ENTRYPOINT'
-#!/bin/sh
-set -e
-
-PROXY_SERVER="${PROXY_SERVER:-tailscale}"
-PROXY_PORT="${PROXY_PORT:-1055}"
-LOCAL_PORT="${LOCAL_PORT:-12345}"
-
-cat > /etc/redsocks.conf <<EOF
-base {
-    log_debug = off;
-    log_info = off;
-    log = "stderr";
-    daemon = off;
-    redirector = iptables;
-}
-
-redsocks {
-    local_ip = 127.0.0.1;
-    local_port = ${LOCAL_PORT};
-    ip = ${PROXY_SERVER};
-    port = ${PROXY_PORT};
-    type = socks5;
-}
-EOF
-
-/usr/sbin/redsocks -c /etc/redsocks.conf &
-
-for i in $(seq 1 30); do
-  if (echo > /dev/tcp/127.0.0.1/${LOCAL_PORT}) 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-
-iptables -t nat -N REDSOCKS 2>/dev/null || true
-iptables -t nat -F REDSOCKS
-
-for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
-            169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 \
-            224.0.0.0/4 240.0.0.0/4; do
-  iptables -t nat -A REDSOCKS -d "$cidr" -j RETURN
-done
-
-iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports ${LOCAL_PORT}
-iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
-
-exec tail -f /dev/null
-ENTRYPOINT
-
-BUILD_LOG=$(mktemp)
-if docker build --network host -t "$SIDECAR_IMAGE" "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
-  ok "sidecar image built"
-  rm -f "$BUILD_LOG"
-else
-  warn "sidecar build failed"
-  printf '%s\n' "---- build tail (redacted) ----" >&2
-  tail -40 "$BUILD_LOG" | redact >&2
-  printf '%s\n' "---- end ----" >&2
-  rm -f "$BUILD_LOG"
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# 7. Tailscale on host network
+# 3. Start Tailscale on host network
 # ---------------------------------------------------------------------------
 step "starting tailscale on host network"
 
@@ -227,8 +78,7 @@ docker run -d --name tailscale --restart always \
   -e TS_USERSPACE=true \
   -e TS_HOSTNAME="${TS_HOSTNAME}" \
   -e "TS_EXTRA_ARGS=--advertise-tags=tag:home" \
-  -e TS_AUTH_ONCE=true \
-  -e TS_ACCEPT_DNS=true \
+  -e TS_AUTH_ONCE=true -e TS_ACCEPT_DNS=true \
   -e TS_SOCKS5_SERVER="0.0.0.0:${TS_SOCKS5_PORT}" \
   -e TS_OUTBOUND_HTTP_PROXY_LISTEN="0.0.0.0:${TS_SOCKS5_PORT}" \
   -e TZ=Asia/Jakarta \
@@ -238,24 +88,35 @@ docker run -d --name tailscale --restart always \
   >/dev/null 2>&1 || fail "docker run failed"
 
 sleep 3
+
+# ---------------------------------------------------------------------------
+# 4. Verify it's actually on host network
+# ---------------------------------------------------------------------------
+step "verifying host network"
+
 NETMODE=$(container_netmode tailscale)
 if [ "$NETMODE" != "host" ]; then
-  fail "tailscale network mode is '${NETMODE}', expected 'host'"
+  fail "container is on network '${NETMODE}', expected 'host'"
 fi
-ok "tailscale network mode verified: host"
+ok "network mode: host"
 
-if docker exec tailscale sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q inet6' 2>/dev/null; then
-  ok "tailscale container has IPv6"
-else
-  fail "container lacks IPv6"
+# Verify IPv6 is visible inside the container
+if ! docker exec tailscale sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q inet6'; then
+  warn "container has no IPv6 — check host IPv6 config"
+  docker exec tailscale ip -6 addr show 2>&1 | head -20 >&2 || true
+  fail "IPv6 unavailable in container"
 fi
+ok "IPv6 visible in container"
 
+# ---------------------------------------------------------------------------
+# 5. Wait for Tailscale to connect
+# ---------------------------------------------------------------------------
 step "waiting for tailscale to connect"
 TS_READY=0
 for i in $(seq 1 60); do
   STATE=$(container_state tailscale)
   if [ "$STATE" != "running" ]; then
-    warn "tailscale container died (state=${STATE})"
+    warn "container died (state=${STATE})"
     break
   fi
   if docker exec tailscale tailscale ip -4 >/dev/null 2>&1; then
@@ -267,40 +128,15 @@ done
 
 if [ "$TS_READY" -ne 1 ]; then
   warn "tailscale did not connect in 120s"
-  printf '%s\n' "---- tailscale last 20 lines (redacted) ----" >&2
-  docker logs --tail 20 tailscale 2>&1 | redact >&2 || true
+  printf '%s\n' "---- tailscale logs (last 30 lines) ----" >&2
+  docker logs --tail 30 tailscale >&2 || true
   printf '%s\n' "---- end ----" >&2
   fail "tailscale connection failed"
 fi
 ok "tailscale connected"
 
 # ---------------------------------------------------------------------------
-# 8. Sidecar
-# ---------------------------------------------------------------------------
-step "starting sidecar"
-docker run -d --name ts-sidecar --restart always \
-  --network "$TS_NETWORK" \
-  --cap-add NET_ADMIN --cap-add NET_RAW \
-  --add-host=tailscale:host-gateway \
-  --cpus 0.05 --cpu-shares 128 \
-  --memory 128m --memory-swap 128m \
-  -e PROXY_SERVER=tailscale \
-  -e PROXY_PORT="${TS_SOCKS5_PORT}" \
-  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
-  "$SIDECAR_IMAGE" \
-  >/dev/null 2>&1 || fail "sidecar failed to start"
-
-sleep 5
-if [ "$(container_state ts-sidecar)" = "running" ]; then
-  ok "sidecar running"
-else
-  warn "sidecar not running"
-  docker logs --tail 20 ts-sidecar 2>&1 | redact >&2 || true
-  fail "sidecar not stable"
-fi
-
-# ---------------------------------------------------------------------------
-# 9. Portainer
+# 6. Start Portainer
 # ---------------------------------------------------------------------------
 step "starting portainer"
 docker run -d --name portainer --restart always \
@@ -319,7 +155,7 @@ ok "portainer running"
 docker image prune -f >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
-# 10. Verifications
+# 7. Verify SOCKS5
 # ---------------------------------------------------------------------------
 step "verifying socks5"
 PROXY_UP=0
@@ -334,41 +170,19 @@ done
 if [ "$PROXY_UP" -eq 1 ]; then
   ok "socks5 listening"
 else
-  warn "socks5 not reachable"
-fi
-
-step "verifying sidecar path"
-SIDECAR_PATH=0
-if docker exec ts-sidecar sh -c "echo > /dev/tcp/tailscale/${TS_SOCKS5_PORT}" 2>/dev/null; then
-  SIDECAR_PATH=1
-  ok "sidecar can reach proxy"
-else
-  warn "sidecar cannot reach proxy"
-fi
-
-step "verifying DNS64 resolution from sidecar"
-DNS_OK=0
-if docker exec ts-sidecar sh -c "nslookup google.com >/dev/null 2>&1"; then
-  DNS_OK=1
-  ok "DNS resolution works"
-else
-  warn "DNS resolution failed"
+  fail "socks5 not reachable"
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Summary
+# 8. Final check: re-verify network mode (catch anything that tried to recreate)
 # ---------------------------------------------------------------------------
-step "summary"
+sleep 10
+FINAL_MODE=$(container_netmode tailscale)
+if [ "$FINAL_MODE" != "host" ]; then
+  fail "tailscale was re-created on network '${FINAL_MODE}' — something is respawning it"
+fi
+
 RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
-status "containers running: ${RUNNING}"
-status "tailscale ready: ${TS_READY}"
-status "socks5 ready: ${PROXY_UP}"
-status "sidecar path ready: ${SIDECAR_PATH}"
-status "dns resolution ready: ${DNS_OK}"
-
-if [ "$TS_READY" -ne 1 ] || [ "$PROXY_UP" -ne 1 ] || [ "$SIDECAR_PATH" -ne 1 ]; then
-  fail "init failed"
-fi
-
+status "running containers: ${RUNNING}"
 ok "init done"
 exit 0
