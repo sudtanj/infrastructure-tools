@@ -13,6 +13,7 @@ on:
           - init-portainer
           - init-paseo-codex
           - init-tailscale
+          - upsert-github-runner
           # add new script names here as you create them
 permissions:
   id-token: write
@@ -158,7 +159,7 @@ jobs:
           SCRIPT_PATH: ${{ matrix.script }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
           # Optional: comma-separated prefixes to filter. Empty = export everything.
-          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY"
+          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY,GH_RUNNER_"
         run: |
           set +e
           LOG=$(mktemp)

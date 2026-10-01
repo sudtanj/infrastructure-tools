@@ -25,6 +25,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
+│   ├── upsert-github-runner.sh    # Upsert GitHub Actions self-hosted runner
 │   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
 │   └── init-portainer.sh             # Deploy latest Portainer only
 ├── terraform_free_tier_gcp/
@@ -66,6 +67,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 ### 3. Startup & Management Scripts (`bash-scripts/`)
 
 - **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates.
+- **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
 - **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
 
