@@ -17,7 +17,6 @@ PASEO_PORT="${PASEO_PORT:-6767}"
 
 IMAGE="sudtanj/paseo-codex:latest"
 CONTAINER_NAME="paseo-codex"
-SECRETS_FILE="/run/paseo/secrets.env"
 CODEX_CONFIG_DIR="/home/paseo/.codex"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_DIR}/config.toml"
 
@@ -32,12 +31,6 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "[x] missing required env: ${missing[*]}" >&2
   exit 1
 fi
-
-if [ ! -f "$SECRETS_FILE" ]; then
-  echo "[x] secrets file not found at $SECRETS_FILE" >&2
-  exit 1
-fi
-chmod 600 "$SECRETS_FILE"
 echo "[+] env ok"
 
 # --- Remove existing container ---
@@ -50,8 +43,8 @@ docker volume create paseo-home      >/dev/null
 docker volume create paseo-workspace >/dev/null
 
 # --- Seed Codex retry config into the persistent volume ---
-# This is idempotent: it overwrites the config each run so the retry
-# settings stay consistent even if the volume was previously populated.
+# Overwrites each run so retry settings stay consistent even if the
+# volume was previously populated by a different version of this script.
 echo "[>] seeding Codex retry config"
 docker run --rm \
   -v paseo-home:"$CODEX_CONFIG_DIR" \
@@ -91,7 +84,6 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --security-opt no-new-privileges \
   --dns 2a00:1098:2b::1 \
   --dns 2a01:4f9:c010:3f02::1 \
-  --env-file "$SECRETS_FILE" \
   --health-cmd "curl -fsS --max-time 3 http://127.0.0.1:${PASEO_PORT}/api/health || exit 1" \
   --health-interval=30s \
   --health-retries=3 \
@@ -100,8 +92,10 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -v paseo-home:/home/paseo \
   -v paseo-workspace:/workspace:rw \
   -e CODEX_BASE_URL="$CODEX_BASE_URL" \
+  -e CODEX_API_KEY="$CODEX_API_KEY" \
   -e CODEX_MODEL="$CODEX_MODEL" \
   -e CODEX_MAX_TOKEN="$CODEX_MAX_TOKEN" \
+  -e GH_TOKEN="$GH_TOKEN" \
   -e TERM=xterm-256color \
   -e CODEX_SANDBOX_MODE="danger-full-access" \
   -e CODEX_APPROVAL_POLICY="never" \
