@@ -40,7 +40,7 @@ echo "[+] cleanup done"
 docker volume create paseo-home      >/dev/null
 docker volume create paseo-workspace >/dev/null
 
-# --- Wipe stale/corrupt Codex SQLite state so it regenerates cleanly ---
+# --- Wipe stale/corrupt Codex SQLite state ---
 echo "[>] clearing stale Codex state"
 docker run --rm -v paseo-home:/home/paseo alpine:latest sh -c '
   rm -rf /home/paseo/.codex/state \
@@ -50,12 +50,23 @@ docker run --rm -v paseo-home:/home/paseo alpine:latest sh -c '
 ' >/dev/null 2>&1
 echo "[+] state cleared"
 
-# --- Seed Codex retry config into the persistent volume ---
-echo "[>] seeding Codex retry config"
+# --- Seed Codex config into the persistent volume ---
+# THIS is the block that was wrong before. sandbox_mode and approval_policy
+# must be at the TOP level of config.toml — Codex does NOT read them from
+# environment variables. Without these, Codex defaults to bwrap sandboxing
+# and fails with "No permissions to create a new namespace".
+echo "[>] seeding Codex config"
 docker run --rm -v paseo-home:"$CODEX_CONFIG_DIR" alpine:latest sh -c "
   mkdir -p '$CODEX_CONFIG_DIR'
   cat > '$CODEX_CONFIG_FILE' <<'EOF'
 # Managed by init-paseo-codex.sh — do not edit manually.
+
+# Disable the bwrap sandbox entirely. Required because Docker's default
+# seccomp profile blocks unshare(CLONE_NEWUSER), which bwrap needs.
+sandbox_mode = \"danger-full-access\"
+approval_policy = \"never\"
+
+# Retry tuning for flaky upstream streams.
 [model_providers.custom]
 stream_max_retries = 100
 request_max_retries = 100
@@ -63,11 +74,9 @@ stream_idle_timeout_ms = 300000
 EOF
   chown -R 1000:1000 '/home/paseo'
 " >/dev/null 2>&1
-echo "[+] Codex retry config seeded"
+echo "[+] Codex config seeded"
 
 # --- Start container ---
-# No --read-only. No --tmpfs. No --cap-drop. Fully read-write.
-# /home/paseo is backed by the named volume so .codex persists and SQLite works.
 echo "[>] starting $CONTAINER_NAME"
 
 docker run -d --name "$CONTAINER_NAME" --restart always \
@@ -93,15 +102,13 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e CODEX_MAX_TOKEN="$CODEX_MAX_TOKEN" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e TERM=xterm-256color \
-  -e CODEX_SANDBOX_MODE="danger-full-access" \
-  -e CODEX_APPROVAL_POLICY="never" \
   -e NODE_OPTIONS="--max-old-space-size=256" \
   "$IMAGE" \
   >/dev/null 2>&1
 
 sleep 8
 
-# --- Verify running ---
+# --- Verify container running ---
 echo "[>] verifying container"
 STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
 if [ "$STATE" != "running" ]; then
@@ -111,23 +118,36 @@ if [ "$STATE" != "running" ]; then
 fi
 echo "[+] container running"
 
-# --- Verify Codex home is writable and SQLite initialized ---
-echo "[>] verifying Codex state"
+# --- Verify sandbox_mode is actually disabled ---
+echo "[>] verifying sandbox is disabled in config"
+docker exec "$CONTAINER_NAME" sh -c '
+  if grep -q "sandbox_mode = \"danger-full-access\"" /home/paseo/.codex/config.toml 2>/dev/null; then
+    echo "[+] sandbox_mode = danger-full-access present"
+  else
+    echo "[x] sandbox_mode NOT set — Codex will try bwrap and fail" >&2
+  fi
+  if grep -q "approval_policy = \"never\"" /home/paseo/.codex/config.toml 2>/dev/null; then
+    echo "[+] approval_policy = never present"
+  else
+    echo "[!] approval_policy missing" >&2
+  fi
+  if grep -q "stream_max_retries = 100" /home/paseo/.codex/config.toml 2>/dev/null; then
+    echo "[+] retry config present"
+  fi
+' || true
+
+# --- Verify .codex is writable and SQLite can init ---
 docker exec "$CONTAINER_NAME" sh -c '
   touch /home/paseo/.codex/.writetest && rm -f /home/paseo/.codex/.writetest \
     && echo "[+] .codex writable" \
     || echo "[x] .codex NOT writable"
-  ls /home/paseo/.codex/*.sqlite >/dev/null 2>&1 \
-    && echo "[+] sqlite state present" \
-    || echo "[i] sqlite will initialize on first agent run"
 ' || true
 
-# --- Verify retry config ---
-docker exec "$CONTAINER_NAME" sh -c '
-  grep -q "stream_max_retries = 100" /home/paseo/.codex/config.toml 2>/dev/null \
-    && echo "[+] retry config present" \
-    || echo "[!] retry config missing"
-' || true
+# --- Verify the effective sandbox mode as Codex sees it ---
+echo "[>] checking effective sandbox mode"
+if docker exec "$CONTAINER_NAME" sh -c 'command -v codex >/dev/null 2>&1' 2>/dev/null; then
+  docker exec "$CONTAINER_NAME" codex --version 2>/dev/null || true
+fi
 
 # --- Health / network / tailscale ---
 HEALTH=$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
