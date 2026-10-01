@@ -6,7 +6,7 @@
 set -euo pipefail
 
 CONTAINER_NAME="${GH_RUNNER_CONTAINER_NAME:-github-runner}"
-IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
+IMAGE="ghcr.io/youssefbrr/self-hosted-runner"
 RUNNER_CPU="0.50"
 RUNNER_MEMORY="256m"
 
@@ -41,8 +41,28 @@ docker stop --time 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 ok "cleanup done"
 
+step "checking docker daemon"
+docker info >/dev/null 2>&1 || fail "docker daemon is not available"
+ok "docker ready"
+
 step "pulling latest ${IMAGE}"
-docker pull "$IMAGE" >/dev/null 2>&1 || fail "failed to pull runner image"
+PULL_LOG=$(mktemp)
+PULL_OK=0
+for attempt in 1 2 3; do
+  if docker pull "$IMAGE" >"$PULL_LOG" 2>&1; then
+    PULL_OK=1
+    break
+  fi
+  warn "pull attempt ${attempt} failed"
+  sleep 5
+done
+if [ "$PULL_OK" -ne 1 ]; then
+  warn "docker pull output:"
+  cat "$PULL_LOG" >&2
+  rm -f "$PULL_LOG"
+  fail "failed to pull runner image"
+fi
+rm -f "$PULL_LOG"
 ok "image pulled"
 
 step "starting runner container"
