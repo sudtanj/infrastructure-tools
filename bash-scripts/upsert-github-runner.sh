@@ -6,7 +6,7 @@
 set -euo pipefail
 
 CONTAINER_NAME="${GH_RUNNER_CONTAINER_NAME:-github-runner}"
-IMAGE="ghcr.io/youssefbrr/self-hosted-runner"
+IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
 RUNNER_CPU="0.50"
 RUNNER_MEMORY="256m"
 
