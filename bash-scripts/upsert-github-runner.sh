@@ -1,7 +1,6 @@
 #!/bin/bash
 # bash-scripts/upsert-github-runner.sh
 # Idempotent deploy/update of a Dockerized GitHub self-hosted runner.
-# Uses public NAT64/DNS64 to allow IPv6-only VM to reach IPv4-only GitHub.
 
 set -euo pipefail
 
@@ -14,7 +13,6 @@ REPO="${GH_RUNNER_REPO:-}"
 REG_TOKEN="${GH_RUNNER_REG_TOKEN:-}"
 NAME="${GH_RUNNER_NAME:-${TS_HOSTNAME:-gcp-free-tier-vm}}"
 LABELS="${GH_RUNNER_LABELS:-self-hosted,linux,x64,gcp-free-tier}"
-RUNNER_GROUP="${GH_RUNNER_GROUP:-}"
 WORK_DIR="${GH_RUNNER_WORK_DIR:-_work}"
 EPHEMERAL="${GH_RUNNER_EPHEMERAL:-false}"
 DISABLE_AUTO_UPDATE="${GH_RUNNER_DISABLE_AUTO_UPDATE:-true}"
@@ -68,7 +66,6 @@ sudo docker run -d \
   -e REG_TOKEN="$REG_TOKEN" \
   -e NAME="$NAME" \
   -e LABELS="$LABELS" \
-  -e RUNNER_GROUP="$RUNNER_GROUP" \
   -e WORK_DIR="$WORK_DIR" \
   -e EPHEMERAL="$EPHEMERAL" \
   -e DISABLE_AUTO_UPDATE="$DISABLE_AUTO_UPDATE" \
