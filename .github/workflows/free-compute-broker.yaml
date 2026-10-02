@@ -1,0 +1,191 @@
+name: "Free Compute Broker"
+
+# Runs jobs for a PRIVATE repository using this PUBLIC repo's free
+# GitHub-hosted runner allowance (standard runners on public repos are
+# unmetered).
+#
+# SECURITY MODEL -- read this before enabling:
+#   * This file lives in a PUBLIC repo, so its workflow is visible to
+#     everyone. Anything it does can be copied by a fork.
+#   * It authenticates to the private repo with a credential held HERE.
+#     Treat that credential as public-adjacent: scope it to a single
+#     repository, read-only, and short-lived where possible.
+#   * It does NOT accept arbitrary shell from the dispatch payload. Only
+#     names from a fixed allowlist below are executed, as checked-out
+#     scripts that live in this repo.
+#   * Runs triggered by a fork are not trusted and are refused.
+
+on:
+  repository_dispatch:
+    types: [free-compute]
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/name of the private repo to build"
+        required: true
+        type: string
+      ref:
+        description: "Branch, tag or SHA to build"
+        required: false
+        default: "main"
+        type: string
+      task:
+        description: "Task to run (must match an allowlisted script)"
+        required: true
+        type: string
+
+# No write access is needed for the target repo; contents:read is for
+# checking out THIS repo to get the task scripts.
+permissions:
+  contents: read
+
+concurrency:
+  group: free-compute-${{ github.event.client_payload.target_repo || inputs.target_repo }}
+  cancel-in-progress: false
+
+jobs:
+  broker:
+    name: "Broker (${{ inputs.task || github.event.client_payload.task }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Authenticate dispatch
+        env:
+          # Shared secret: set the SAME value as FREE_COMPUTE_DISPATCH_SECRET
+          # in the private repo. Compared in constant time.
+          EXPECTED: ${{ secrets.FREE_COMPUTE_DISPATCH_SECRET }}
+          PROVIDED: ${{ github.event.client_payload.shared_secret || '' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "repository_dispatch" ]; then
+            echo "Manual run; skipping shared-secret check."
+            exit 0
+          fi
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::Broker is not configured: set secret FREE_COMPUTE_DISPATCH_SECRET."
+            exit 1
+          fi
+          if [ -z "$PROVIDED" ]; then
+            echo "::error::Dispatch payload is missing shared_secret."
+            exit 1
+          fi
+          # Constant-time compare so the secret cannot be recovered by timing.
+          if [ "$(printf '%s' "$EXPECTED" | wc -c)" != "$(printf '%s' "$PROVIDED" | wc -c)" ]; then
+            echo "::error::shared_secret mismatch."
+            exit 1
+          fi
+          if ! (set +e; [ "$(printf '%s\\0' "$EXPECTED" | tr -d '\\0' | sha256sum)" \
+                       = "$(printf '%s\\0' "$PROVIDED" | tr -d '\\0' | sha256sum)" ]); then
+            echo "::error::shared_secret mismatch."
+            exit 1
+          fi
+          echo "Dispatch authenticated."
+
+      - name: Resolve and validate request
+        id: req
+        env:
+          CD_TARGET: ${{ github.event.client_payload.target_repo }}
+          CD_REF: ${{ github.event.client_payload.ref }}
+          CD_TASK: ${{ github.event.client_payload.task }}
+          IN_TARGET: ${{ inputs.target_repo }}
+          IN_REF: ${{ inputs.ref }}
+          IN_TASK: ${{ inputs.task }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TARGET="$CD_TARGET"; REF="$CD_REF"; TASK="$CD_TASK"
+          # Strip the leading ./ that the emitter may send.
+          TARGET="${TARGET#./}"
+          else
+            TARGET="$IN_TARGET"; REF="$IN_REF"; TASK="$IN_TASK"
+          fi
+
+          # Strict owner/name validation -- no shell metacharacters, no
+          # path traversal, no leading dashes (would read as git flags).
+          if ! printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::Invalid target_repo: must look like owner/name"
+            exit 1
+          fi
+          # Block the classic argv-injection forms outright.
+          case "$TARGET" in
+            -*) echo "::error::target_repo may not start with '-'"; exit 1 ;;
+          esac
+          case "$REF" in
+            -*) echo "::error::ref may not start with '-'"; exit 1 ;;
+          esac
+          if printf '%s' "$REF" | grep -q '[[:space:]]'; then
+            echo "::error::ref may not contain whitespace"
+            exit 1
+          fi
+
+          # Task is used ONLY as a filename lookup against a literal
+          # allowlist. It is never eval'd or passed to a shell.
+          case "$TASK" in
+            build|test|lint|docker-build) ;;
+            *) echo "::error::Task '$TASK' is not allowlisted (build|test|lint|docker-build)"; exit 1 ;;
+          esac
+
+          echo "owner=${TARGET%%/*}" >> "$GITHUB_OUTPUT"
+          echo "target_repo=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "Resolved: $TARGET @ $REF -> task $TASK"
+
+      - name: Checkout broker scripts
+        uses: actions/checkout@v4
+
+      # Optional: mint a short-lived GitHub App installation token (expires in
+      # 1h) scoped to just the target repo. Preferred over a long-lived PAT.
+      # Leave APP_ID unset to fall back to PRIVATE_REPO_TOKEN.
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.req.outputs.owner }}
+          repositories: ${{ steps.req.outputs.target_repo }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.req.outputs.target_repo }}
+          ref: ${{ steps.req.outputs.ref }}
+          # Explicitly NOT persist-credentials, so the token is not left
+          # in .git/config for later steps to leak.
+          persist-credentials: false
+          path: target
+          token: ${{ steps.app-token.outputs.token || secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Run task
+        working-directory: target
+        env:
+          TASK: ${{ steps.req.outputs.task }}
+          TARGET_REPO: ${{ steps.req.outputs.target_repo }}
+          TARGET_REF: ${{ steps.req.outputs.ref }}
+        run: |
+          set -euo pipefail
+          SCRIPT="${GITHUB_WORKSPACE}/.github/free-compute/${TASK}.sh"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::Task script not found: $SCRIPT"
+            ls -la "${GITHUB_WORKSPACE}/.github/free-compute/" || true
+            exit 1
+          fi
+          echo "Executing allowlisted task: $SCRIPT"
+          # Runner is ephemeral and the job is untrusted-input scoped;
+          # run the script as-is rather than via `eval`.
+          bash "$SCRIPT"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Free compute run"
+            echo
+            echo "- Target: \`${{ steps.req.outputs.target_repo }}\` @ \`${{ steps.req.outputs.ref }}\`"
+            echo "- Task: \`${{ steps.req.outputs.task }}\`"
+            echo "- Result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
