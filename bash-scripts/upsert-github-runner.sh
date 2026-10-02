@@ -1,89 +1,71 @@
 #!/bin/bash
-# bash-scripts/upsert-github-runner.sh
-# Idempotent deploy/update of a Dockerized GitHub self-hosted runner.
-# The workflow preloads the image on the IPv4 runner, then loads it into
-# this IPv6-only GCP VM through IAP SSH before executing this script.
+# fix-dns64.sh
+# Configures the VM to use Google's public DNS64 resolver so that IPv6-only
+# hosts can reach IPv4-only services like GitHub's API.
 
 set -euo pipefail
 
-CONTAINER_NAME="${GH_RUNNER_CONTAINER_NAME:-github-runner}"
-IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
-RUNNER_CPU="0.50"
-RUNNER_MEMORY="256m"
+RESOLV_CONF="/etc/resolv.conf"
+BACKUP_SUFFIX=".bak.$(date +%Y%m%d_%H%M%S)"
 
-REPO="${GH_RUNNER_REPO:-}"
-REG_TOKEN="${GH_RUNNER_REG_TOKEN:-}"
-NAME="${GH_RUNNER_NAME:-${TS_HOSTNAME:-gcp-free-tier-vm}}"
-LABELS="${GH_RUNNER_LABELS:-self-hosted,linux,x64,gcp-free-tier}"
-RUNNER_GROUP="${GH_RUNNER_GROUP:-}"
-WORK_DIR="${GH_RUNNER_WORK_DIR:-_work}"
-EPHEMERAL="${GH_RUNNER_EPHEMERAL:-false}"
-DISABLE_AUTO_UPDATE="${GH_RUNNER_DISABLE_AUTO_UPDATE:-true}"
+echo "[*] Starting DNS64 configuration..."
 
-# Use Google's public DNS64 resolver to allow IPv6-only host to reach IPv4 GitHub API
-DNS64_SERVER="2001:4860:4860::6464"
-
-status() { printf '%s\n' "[*] $*"; }
-step()   { printf '%s\n' "[>] $*"; }
-ok()     { printf '%s\n' "[+] $*"; }
-warn()   { printf '%s\n' "[!] $*" >&2; }
-fail()   { printf '%s\n' "[x] $*" >&2; exit 1; }
-
-status "upsert github runner start"
-
-step "checking required env"
-missing=()
-[ -z "$REPO" ]       && missing+=("GH_RUNNER_REPO")
-[ -z "$REG_TOKEN" ]  && missing+=("GH_RUNNER_REG_TOKEN")
-if [ "${#missing[@]}" -gt 0 ]; then
-  fail "missing required env: ${missing[*]}"
-fi
-ok "env ok"
-
-step "removing existing runner container"
-docker stop --time 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-ok "cleanup done"
-
-step "checking docker daemon"
-docker info >/dev/null 2>&1 || fail "docker daemon is not available"
-ok "docker ready"
-
-step "checking runner image exists locally"
-docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "${IMAGE} is not loaded on VM"
-ok "image present"
-
-step "starting runner container"
-docker run -d \
-  --name "$CONTAINER_NAME" \
-  --restart always \
-  --network=host \
-  --dns "$DNS64_SERVER" \
-  --cpus "$RUNNER_CPU" \
-  --memory "$RUNNER_MEMORY" \
-  --memory-swap "$RUNNER_MEMORY" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e REPO="$REPO" \
-  -e REG_TOKEN="$REG_TOKEN" \
-  -e NAME="$NAME" \
-  -e LABELS="$LABELS" \
-  -e RUNNER_GROUP="$RUNNER_GROUP" \
-  -e WORK_DIR="$WORK_DIR" \
-  -e EPHEMERAL="$EPHEMERAL" \
-  -e DISABLE_AUTO_UPDATE="$DISABLE_AUTO_UPDATE" \
-  --log-driver json-file \
-  --log-opt max-size=5m \
-  --log-opt max-file=2 \
-  "$IMAGE" \
-  >/dev/null 2>&1 || fail "failed to start runner container"
-
-sleep 5
-
-STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
-if [ "$STATE" != "running" ]; then
-  warn "github-runner state: ${STATE}"
-  docker logs --tail 30 "$CONTAINER_NAME" >&2 || true
-  fail "github-runner container not running"
+# 1. Check for root
+if [ "$EUID" -ne 0 ]; then
+  echo "[x] This script must be run as root. Use: sudo bash $0" >&2
+  exit 1
 fi
 
-ok "github-runner is up and running"
+# 2. Unlock resolv.conf if it's locked (from previous attempts)
+chattr -i "$RESOLV_CONF" 2>/dev/null || true
+
+# 3. Backup existing resolv.conf
+if [ -f "$RESOLV_CONF" ] || [ -L "$RESOLV_CONF" ]; then
+    cp -L "$RESOLV_CONF" "${RESOLV_CONF}${BACKUP_SUFFIX}"
+    echo "[+] Backed up current resolv.conf to ${RESOLV_CONF}${BACKUP_SUFFIX}"
+else
+    echo "[!] No existing resolv.conf found to backup."
+fi
+
+# 4. Stop systemd-resolved from managing resolv.conf
+if systemctl is-active --quiet systemd-resolved; then
+    echo "[>] Stopping and disabling systemd-resolved..."
+    systemctl stop systemd-resolved
+    systemctl disable systemd-resolved 2>/dev/null || true
+    echo "[+] systemd-resolved stopped."
+else
+    echo "[*] systemd-resolved is not active."
+fi
+
+# 5. Write new resolv.conf with Google DNS64 servers
+echo "[>] Writing new resolv.conf with Google DNS64 servers..."
+rm -f "$RESOLV_CONF"
+cat > "$RESOLV_CONF" << 'EOF'
+# Google Public DNS64
+nameserver 2001:4860:4860::6464
+nameserver 2001:4860:4860::64
+EOF
+
+# 6. Lock the file to prevent overwriting (optional but recommended)
+if chattr +i "$RESOLV_CONF" 2>/dev/null; then
+    echo "[+] Locked resolv.conf with chattr +i."
+else
+    echo "[!] Could not lock resolv.conf (filesystem may not support it)."
+fi
+
+echo "[+] DNS64 configuration complete."
+
+# 7. Verify connectivity to GitHub
+echo ""
+echo "[>] Testing connectivity to api.github.com (this may take a moment)..."
+if curl -6 -s -f -m 15 https://api.github.com > /dev/null; then
+    echo "[+] SUCCESS: api.github.com is reachable!"
+else
+    echo "[x] FAILURE: Still cannot reach api.github.com."
+    echo "    DNS64 alone may not be enough. Your network requires a NAT64 gateway."
+    echo "    Consider using a public NAT64 service like nat64.net or level66.services."
+    exit 1
+fi
+
+echo ""
+echo "[*] Done. You can now restart your GitHub runner container."
