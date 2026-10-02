@@ -1,6 +1,7 @@
 #!/bin/bash
 # bash-scripts/upsert-github-runner.sh
 # Idempotent deploy/update of a Dockerized GitHub self-hosted runner.
+# Uses public NAT64/DNS64 for IPv6-only VMs.
 
 set -euo pipefail
 
@@ -37,6 +38,24 @@ if [ "${#missing[@]}" -gt 0 ]; then
   fail "missing required env: ${missing[*]}"
 fi
 ok "env ok"
+
+# --- Sanity: REPO must be a full URL ---
+case "$REPO" in
+  https://github.com/*/*) ok "REPO format looks OK" ;;
+  *) fail "GH_RUNNER_REPO must be a full URL, e.g. https://github.com/OWNER/REPO" ;;
+esac
+
+# --- Sanity: token length ---
+if [ ${#REG_TOKEN} -lt 20 ]; then
+  fail "GH_RUNNER_REG_TOKEN looks too short — are you sure this is a registration token?"
+fi
+ok "token length: ${#REG_TOKEN} chars"
+
+step "testing connectivity to GitHub API"
+if ! curl -6 -s -f -m 10 https://api.github.com > /dev/null; then
+    fail "Cannot reach api.github.com. NAT64/DNS64 is broken."
+fi
+ok "GitHub API reachable"
 
 step "removing existing runner container"
 sudo docker stop --time 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
