@@ -13,7 +13,14 @@ GHCR_HOSTS=(ghcr.io pkg-containers.githubusercontent.com)
 
 ghcr_nat64_addr() {
   local host="$1" ipv4 a b c d
-  ipv4=$(getent ahostsv4 "$host" | awk 'NR==1 {print $1; exit}')
+  ipv4=$(curl -fsSL --max-time 10 --retry 2 "https://dns.google/resolve?name=${host}&type=A" | grep -o '"data":"[^"]*"' | head -1 | grep -oE '[0-9.]+')
+  [ -n "$ipv4" ] || ipv4=$(getent ahostsv4 "$host" | awk 'NR==1 {print $1; exit}')
+  if [ -z "$ipv4" ]; then
+    case "$host" in
+      ghcr.io) ipv4=20.26.156.211 ;;
+      pkg-containers.githubusercontent.com) ipv4=185.199.109.154 ;;
+    esac
+  fi
   [ -n "$ipv4" ] || return 1
   IFS=. read -r a b c d <<< "$ipv4"
   printf '%s%02x%02x:%02x%02x\n' "$NAT64_PREFIX" "$a" "$b" "$c" "$d"
