@@ -1,7 +1,7 @@
 #!/bin/bash
 # bash-scripts/upsert-github-runner.sh
-# Idempotent deploy/update of a Dockerized GitHub self-hosted runner.
-# Uses public NAT64/DNS64 for IPv6-only VMs.
+# Forcefully removes and recreates the GitHub self-hosted runner container.
+# Uses public NAT64/DNS64 for IPv6-only VMs and sudo for COS.
 
 set -euo pipefail
 
@@ -57,10 +57,17 @@ if ! curl -6 -s -f -m 10 https://api.github.com > /dev/null; then
 fi
 ok "GitHub API reachable"
 
-step "removing existing runner container"
-sudo docker stop --time 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
-sudo docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-ok "cleanup done"
+# --- Explicit Container Teardown ---
+step "checking if runner container already exists"
+if sudo docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    warn "Container '${CONTAINER_NAME}' already exists. Forcefully removing it..."
+    sudo docker stop --time 10 "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    sudo docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    ok "existing container removed"
+else
+    ok "no existing container found"
+fi
+# -----------------------------------
 
 step "checking docker daemon"
 sudo docker info >/dev/null 2>&1 || fail "docker daemon is not available"
@@ -70,7 +77,7 @@ step "checking runner image exists locally"
 sudo docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "${IMAGE} is not loaded on VM"
 ok "image present"
 
-step "starting runner container with NAT64 DNS"
+step "starting fresh runner container with NAT64 DNS"
 sudo docker run -d \
   --name "$CONTAINER_NAME" \
   --restart always \
