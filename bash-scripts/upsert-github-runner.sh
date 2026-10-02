@@ -5,6 +5,19 @@
 
 set -euo pipefail
 
+# GCP free-tier VM is IPv6-only; GHCR native IPv6 can time out.
+# Route GHCR hostnames through GCP DNS64/NAT64 (well-known prefix 64:ff9b::/96).
+
+NAT64_PREFIX="64:ff9b::"
+GHCR_HOSTS=(ghcr.io pkg-containers.githubusercontent.com)
+
+ghcr_nat64_addr() {
+  local host="$1" ipv4 a b c d
+  ipv4=$(getent ahostsv4 "$host" | awk 'NR==1 {print $1; exit}')
+  [ -n "$ipv4" ] || return 1
+  IFS=. read -r a b c d <<< "$ipv4"
+  printf '%s%02x%02x:%02x%02x\n' "$NAT64_PREFIX" "$a" "$b" "$c" "$d"
+}
 CONTAINER_NAME="${GH_RUNNER_CONTAINER_NAME:-github-runner}"
 IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
 RUNNER_CPU="0.50"
@@ -44,6 +57,22 @@ ok "cleanup done"
 step "checking docker daemon"
 docker info >/dev/null 2>&1 || fail "docker daemon is not available"
 ok "docker ready"
+
+step "forcing ghcr.io through NAT64"
+for host in "${GHCR_HOSTS[@]}"; do
+  addr=$(ghcr_nat64_addr "$host" 2>/dev/null || true)
+  if [ -z "$addr" ]; then
+    warn "could not synthesize NAT64 address for ${host}; leaving resolver to handle it"
+    continue
+  fi
+  if grep -qE "^${NAT64_PREFIX}[0-9a-f:]+[[:space:]]+${host}([[:space:]]|$)" /etc/hosts; then
+    ok "already mapped ${host}"
+    continue
+  fi
+  echo "${addr} ${host} # GHCR via NAT64" | sudo tee -a /etc/hosts >/dev/null \
+    || warn "failed to update /etc/hosts for ${host}"
+  ok "mapped ${host} -> ${addr}"
+done
 
 step "pulling latest ${IMAGE}"
 PULL_LOG=$(mktemp)
