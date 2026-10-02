@@ -1,30 +1,11 @@
 #!/bin/bash
 # bash-scripts/upsert-github-runner.sh
 # Idempotent deploy/update of a Dockerized GitHub self-hosted runner.
-# GCP free-tier caps: 0.50 CPU, 256 MiB RAM.
+# The workflow preloads the image on the IPv4 runner, then loads it into
+# this IPv6-only GCP VM through IAP SSH before executing this script.
 
 set -euo pipefail
 
-# GCP free-tier VM is IPv6-only; GHCR native IPv6 can time out.
-# Route GHCR hostnames through GCP DNS64/NAT64 (well-known prefix 64:ff9b::/96).
-
-NAT64_PREFIX="64:ff9b::"
-GHCR_HOSTS=(ghcr.io pkg-containers.githubusercontent.com)
-
-ghcr_nat64_addr() {
-  local host="$1" ipv4 a b c d
-  ipv4=$(curl -fsSL --max-time 10 --retry 2 "https://dns.google/resolve?name=${host}&type=A" | grep -o '"data":"[^"]*"' | head -1 | grep -oE '[0-9.]+')
-  [ -n "$ipv4" ] || ipv4=$(getent ahostsv4 "$host" | awk 'NR==1 {print $1; exit}')
-  if [ -z "$ipv4" ]; then
-    case "$host" in
-      ghcr.io) ipv4=20.26.156.211 ;;
-      pkg-containers.githubusercontent.com) ipv4=185.199.109.154 ;;
-    esac
-  fi
-  [ -n "$ipv4" ] || return 1
-  IFS=. read -r a b c d <<< "$ipv4"
-  printf '%s%02x%02x:%02x%02x\n' "$NAT64_PREFIX" "$a" "$b" "$c" "$d"
-}
 CONTAINER_NAME="${GH_RUNNER_CONTAINER_NAME:-github-runner}"
 IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
 RUNNER_CPU="0.50"
@@ -65,41 +46,9 @@ step "checking docker daemon"
 docker info >/dev/null 2>&1 || fail "docker daemon is not available"
 ok "docker ready"
 
-step "forcing ghcr.io through NAT64"
-for host in "${GHCR_HOSTS[@]}"; do
-  addr=$(ghcr_nat64_addr "$host" 2>/dev/null || true)
-  if [ -z "$addr" ]; then
-    warn "could not synthesize NAT64 address for ${host}; leaving resolver to handle it"
-    continue
-  fi
-  if grep -qE "^${NAT64_PREFIX}[0-9a-f:]+[[:space:]]+${host}([[:space:]]|$)" /etc/hosts; then
-    ok "already mapped ${host}"
-    continue
-  fi
-  echo "${addr} ${host} # GHCR via NAT64" | sudo tee -a /etc/hosts >/dev/null \
-    || warn "failed to update /etc/hosts for ${host}"
-  ok "mapped ${host} -> ${addr}"
-done
-
-step "pulling latest ${IMAGE}"
-PULL_LOG=$(mktemp)
-PULL_OK=0
-for attempt in 1 2 3; do
-  if docker pull "$IMAGE" >"$PULL_LOG" 2>&1; then
-    PULL_OK=1
-    break
-  fi
-  warn "pull attempt ${attempt} failed"
-  sleep 5
-done
-if [ "$PULL_OK" -ne 1 ]; then
-  warn "docker pull output:"
-  cat "$PULL_LOG" >&2
-  rm -f "$PULL_LOG"
-  fail "failed to pull runner image"
-fi
-rm -f "$PULL_LOG"
-ok "image pulled"
+step "checking runner image exists locally"
+docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "${IMAGE} is not loaded on VM"
+ok "image present"
 
 step "starting runner container"
 docker run -d \
