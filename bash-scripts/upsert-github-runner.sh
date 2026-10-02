@@ -20,6 +20,11 @@ WORK_DIR="${GH_RUNNER_WORK_DIR:-_work}"
 EPHEMERAL="${GH_RUNNER_EPHEMERAL:-false}"
 DISABLE_AUTO_UPDATE="${GH_RUNNER_DISABLE_AUTO_UPDATE:-true}"
 
+# --- DNS64/NAT64 Configuration ---
+# Public DNS64 resolver (Google). NAT64 prefix 64:ff9b::/96 is assumed.
+DNS64_SERVER="2001:4860:4860::6464"
+# ------------------------------------
+
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
 ok()     { printf '%s\n' "[+] $*"; }
@@ -36,6 +41,13 @@ if [ "${#missing[@]}" -gt 0 ]; then
   fail "missing required env: ${missing[*]}"
 fi
 ok "env ok"
+
+step "verifying DNS64/NAT64 connectivity"
+# Test if the container can resolve an IPv4-only host to an IPv6 address
+if ! docker run --rm --dns "$DNS64_SERVER" alpine:latest getent ahosts github.com | grep -q '64:ff9b::'; then
+    fail "DNS64/NAT64 setup failed. Cannot resolve github.com to a NAT64 address."
+fi
+ok "DNS64/NAT64 connectivity verified"
 
 step "removing existing runner container"
 docker stop --time 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -55,6 +67,7 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --restart always \
   --network=host \
+  --dns "$DNS64_SERVER" \
   --cpus "$RUNNER_CPU" \
   --memory "$RUNNER_MEMORY" \
   --memory-swap "$RUNNER_MEMORY" \
