@@ -2,13 +2,31 @@ name: "Terraform Monorepo Deployer"
 
 on:
   workflow_dispatch:
+    inputs:
+      dir:
+        description: "Deploy only this folder ('all' for every deployable folder)"
+        required: false
+        default: "all"
+        type: string
   push:
     branches:
       - main
+    # Skip the run entirely when no Terraform input changed on the branch.
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - "**.tftpl"
+      - "**.tf.json"
+      - "**/.terraform.lock.hcl"
+      - ".github/workflows/terraform-deploy.yml"
 
 permissions:
   contents: read
   pull-requests: write
+
+concurrency:
+  group: terraform-deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # -------------------------------------------------------------
@@ -17,24 +35,101 @@ jobs:
   detect-directories:
     name: "Detect Terraform Directories"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          # Required: the push->folder filter diffs before..after, so the
+          # previous commit must be present locally. Default shallow-1
+          # checkout would make `git diff` fail and silently deploy nothing.
+          fetch-depth: 0
 
       - name: Find Terraform Folders
         id: set-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          REQUESTED_DIR: ${{ inputs.dir }}
         run: |
+          set -euo pipefail
+
           # Only folders that declare an HCP Terraform cloud {} block are
           # deployable units. Reusable modules and plain provider-only
-          # folders are ignored.
-          DIRS=$(find . -not -path '*/.*' -type f -name '*.tf' \
-                   -exec grep -l 'cloud[[:space:]]*{' {} + \
-                 | xargs -n1 dirname | sort -u \
-                 | jq -R . | jq -s -c .)
-          echo "Found directories: $DIRS"
-          echo "matrix=$DIRS" >> "$GITHUB_OUTPUT"
+          # folders are ignored. Normalised without the leading "./".
+          mapfile -t DEPLOYABLE < <(
+            find . -not -path '*/.*' -type f -name '*.tf' \
+                 -exec grep -l 'cloud[[:space:]]*{' {} + \
+              | xargs -n1 dirname | sed 's|^\./||' | sort -u
+          )
+
+          echo "Deployable folders: ${DEPLOYABLE[*]:-none}"
+
+          if [ "$EVENT_NAME" != "push" ]; then
+            # Manual run: honour the requested scope.
+            REQUESTED="${REQUESTED_DIR:-all}"
+            if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
+              SELECTED=("${DEPLOYABLE[@]:-}")
+            else
+              REQUESTED="${REQUESTED#./}"
+              SELECTED=()
+              for d in "${DEPLOYABLE[@]}"; do
+                [ "$d" = "$REQUESTED" ] && SELECTED+=("$d")
+              done
+              if [ ${#SELECTED[@]} -eq 0 ]; then
+                echo "::error::'${REQUESTED_DIR}' is not a deployable folder. Options: ${DEPLOYABLE[*]}"
+                exit 1
+              fi
+            fi
+          else
+            # Push: only folders touched by this push. On a first push (or any
+            # unusable range) fall back to every deployable folder.
+            if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              echo "No previous commit to diff against; using all deployable folders."
+              SELECTED=("${DEPLOYABLE[@]:-}")
+            else
+              # Fail OPEN: if the diff cannot be computed (missing object,
+              # force-push, truncated history) we must not silently deploy
+              # nothing. Fall back to every deployable folder instead.
+              if ! CHANGED=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- \
+                '*.tf' '*.tfvars' '*.tftpl' '*.tf.json' '.terraform.lock.hcl' 2>/dev/null); then
+                echo "::warning::Could not diff $BEFORE_SHA..$AFTER_SHA; falling back to all deployable folders."
+                SELECTED=("${DEPLOYABLE[@]:-}")
+                CHANGED=""
+              else
+                echo "Changed terraform files:"
+                echo "${CHANGED:-  (none)}"
+
+                SELECTED=()
+                for d in "${DEPLOYABLE[@]}"; do
+                  while IFS= read -r f; do
+                    [ -z "$f" ] && continue
+                    case "$f" in
+                      "$d"/*|"$d") SELECTED+=("$d"); break ;;
+                    esac
+                  done <<< "$CHANGED"
+                done
+              fi
+            fi
+          fi
+
+          if [ ${#SELECTED[@]} -eq 0 ]; then
+            echo "No deployable folder was changed by this push; nothing to plan."
+            {
+              echo "### Terraform deploy skipped"
+              echo
+              echo "No changes under: ${DEPLOYABLE[*]:-none}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          MATRIX=$(printf '%s\n' "${SELECTED[@]}" | sort -u | jq -R . | jq -s -c .)
+          echo "Selected directories: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------
   # Job 2: Format, Init & Plan
@@ -44,6 +139,7 @@ jobs:
     needs: detect-directories
     if: ${{ needs.detect-directories.outputs.matrix != '[]' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -73,12 +169,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.terraform.d/plugin-cache
-          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          key: ${{ runner.os }}-terraform-1.9.8-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
-            ${{ runner.os }}-terraform-providers-
-
-      - name: Debug TF env (names only, no values)
-        run: env | grep -E '^(TF|TFE)_' | sed 's/=.*/=<redacted>/' | sort
+            ${{ runner.os }}-terraform-1.9.8-
 
       - name: Terraform Format Check
         run: terraform fmt -check
@@ -113,6 +206,7 @@ jobs:
       needs.detect-directories.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     environment: production
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -141,9 +235,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.terraform.d/plugin-cache
-          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('**/.terraform.lock.hcl') }}
+          key: ${{ runner.os }}-terraform-1.9.8-${{ hashFiles('**/.terraform.lock.hcl') }}
           restore-keys: |
-            ${{ runner.os }}-terraform-providers-
+            ${{ runner.os }}-terraform-1.9.8-
 
       - name: Terraform Init
         env:
@@ -159,5 +253,5 @@ jobs:
         env:
           TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
           TF_WORKSPACE: "${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-${{ steps.workspace.outputs.workspace_name }}"
-        run: terraform apply -auto-approve -input=false -no-color
+        run: terraform apply -auto-approve -input=false -no-color -compact-warnings
         working-directory: ${{ matrix.dir }}
