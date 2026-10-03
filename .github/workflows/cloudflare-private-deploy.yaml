@@ -1,4 +1,4 @@
-name: "Deploy Cloudflare Workers (private repo)"
+name: "Deploy Cloudflare Workers and Pages (private repo)"
 
 # ---------------------------------------------------------------------------
 # Deploys Cloudflare Workers whose source lives in a PRIVATE repository,
@@ -8,9 +8,15 @@ name: "Deploy Cloudflare Workers (private repo)"
 # HOW THIS WORKS
 #   1. poll    - ask GitHub for the private repo's latest commit on the tracked
 #                branch; compare with the last one deployed (cached).
-#   2. detect  - checkout the private repo here and find every folder holding a
-#                wrangler.toml / .json / .jsonc that the push touched.
-#   3. deploy  - install, build and `wrangler deploy` each one in a matrix.
+#   2. detect  - checkout the private repo here and find every deployable
+#                folder the push touched, and classify it:
+#                  worker - a folder with wrangler.toml / .json / .jsonc that
+#                          does NOT set pages_build_output_dir
+#                  pages  - a wrangler config that sets pages_build_output_dir,
+#                          or a folder holding _headers or _routes.json, which
+#                          Cloudflare reserves for Pages and nothing else reads
+#   3. deploy  - install and build each one in a matrix, then either
+#                `wrangler deploy` (Worker) or `wrangler pages deploy` (Pages).
 #
 #   A workflow can only be triggered by events inside the repo hosting it, so
 #   there is no way to subscribe to pushes on another repository. This polls
@@ -22,10 +28,10 @@ name: "Deploy Cloudflare Workers (private repo)"
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo: visible to everyone, and forkable.
-#   * CLOUDFLARE_API_TOKEN lives here and can deploy Workers. Anyone who can
-#     push to this repo can change what gets deployed and exfiltrate that
-#     token. Keep push access to trusted people only, and scope the token to
-#     the minimum Workers/R2/KV resources it needs.
+#   * CLOUDFLARE_API_TOKEN lives here and can deploy Workers and Pages.
+#     Anyone who can push to this repo can change what gets deployed and
+#     exfiltrate that token. Keep push access to trusted people only, and
+#     scope the token to the minimum Workers/Pages/R2/KV resources it needs.
 #   * Build output is reduced to pass/fail with paths stripped, so private file
 #     names and source lines do not land in a public log. `wrangler deploy`
 #     output is NOT redacted, because the URL it prints is the point of the run.
@@ -38,6 +44,34 @@ name: "Deploy Cloudflare Workers (private repo)"
 #                                   URL; it is used to build an API path and is
 #                                   passed to actions/checkout
 #   secret BUILD_REF                branch to track (defaults to main)
+#   secret CLOUDFLARE_PAGES_PREFIX  OPTIONAL. Prefix for generated Pages project
+#                                   names. Pages project names are not taken
+#                                   from the folder like a Worker script name is;
+#                                   this workflow builds them as
+#                                   "[prefix-]<folder>" (or "[prefix-]<repo>"
+#                                   for a site at the repo root), lowercased,
+#                                   with anything outside a-z0-9- turned into a
+#                                   hyphen. Leave it unset and the bare folder
+#                                   name is used, which is usually what you want
+#                                   for a single site. Set it when the private
+#                                   repo holds several sites whose folder names
+#                                   would otherwise be too generic, or when the
+#                                   name has to be unique account-wide.
+#
+# CLOUDFLARE PAGES NOTES
+#   * The token needs the "Cloudflare Pages: Edit" permission, not just the
+#     Workers one, or the Pages deploy fails with a permissions error.
+#   * A Pages project that does not exist yet is CREATED automatically, with
+#     the tracked branch as its production branch. A Worker that does not
+#     exist yet still fails, as it always has.
+#   * The Pages project name and the build output directory are read from the
+#     project's own wrangler config (`name` and `pages_build_output_dir`) when
+#     it has one, and fall back to the folder name and the project directory.
+#   * A Pages project with no `build` script in package.json is uploaded as-is;
+#     the build output directory must already exist and be non-empty.
+#   * `--commit-dirty=true` is passed deliberately: the build output makes the
+#     working tree dirty, and wrangler's own clean-tree check would otherwise
+#     abort every Pages deploy in CI.
 #
 # RUNNING IT BY HAND
 #   Re-run with `force` checked to deploy every worker, even when the private
@@ -69,9 +103,9 @@ permissions:
   contents: read
 
 concurrency:
-  # `secrets` is NOT available in `concurrency` or in any `if:` condition.
-  # Use a repository variable (or this repo) to name the group.
-  group: cf-deploy-${{ vars.PRIVATE_REPO || github.repository }}
+  # `secrets` is NOT available in `concurrency` or in any `if:` condition, so
+  # the group is keyed on this repo alone.
+  group: cf-deploy-${{ github.repository }}
   cancel-in-progress: false
 
 env:
@@ -207,7 +241,7 @@ jobs:
   # Job 2: which Worker folders in the private repo need deploying?
   # ------------------------------------------------------------------
   detect:
-    name: "Detect workers"
+    name: "Detect projects"
     needs: poll
     if: ${{ needs.poll.outputs.changed == 'true' }}
     runs-on: ubuntu-latest
@@ -239,7 +273,7 @@ jobs:
           restore-keys: |
             cf-deploy-state-${{ secrets.PRIVATE_REPO || github.repository }}-
 
-      - name: Find changed wrangler projects
+      - name: Find changed Workers and Pages projects
         id: detect
         working-directory: private
         shell: bash
@@ -293,20 +327,53 @@ jobs:
             printf '  %s\n' "${changed[@]}"
           fi
 
+          # Two kinds of target, collected into one list. A wrangler config
+          # means a Worker -- unless it sets pages_build_output_dir, which is
+          # how a Pages project declares itself. _headers and _routes.json are
+          # filenames Cloudflare reserves for Pages and no other product reads,
+          # so a folder holding one is a Pages project with no wrangler config
+          # at all. Both markers are matched as FILES, never as directory
+          # names, so an unrelated `src/functions/` cannot be mistaken for a
+          # Pages project.
           mapfile -t configs < <(
             find . -path '*/node_modules' -prune -o \
               \( -name 'wrangler.toml' -o -name 'wrangler.json' -o -name 'wrangler.jsonc' \) -print | sort
           )
+          mapfile -t markers < <(
+            find . -path '*/node_modules' -prune -o \
+              \( -name '_headers' -o -name '_routes.json' \) -print | sort
+          )
+
+          # Each candidate is "dir<TAB>config"; config is empty for a Pages
+          # project identified only by a marker file.
+          candidates=()
+          for config in ${configs[@]+"${configs[@]}"}; do
+            candidates+=("$(dirname "${config#./}")"$'\t'"${config#./}")
+          done
+          for marker in ${markers[@]+"${markers[@]}"}; do
+            dir="$(dirname "${marker#./}")"
+            known=0
+            for candidate in ${candidates[@]+"${candidates[@]}"}; do
+              if [ "${candidate%%$'\t'*}" = "$dir" ]; then
+                known=1; break
+              fi
+            done
+            if [ "$known" -eq 0 ]; then
+              candidates+=("$dir"$'\t')
+            fi
+          done
+
           projects=()
           skipped=()
-          # `${configs[@]+"${configs[@]}"}` and not `"${configs[@]:-}"`: the latter
-          # expands an EMPTY array to one empty string, and dirname of that is
-          # "." -- inventing a phantom project at the repo root that would
-          # then try to deploy the whole repository as one worker.
-          for config in ${configs[@]+"${configs[@]}"}; do
-            dir="$(dirname "${config#./}")"
-            # A wrangler config at the repo root means the whole repo is one
-            # worker; keep it as "." and treat every change as relevant.
+          # `${candidates[@]+"${candidates[@]}"}` and not `"${candidates[@]:-}"`:
+          # the latter expands an EMPTY array to one empty string, and dirname
+          # of that is "." -- inventing a phantom project at the repo root
+          # that would then try to deploy the whole repository.
+          for candidate in ${candidates[@]+"${candidates[@]}"}; do
+            dir="${candidate%%$'\t'*}"
+            config="${candidate#*$'\t'}"
+            # A project at the repo root means the whole repo is one target;
+            # keep it as "." and treat every change as relevant.
             reason=''
             # No baseline (first run, forced, or the recorded commit is no
             # longer available): deploy everything rather than risk skipping a
@@ -330,15 +397,24 @@ jobs:
             fi
             lock=''
             if [ "$dir" = "." ]; then
-              # Worker lives at the repo root, so its lockfile does too.
+              # Project lives at the repo root, so its lockfile does too.
               [ -f package-lock.json ] && lock="package-lock.json"
             else
               [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
             fi
-            projects+=("$dir"$'\t'"$lock"$'\t'"$reason")
+
+            # Classify. The config is the authority; a marker file is the
+            # fallback for a Pages project that has no wrangler config.
+            type=worker
+            if [ -n "$config" ] && grep -Eq 'pages_build_output_dir' "$config"; then
+              type=pages
+            elif [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ]; then
+              type=pages
+            fi
+            projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type")
           done
 
-          echo "Deploying ${#projects[@]} worker(s):"
+          echo "Deploying ${#projects[@]} project(s):"
           if [ ${#projects[@]} -eq 0 ]; then
             echo "  (none)"
             # A forced run that finds nothing is a misconfiguration, not a
@@ -346,8 +422,8 @@ jobs:
             # config in the checkout, which almost always means the wrong repo
             # or the wrong branch.
             if force_on; then
-              echo "::error::force was requested but no Cloudflare worker was found at ${TARGET_SHA:0:12}."
-              echo "Check BUILD_REF points at the branch you meant, and that each worker folder contains a wrangler.toml, wrangler.json or wrangler.jsonc."
+              echo "::error::force was requested but no Cloudflare Worker or Pages project was found at ${TARGET_SHA:0:12}."
+              echo "Check BUILD_REF points at the branch you meant, and that each folder contains a wrangler.toml, wrangler.json or wrangler.jsonc (Workers) -- or a _headers or _routes.json file (Pages)."
               exit 1
             fi
           else
@@ -356,21 +432,29 @@ jobs:
               dir="${project%%$'\t'*}"
               rest="${project#*$'\t'}"
               lock="${rest%%$'\t'*}"
-              reason="${rest#*$'\t'}"
-              echo "  - $dir (reason: $reason, lockfile: ${lock:-none})"
+              rest="${rest#*$'\t'}"
+              reason="${rest%%$'\t'*}"
+              type="${rest#*$'\t'}"
+              echo "  - $dir (type: $type, reason: $reason, lockfile: ${lock:-none})"
             done
           fi
           if [ ${#skipped[@]} -gt 0 ]; then
             echo "Unchanged, skipping: ${skipped[*]}"
           fi
 
+          # `dir`, `lock`, `reason` and `type` are all read out of the private
+          # repository, never out of `secrets`. A Pages project name is derived
+          # from a secret-prefixed value, so it is deliberately NOT in this
+          # payload: GitHub silently discards any job output whose value
+          # matches a secret, and that is what made the deploy job skip with no
+          # visible reason. The deploy job computes the name instead.
           {
             echo "projects=$(node -e '
               const rows = process.argv.slice(1)
                 .filter(Boolean)
                 .map((row) => {
-                  const [dir, lock, reason] = row.split("\t");
-                  return { dir, lock, reason };
+                  const [dir, lock, reason, type] = row.split("\t");
+                  return { dir, lock, reason, type: type || "worker" };
                 });
               process.stdout.write(JSON.stringify(rows));
             ' "${projects[@]:-}")"
@@ -388,7 +472,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Detected workers"
+            echo "### Detected projects"
             echo
             echo '```json'
             echo '${{ steps.detect.outputs.projects }}'
@@ -439,15 +523,139 @@ jobs:
           # not resolved, unable to cache dependencies".
           cache-dependency-path: private/${{ matrix.project.lock }}
 
-      - name: Prepare directories
+      # The Pages project name and the build output directory are resolved
+      # HERE, in the deploy job, rather than carried in the matrix. The name is
+      # built from CLOUDFLARE_PAGES_PREFIX, which lives in `secrets`; a matrix
+      # entry containing a secret is discarded by GitHub and the whole deploy
+      # job skips with an empty matrix and no visible cause.
+      - name: Resolve Pages project
+        id: pages
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ matrix.project.dir }}
+          PROJECT_TYPE: ${{ matrix.project.type }}
+          CFG_REPO: ${{ secrets.PRIVATE_REPO }}
+          PAGES_PREFIX: ${{ secrets.CLOUDFLARE_PAGES_PREFIX }}
+          BUILD_REF: ${{ needs.poll.outputs.ref }}
         run: |
           set -euo pipefail
-          # A project dir of "." means the worker is the repo root itself.
-          if [ "${{ matrix.project.dir }}" = "." ]; then
+
+          # A project dir of "." means the project is the repo root itself.
+          if [ "$PROJECT_DIR" = "." ]; then
             echo "ROOT=true" >> "$GITHUB_ENV"
+            slug_source="${CFG_REPO##*/}"
           else
             echo "ROOT=false" >> "$GITHUB_ENV"
+            slug_source="${PROJECT_DIR##*/}"
           fi
+
+          # Reject a directory that could escape the checkout before it is ever
+          # used as a path or handed to wrangler.
+          case "$PROJECT_DIR" in
+            /*|*..*)
+              echo "::error::Unsafe project directory; check the layout of the private repo."
+              exit 1 ;;
+          esac
+
+          config=''
+          for candidate in wrangler.toml wrangler.json wrangler.jsonc; do
+            if [ -f "$candidate" ]; then
+              config="$candidate"
+              break
+            fi
+          done
+
+          # `name` and `pages_build_output_dir` from the project's own wrangler
+          # config, when it has one. Fed to the loop by process substitution
+          # rather than a pipe, because a pipe would run the loop in a subshell
+          # and discard both variables.
+          cfg_name=''
+          cfg_out=''
+          if [ -n "$config" ]; then
+            while IFS='=' read -r key value; do
+              case "$key" in
+                CF_NAME) cfg_name="$value" ;;
+                CF_OUT) cfg_out="$value" ;;
+              esac
+            done < <(node -e '
+              const fs = require("fs");
+              const p = process.argv[1];
+              const raw = fs.readFileSync(p, "utf8");
+              let name = "", out = "";
+              if (/\.jsonc?$/.test(p)) {
+                // jsonc: strip // comments, then try a real parse and fall
+                // back to a regex so trailing commas do not lose the keys.
+                const t = raw.replace(/^\s*\/\/.*$/gm, "");
+                try {
+                  const j = JSON.parse(t);
+                  name = typeof j.name === "string" ? j.name : "";
+                  out = typeof j.pages_build_output_dir === "string" ? j.pages_build_output_dir : "";
+                } catch (e) { /* fall through to the regex below */ }
+                if (!name) { const m = t.match(/"name"\s*:\s*"([^"]*)"/); if (m) name = m[1]; }
+                if (!out) { const m = t.match(/"pages_build_output_dir"\s*:\s*"([^"]*)"/); if (m) out = m[1]; }
+              } else {
+                // toml: only keys above the first [section] header are top
+                // level, so a `name` inside [env.production] cannot win.
+                const top = raw.split(/^\s*\[/m)[0];
+                const n = top.match(/^\s*name\s*=\s*"([^"]*)"/m);
+                if (n) name = n[1];
+                const o = top.match(/^\s*pages_build_output_dir\s*=\s*"([^"]*)"/m);
+                if (o) out = o[1];
+              }
+              process.stdout.write("CF_NAME=" + name + "\nCF_OUT=" + out + "\n");
+            ' "$config")
+          fi
+
+          if [ "$PROJECT_TYPE" != "pages" ]; then
+            echo "Target type: worker (wrangler deploy)."
+            exit 0
+          fi
+
+          # Pages project names allow only lowercase alphanumerics and hyphens.
+          # Normalise whatever source we ended up with rather than failing on
+          # a folder like "My_Site" that Pages would have rejected anyway.
+          if [ -n "$cfg_name" ]; then
+            name="$cfg_name"
+          else
+            name="$slug_source"
+          fi
+          name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+          if [ -z "$name" ]; then
+            echo "::error::Could not derive a Cloudflare Pages project name for '${PROJECT_DIR}'."
+            echo "Set a top-level 'name' in the project's wrangler config, or set secret CLOUDFLARE_PAGES_PREFIX."
+            exit 1
+          fi
+
+          # The prefix is applied last so it is always honoured, and the raw
+          # value is never echoed on its own.
+          prefix="$(printf '%s' "${PAGES_PREFIX:-}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+          if [ -n "$prefix" ]; then
+            name="${prefix}-${name}"
+          fi
+          if ! printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9-]*[a-z0-9]$'; then
+            echo "::error::Derived Cloudflare Pages project name is not a valid Pages name."
+            exit 1
+          fi
+
+          out="$cfg_out"
+          [ -n "$out" ] || out='.'
+          case "$out" in
+            /*|*..*)
+              echo "::error::pages_build_output_dir must be a relative path inside the project."
+              exit 1 ;;
+          esac
+
+          echo "Target type:  pages"
+          echo "Pages name:   $name"
+          echo "Build output: $out"
+          echo "Branch:       ${BUILD_REF:-main}"
+
+          {
+            echo "app=$name"
+            echo "out=$out"
+            echo "branch=${BUILD_REF:-main}"
+          } >> "$GITHUB_OUTPUT"
 
       # Cache the installed tree. Hosted runners are ephemeral, so `npm ci`
       # would otherwise delete and re-extract everything each run. Exact key
@@ -519,12 +727,64 @@ jobs:
             npx wrangler deploy --dry-run
           fi
 
+          # A Pages deploy uploads a directory of files, so an empty or missing
+          # build output is a silent no-op worth failing on here. The URL would
+          # otherwise still be printed, as though the site had gone live.
+          if [ "${{ steps.pages.outputs.app }}" ]; then
+            out="${{ steps.pages.outputs.out }}"
+            if [ ! -d "$out" ]; then
+              echo "::error::Build output directory '$out' does not exist; the build step did not produce it."
+              exit 1
+            fi
+            if [ -z "$(ls -A "$out" 2>/dev/null)" ]; then
+              echo "::error::Build output directory '$out' is empty."
+              exit 1
+            fi
+            echo "Pages output ready: $out ($(find "$out" -type f | wc -l) file(s))."
+          fi
+
       # NOT redacted: the URL wrangler prints is the useful output here.
       - name: Deploy
         working-directory: private/${{ matrix.project.dir }}
         shell: bash
         run: |
           set -euo pipefail
+
+          if [ -n "${{ steps.pages.outputs.app }}" ]; then
+            # Pages: create the project on first use, so a brand new site is
+            # not a manual out-of-band step. `project list --json` is the only
+            # reliable existence check; on any other failure fall through to
+            # create, which will surface the real error if it is not a
+            # missing project.
+            if npx wrangler pages project list --json 2>/dev/null | node -e '
+              let s = "";
+              process.stdin.on("data", (d) => (s += d));
+              process.stdin.on("end", () => {
+                try {
+                  const rows = JSON.parse(s);
+                  const hit = Array.isArray(rows) && rows.some((r) => r && r.name === process.argv[1]);
+                  process.exit(hit ? 0 : 1);
+                } catch (e) { process.exit(2); }
+              });
+            ' "${{ steps.pages.outputs.app }}"; then
+              echo "Pages project already exists."
+            else
+              echo "::warning::Cloudflare Pages project '${{ steps.pages.outputs.app }}' not found; creating it with production branch '${{ steps.pages.outputs.branch }}'."
+              npx wrangler pages project create "${{ steps.pages.outputs.app }}" \
+                --production-branch "${{ steps.pages.outputs.branch }}"
+            fi
+
+            # --commit-dirty=true is required, not cosmetic: the build output
+            # and node_modules are untracked, so wrangler's own clean-tree
+            # check would abort every Pages deploy in CI.
+            npx wrangler pages deploy "${{ steps.pages.outputs.out }}" \
+              --project-name "${{ steps.pages.outputs.app }}" \
+              --branch "${{ steps.pages.outputs.branch }}" \
+              --commit-hash "${{ needs.poll.outputs.sha }}" \
+              --commit-dirty=true
+            exit 0
+          fi
+
           if [ ! -f package.json ]; then
             npx wrangler deploy
           elif node -e 'process.exit(require("./package.json").scripts?.deploy ? 0 : 1)' 2>/dev/null; then
@@ -543,6 +803,7 @@ jobs:
           {
             echo "### Deploy: \`${{ matrix.project.dir }}\`"
             echo
+            echo "- Type: \`${{ matrix.project.type }}\`"
             echo "- Reason: \`${{ matrix.project.reason }}\`"
             echo "- Status: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -585,7 +846,7 @@ jobs:
           # cannot be dropped, so the mismatch is detectable.
           if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_PROJECTS:-}" ]; then
             echo "::error::GitHub discarded the 'projects' job output: it matched a repository secret, so the deploy job received an empty matrix."
-            echo "Detect found ${DETECT_COUNT} project(s). Any configuration read from \`secrets\` that ends up in a project name must move to a repository variable; only PRIVATE_REPO_TOKEN, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID belong in secrets."
+            echo "Detect found ${DETECT_COUNT} project(s). A folder path here matches a secret value; rename that folder, or move the configuration out of \`secrets\` and into a file inside the repository."
             exit 1
           fi
 
