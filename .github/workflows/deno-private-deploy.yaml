@@ -46,6 +46,17 @@ name: "Deploy Deno Projects (private repo)"
 #   secret DENO_DEPLOY_APP_PREFIX  optional; prepended to the folder name to
 #                                 form the application name
 #
+# RUNNING IT BY HAND
+#   Re-run with `force` checked to deploy every project, even when the private
+#   repo has not moved since the last successful deploy. Without force, a run
+#   with no new commit stops at the poll job.
+#
+# WHAT COUNTS AS "DEPLOYED"
+#   The last deployed commit is recorded by the `record` job, and only when the
+#   whole attempt is clean (every deploy succeeded, or there was nothing to
+#   do). A failed deploy therefore leaves the commit unrecorded and the next
+#   run retries it, instead of skipping it as "nothing new".
+#
 #   Applications must exist first:
 #     deno deploy create --org "$ORG" --app "$APP" --source local \
 #         --runtime-mode dynamic --entrypoint main.ts
@@ -108,12 +119,20 @@ jobs:
 
     steps:
       # Restore BEFORE polling: the poll step reads this file to learn which
-      # commit was last deployed.
+      # commit was last deployed SUCCESSFULLY.
+      #
+      # The `record` job writes this file with the run id in the cache key,
+      # because a cache entry is immutable and this one is rewritten after
+      # every clean deploy. `restore-keys` is what keeps the lookup working:
+      # it takes the most recent matching entry, and the bare prefix also
+      # matches entries saved under the older exact key.
       - name: Restore state for next poll
         uses: actions/cache/restore@v4
         with:
           path: /tmp/deno-deploy-state.txt
           key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}
+          restore-keys: |
+            deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}-
 
       - name: Resolve repo and fetch latest commit
         id: poll
@@ -169,19 +188,15 @@ jobs:
             echo "force=true; deploying regardless."
           fi
 
-          printf '%s' "$RESP" > /tmp/deno-deploy-state.txt
-
+          # Deliberately NOT written here. Recording the commit before the
+          # deploy runs would make any later failure look like "nothing new"
+          # on the next poll, and that commit would never be retried. The
+          # `record` job writes it, and only after a clean attempt.
           {
             echo "changed=$CHANGED"
             echo "sha=$RESP"
             echo "ref=$REF"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Save state for next poll
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/deno-deploy-state.txt
-          key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}
 
       - name: Summary
         if: always()
@@ -215,25 +230,47 @@ jobs:
           path: private
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
+      # The diff base is the last commit that deployed cleanly, which is
+      # exactly the state the poll job reads. Restored here because detect
+      # runs on a different runner than poll.
+      - name: Restore last deployed commit
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/deno-deploy-state.txt
+          key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}
+          restore-keys: |
+            deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}-
+
       - name: Find changed Deno projects
         id: detect
         working-directory: private
         shell: bash
         env:
           TARGET_SHA: ${{ needs.poll.outputs.sha }}
+          FORCE: ${{ inputs.force }}
           APP_PREFIX: ${{ secrets.DENO_DEPLOY_APP_PREFIX }}
           REPO_NAME: ${{ secrets.PRIVATE_REPO }}
         run: |
           set -euo pipefail
 
-          # Compare against the previously deployed commit so a multi-commit
-          # push is seen in full. Without a cached base, deploy everything.
+          # Compare against the last commit that deployed cleanly, so a
+          # multi-commit push is seen in full. Without a usable base, deploy
+          # everything rather than risk skipping a folder.
           base=''
-          if [ -f /tmp/deno-deploy-base.txt ]; then
-            base="$(cat /tmp/deno-deploy-base.txt)"
+          if [ -f /tmp/deno-deploy-state.txt ]; then
+            base="$(cat /tmp/deno-deploy-state.txt)"
           fi
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             echo "No comparable base commit; selecting every Deno project found."
+            base=''
+          fi
+
+          # force=true means "deploy every project", not merely "look at the
+          # latest commit": without this, re-running with no new commits would
+          # diff against the deployed commit, find nothing, and deploy
+          # nothing -- the opposite of what force asks for.
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "force=true; ignoring the diff and selecting every project."
             base=''
           fi
 
@@ -244,7 +281,11 @@ jobs:
 
           echo "Comparing ${base:-<nothing>}..${TARGET_SHA:0:12} (${#changed[@]} changed file(s)):"
           if [ ${#changed[@]} -eq 0 ]; then
-            echo "  (none, full deploy)"
+            if [ -n "$base" ]; then
+              echo "  (none; with a baseline this means nothing to deploy)"
+            else
+              echo "  (none, no baseline: selecting every project)"
+            fi
           else
             printf '  %s\n' "${changed[@]}"
           fi
@@ -260,7 +301,12 @@ jobs:
           for config in "${configs[@]:-}"; do
             dir="$(dirname "${config#./}")"
             reason=''
-            if [ ${#changed[@]} -eq 0 ]; then
+            # No baseline (first run, forced, or the recorded commit is no
+            # longer available): deploy everything rather than risk skipping a
+            # folder. WITH a baseline, an empty diff legitimately means this
+            # push touched no project, and deploying everything would waste
+            # the run.
+            if [ -z "$base" ]; then
               reason='full'
             elif [ "$dir" = "." ]; then
               reason='changed'
@@ -350,13 +396,9 @@ jobs:
             ' "${projects[@]:-}")"
           } >> "$GITHUB_OUTPUT"
 
-          printf '%s' "$TARGET_SHA" > /tmp/deno-deploy-base.txt
-
-      - name: Save base commit for next run
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/deno-deploy-base.txt
-          key: deno-deploy-base-${{ vars.PRIVATE_REPO || github.repository }}
+          # No base is saved here. The `record` job writes the deployed commit
+          # once the attempt has actually succeeded, which is also what the
+          # next run diffs against.
 
       - name: Summary
         if: always()
@@ -622,3 +664,43 @@ jobs:
             echo "- Reason: \`${{ matrix.project.reason }}\`"
             echo "- Status: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 4: remember the commit that was actually deployed
+  # ------------------------------------------------------------------
+  record:
+    name: "Record deployed commit"
+    needs: [poll, detect, deploy]
+    # Record once the attempt is fully accounted for: every deploy succeeded,
+    # or there was nothing to deploy. A failed detect or deploy must NOT be
+    # recorded -- otherwise the next poll sees no change and that commit is
+    # never retried, which is how a deploy can be lost silently.
+    #
+    # `changed` also keeps a no-op poll from writing a fresh cache entry every
+    # time. It costs nothing to skip: when there was no new commit the recorded
+    # SHA is already the one we would write, and if the state was ever lost,
+    # poll reports changed=true and it is written then.
+    if: >-
+      !cancelled() &&
+      needs.poll.result == 'success' &&
+      needs.poll.outputs.changed == 'true' &&
+      (needs.detect.result == 'success' || needs.detect.result == 'skipped') &&
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write deployed commit
+        env:
+          DEPLOYED_SHA: ${{ needs.poll.outputs.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DEPLOYED_SHA" > /tmp/deno-deploy-state.txt
+          echo "Recorded $DEPLOYED_SHA as the last deployed commit."
+
+      # The run id is in the key because cache entries are immutable: this
+      # state has to be rewritten after every clean deploy.
+      - name: Save state for next poll
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/deno-deploy-state.txt
+          key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}-${{ github.run_id }}
