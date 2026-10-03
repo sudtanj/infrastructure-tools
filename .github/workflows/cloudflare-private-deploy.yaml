@@ -33,12 +33,11 @@ name: "Deploy Cloudflare Workers (private repo)"
 # SETUP
 #   secret CLOUDFLARE_API_TOKEN     required
 #   secret CLOUDFLARE_ACCOUNT_ID    required
-#   secret PRIVATE_REPO_TOKEN       read access to the private repo (required
-#                                   unless the App secrets below are set)
-#   secret PRIVATE_REPO             "owner/name" of the private repo
+#   secret PRIVATE_REPO_TOKEN       read access to the private repo (required)
+#   secret PRIVATE_REPO             "owner/name" of the private repo -- NOT a
+#                                   URL; it is used to build an API path and is
+#                                   passed to actions/checkout
 #   secret BUILD_REF                branch to track (defaults to main)
-#   secret FREE_COMPUTE_APP_ID      optional; with FREE_COMPUTE_APP_PRIVATE_KEY
-#                                   mints a short-lived single-repo token
 # ---------------------------------------------------------------------------
 
 on:
@@ -56,7 +55,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: cf-deploy-${{ secrets.PRIVATE_REPO || github.repository }}
+  # `secrets` is NOT available in `concurrency` or in any `if:` condition.
+  # Use a repository variable (or this repo) to name the group.
+  group: cf-deploy-${{ vars.PRIVATE_REPO || github.repository }}
   cancel-in-progress: false
 
 env:
@@ -81,14 +82,6 @@ jobs:
       ref: ${{ steps.poll.outputs.ref }}
 
     steps:
-      - name: Mint GitHub App token (optional)
-        id: app-token
-        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
-          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
-
       # Restore BEFORE polling: the poll step reads this file to learn which
       # commit was last deployed.
       - name: Restore state for next poll
@@ -100,7 +93,6 @@ jobs:
       - name: Resolve repo and fetch latest commit
         id: poll
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           CFG_REPO: ${{ secrets.PRIVATE_REPO }}
           CFG_REF: ${{ secrets.BUILD_REF }}
@@ -110,9 +102,8 @@ jobs:
 
           # ${VAR:-} everywhere: under `set -u` an unset variable is fatal.
           TOKEN="${GH_TOKEN:-}"
-          if [ -n "${APP_TOKEN:-}" ]; then TOKEN="$APP_TOKEN"; fi
           if [ -z "$TOKEN" ]; then
-            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN (or FREE_COMPUTE_APP_ID)."
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN."
             exit 1
           fi
 
@@ -189,14 +180,6 @@ jobs:
     outputs:
       projects: ${{ steps.detect.outputs.projects }}
     steps:
-      - name: Mint GitHub App token (optional)
-        id: app-token
-        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
-          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
-
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
@@ -204,6 +187,7 @@ jobs:
           ref: ${{ needs.poll.outputs.ref }}
           # Keep the token out of .git/config so later steps cannot leak it.
           persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
       - name: Find changed wrangler projects
@@ -336,14 +320,6 @@ jobs:
         project: ${{ fromJSON(needs.detect.outputs.projects) }}
 
     steps:
-      - name: Mint GitHub App token (optional)
-        id: app-token
-        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
-          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
-
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
@@ -351,6 +327,7 @@ jobs:
           ref: ${{ needs.poll.outputs.ref }}
           persist-credentials: false
           path: private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4

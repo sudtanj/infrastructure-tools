@@ -29,12 +29,9 @@ name: "Private Repo Mirror CI"
 #     prevents private source details from landing in a public log.
 #
 # SETUP
-#   secret PRIVATE_REPO_TOKEN      read access to the private repo (required
-#                                  unless the App secrets below are set)
+#   secret PRIVATE_REPO_TOKEN      read access to the private repo (required)
 #   secret PRIVATE_REPO            "owner/name" (defaults to this repo)
 #   secret BUILD_REF               branch to track (defaults to main)
-#   secret FREE_COMPUTE_APP_ID     optional; with FREE_COMPUTE_APP_PRIVATE_KEY
-#                                  mints a short-lived, single-repo token
 # ---------------------------------------------------------------------------
 
 on:
@@ -53,7 +50,8 @@ permissions:
 
 concurrency:
   # One pipeline per tracked repo at a time; queue rather than cancel.
-  group: private-repo-ci-${{ vars.PRIVATE_REPO || secrets.PRIVATE_REPO || github.repository }}
+  # `secrets` is NOT available in `concurrency` or in any `if:` condition.
+  group: private-repo-ci-${{ vars.PRIVATE_REPO || github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -67,14 +65,6 @@ jobs:
       ref: ${{ steps.poll.outputs.ref }}
 
     steps:
-      - name: Mint GitHub App token (optional)
-        id: app-token
-        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
-          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
-
       # Restore BEFORE polling: the poll step reads this file to learn which
       # commit was last built.
       - name: Restore state for next poll
@@ -86,7 +76,6 @@ jobs:
       - name: Resolve repo and fetch latest commit
         id: poll
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           CFG_REPO: ${{ secrets.PRIVATE_REPO }}
           CFG_REF: ${{ secrets.BUILD_REF }}
@@ -97,9 +86,8 @@ jobs:
           # ${VAR:-} everywhere: under `set -u` an unset variable is a hard
           # failure, and these may legitimately be empty.
           TOKEN="${GH_TOKEN:-}"
-          if [ -n "${APP_TOKEN:-}" ]; then TOKEN="$APP_TOKEN"; fi
           if [ -z "$TOKEN" ]; then
-            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN (or FREE_COMPUTE_APP_ID)."
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN."
             exit 1
           fi
 
@@ -175,14 +163,6 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Mint GitHub App token (optional)
-        id: app-token
-        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
-          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
-
       - name: Checkout private repo
         uses: actions/checkout@v4
         with:
@@ -191,7 +171,7 @@ jobs:
           # Do not leave the token in .git/config for later steps to leak.
           persist-credentials: false
           path: private
-          token: ${{ steps.app-token.outputs.token || secrets.PRIVATE_REPO_TOKEN }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
       - name: Detect and build
         working-directory: private
