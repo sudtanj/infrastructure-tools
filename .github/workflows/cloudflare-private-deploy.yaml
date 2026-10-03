@@ -251,7 +251,12 @@ jobs:
               continue
             fi
             lock=''
-            [ "$dir" != "." ] && [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
+            if [ "$dir" = "." ]; then
+              # Worker lives at the repo root, so its lockfile does too.
+              [ -f package-lock.json ] && lock="package-lock.json"
+            else
+              [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
+            fi
             projects+=("$dir"$'\t'"$lock"$'\t'"$reason")
           done
 
@@ -336,7 +341,11 @@ jobs:
           # Only enable npm's cache when this project has a lockfile, else
           # setup-node fails with "Dependencies lock file is not found".
           cache: ${{ matrix.project.lock != '' && 'npm' || '' }}
-          cache-dependency-path: ${{ matrix.project.lock }}
+          # The private repo is checked out into private/, so the lockfile
+          # lives under that prefix. Paths here are workspace-relative;
+          # omitting it makes setup-node report "Some specified paths were
+          # not resolved, unable to cache dependencies".
+          cache-dependency-path: private/${{ matrix.project.lock }}
 
       - name: Prepare directories
         run: |
@@ -356,7 +365,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: private/${{ matrix.project.dir }}/node_modules
-          key: node-modules-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles(matrix.project.lock) }}
+          key: node-modules-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
 
       - name: Cache wrangler state
         uses: actions/cache@v4
@@ -365,7 +374,7 @@ jobs:
             private/${{ matrix.project.dir }}/.wrangler
             ~/.cache/wrangler
             ~/.config/.wrangler
-          key: wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.lock) }}
+          key: wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
           restore-keys: |
             wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-
 
