@@ -13,8 +13,12 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 #                  worker - a folder with wrangler.toml / .json / .jsonc that
 #                          does NOT set pages_build_output_dir
 #                  pages  - a wrangler config that sets pages_build_output_dir,
-#                          or a folder holding _headers or _routes.json, which
-#                          Cloudflare reserves for Pages and nothing else reads
+#                          or a folder with NO wrangler config that holds a
+#                          `public/` directory, _headers or _routes.json
+#                A wrangler config always wins: a folder that has one is a
+#                Worker, so its own `public/` is read as assets, not as a
+#                second Pages site. That is what lets a Worker and a Pages
+#                site sit side by side in the same parent folder.
 #   3. deploy  - install and build each one in a matrix, then either
 #                `wrangler deploy` (Worker) or `wrangler pages deploy` (Pages).
 #
@@ -68,7 +72,8 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 #     project's own wrangler config (`name` and `pages_build_output_dir`) when
 #     it has one, and fall back to the folder name and the project directory.
 #   * A Pages project with no `build` script in package.json is uploaded as-is;
-#     the build output directory must already exist and be non-empty.
+#     the build output directory must already exist and be non-empty. A folder
+#     detected by its `public/` directory uploads that directory.
 #   * `--commit-dirty=true` is passed deliberately: the build output makes the
 #     working tree dirty, and wrangler's own clean-tree check would otherwise
 #     abort every Pages deploy in CI.
@@ -363,6 +368,33 @@ jobs:
             fi
           done
 
+          # A folder holding a `public/` directory is a plain static site, and
+          # Pages is the only product that serves one that way. It becomes a
+          # Pages project UNLESS the folder is already a candidate -- because
+          # for a Worker that `public/` is its ASSETS directory, and deploying
+          # it a second time as Pages would publish the same files twice.
+          has_candidate() {
+            local want="$1" c
+            for c in ${candidates[@]+"${candidates[@]}"}; do
+              if [ "${c%%$'\t'*}" = "$want" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+          mapfile -t publics < <(
+            find . -path '*/node_modules' -prune -o -type d -name 'public' -print | sort
+          )
+          for public_dir in ${publics[@]+"${publics[@]}"}; do
+            dir="$(dirname "${public_dir#./}")"
+            if has_candidate "$dir"; then
+              echo "Skipping ${dir}/public: it is the assets directory of the project in that folder."
+              continue
+            fi
+            candidates+=("$dir"$'\t')
+            echo "Found static site ${dir}/public; treating it as a Pages project."
+          done
+
           projects=()
           skipped=()
           # `${candidates[@]+"${candidates[@]}"}` and not `"${candidates[@]:-}"`:
@@ -411,7 +443,7 @@ jobs:
             # an existing Worker into a Pages project and break it.
             type=worker
             if [ -z "$config" ]; then
-              if [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ]; then
+              if [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ] || [ -d "$dir/public" ]; then
                 type=pages
               fi
             elif grep -Eq 'pages_build_output_dir' "$config"; then
@@ -645,7 +677,15 @@ jobs:
           fi
 
           out="$cfg_out"
-          [ -n "$out" ] || out='.'
+          if [ -z "$out" ]; then
+            # A config-less Pages project detected by its `public/` directory
+            # uploads that directory; a bare marker-only site uploads itself.
+            if [ -d public ]; then
+              out='./public'
+            else
+              out='.'
+            fi
+          fi
           case "$out" in
             /*|*..*)
               echo "::error::pages_build_output_dir must be a relative path inside the project."
@@ -728,6 +768,14 @@ jobs:
             else
               echo "No 'build' script; nothing to do."
             fi
+          elif [ -n "${{ steps.pages.outputs.app }}" ]; then
+            # A Pages project with no package.json is a plain static site: the
+            # files are committed as they are. `wrangler deploy --dry-run` is
+            # NOT a valid check here -- there is no Worker entrypoint to
+            # bundle, so it errors and would fail the build step for a project
+            # that is perfectly fine. The directory check below is the real
+            # validation.
+            echo "No package.json; this is a static Pages site, nothing to build."
           else
             echo "No package.json; running wrangler dry-run directly."
             npx wrangler deploy --dry-run
