@@ -437,10 +437,10 @@ jobs:
 
             # Classify. A wrangler config is AUTHORITATIVE: if the folder has
             # one and it does not set pages_build_output_dir, it is a Worker,
-            # even if a stray _headers or _routes.json is lying around. Only a
-            # folder with NO wrangler config falls back to the marker files.
-            # Without that, adding a Pages deployment could silently convert
-            # an existing Worker into a Pages project and break it.
+            # even if a stray _headers, _routes.json or public/ is lying
+            # around. Only a folder with NO wrangler config is classified from
+            # those signals, which is what stops the Worker's own assets from
+            # being published a second time as Pages.
             type=worker
             if [ -z "$config" ]; then
               if [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ] || [ -d "$dir/public" ]; then
