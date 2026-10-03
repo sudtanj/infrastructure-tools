@@ -56,6 +56,13 @@ name: "Deploy Deno Projects (private repo)"
 #   `--source` flag and treats the value as a positional root path, failing
 #   with "Too many arguments: local". The deploy step passes only
 #   --non-interactive/--org/--app/--prod.
+#
+#   TROUBLESHOOTING "The requested app was not found"
+#   That single message covers four different mistakes: a bad token, an org the
+#   token cannot see, a name that differs from the real one by case or
+#   separators, and an app that was never created. The "Resolve application"
+#   step below checks each in turn and prints which one it is, along with the
+#   exact `create` command when the app is missing.
 # ---------------------------------------------------------------------------
 
 on:
@@ -391,6 +398,152 @@ jobs:
         with:
           deno-version: ${{ env.DENO_VERSION }}
 
+      # The application name is derived from a folder name, so it can disagree
+      # with what Deno Deploy actually holds: wrong case or separators, a
+      # stale DENO_DEPLOY_APP_PREFIX, an org the token cannot see, or an app
+      # that was never created. Any of those makes `deno deploy` answer with a
+      # bare "The requested app was not found, or you do not have access to
+      # view it." plus a trace id. Resolve the name against the account first.
+      - name: Resolve application
+        id: resolve
+        shell: bash
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          DEPLOY_ORG: ${{ secrets.DENO_DEPLOY_ORG }}
+          WANTED_APP: ${{ matrix.project.app }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEPLOY_ORG:-}" ]; then
+            echo "::error::The DENO_DEPLOY_ORG secret is not set; cannot resolve an application."
+            exit 1
+          fi
+          echo "Wanting '$WANTED_APP' in org '$DEPLOY_ORG'."
+
+          cat > /tmp/deno-resolve.mjs <<'RESOLVER'
+          // Shared helper: reads the CLI's --json output and picks a match.
+          // Exact first, then a name-equivalent match (Deno Deploy treats
+          // case and separators loosely, so "My_App" and "my-app" can name the
+          // same application). Prints the name as Deno Deploy knows it.
+          import { readFileSync } from "node:fs";
+
+          const slug = (s) =>
+            String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+          // `whoami` answers with "orgs" and `apps list` with "apps"; accept either
+          // (and a few plausible aliases) rather than assuming one shape.
+          const rows = (raw) => {
+            const list = Array.isArray(raw)
+              ? raw
+              : (raw?.apps ?? raw?.orgs ?? raw?.items ?? raw?.data ?? []);
+            if (!Array.isArray(list)) return [];
+            return list
+              .map((row) =>
+                typeof row === "string"
+                  ? row
+                  : row?.slug ?? row?.name ?? row?.app ?? row?.appName ?? row?.appSlug ?? row?.id
+              )
+              .filter((n) => typeof n === "string" && n.length > 0);
+          };
+
+          // One verdict line on stdout -- "OK<TAB><name>", "NONE" or
+          // "UNKNOWN" -- and always exit 0. A verdict rather than an exit
+          // status is what lets the caller tell a genuine miss (NONE) from the
+          // helper failing to run or the CLI answering a shape we do not
+          // recognise (UNKNOWN, or no output at all). Never report an
+          // unrecognised answer as "the app does not exist".
+          const [mode, file, wanted] = process.argv.slice(2);
+          let raw;
+          try {
+            raw = JSON.parse(readFileSync(file, "utf8"));
+          } catch (err) {
+            process.stdout.write("UNKNOWN\n");
+            process.stderr.write(`could not read the ${mode} response: ${err.message}\n`);
+          }
+
+          const names = raw === undefined ? [] : rows(raw);
+          if (names.length === 0) {
+            if (raw !== undefined) {
+              process.stdout.write("UNKNOWN\n");
+              process.stderr.write(`no recognisable names in the ${mode} response\n`);
+            }
+          } else {
+            const match =
+              names.find((n) => n === wanted) ?? names.find((n) => slug(n) === slug(wanted));
+            if (match) {
+              process.stdout.write(`OK\t${match}\n`);
+            } else {
+              process.stdout.write("NONE\n");
+              process.stderr.write(names.join("\n") + "\n");
+            }
+          }
+          RESOLVER
+
+          verdict_of() {
+            node /tmp/deno-resolve.mjs "$1" "$2" "$3" 2> /tmp/verdict.err || true
+          }
+
+          # Auth first: an invalid or expired token fails here and never reaches
+          # the org or app lookup, which keeps the causes distinguishable.
+          if ! deno deploy whoami --json > /tmp/whoami.json 2> /tmp/whoami.err; then
+            echo "::error::DENO_DEPLOY_TOKEN is missing, invalid or expired."
+            head -5 /tmp/whoami.err || true
+            exit 1
+          fi
+
+          # Then the org: "not found" covers both a wrong slug and a token that
+          # cannot see the org, so name the orgs the token can reach.
+          case "$(verdict_of orgs /tmp/whoami.json "$DEPLOY_ORG")" in
+            "OK"$'	'*)
+              echo "Org '$DEPLOY_ORG' is visible to this token." ;;
+            NONE)
+              echo "::error::Org '$DEPLOY_ORG' is not visible to this token."
+              echo "Orgs this token can reach:"
+              sed -E 's/^/  - /' /tmp/verdict.err || true
+              echo "Check DENO_DEPLOY_ORG against the slug on console.deno.com."
+              exit 1 ;;
+            *)
+              echo "::warning::Could not read the org list; assuming '$DEPLOY_ORG' is correct."
+              head -3 /tmp/verdict.err || true ;;
+          esac
+
+          # Then the app. Failing to list is fail-open: the deploy call is still
+          # the authority, and a CLI without `apps list` must not stop a deploy
+          # that would otherwise work.
+          if ! deno deploy apps list --json --limit 100 --org "$DEPLOY_ORG" \
+              > /tmp/apps.json 2> /tmp/apps.err; then
+            echo "::warning::Could not list apps in '$DEPLOY_ORG'; using the configured name."
+            head -3 /tmp/apps.err || true
+            echo "app=$WANTED_APP" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          verdict="$(verdict_of apps /tmp/apps.json "$WANTED_APP")"
+          case "$verdict" in
+            "OK"$'	'*)
+              app="${verdict#*$'	'}" ;;
+            NONE)
+              echo "::error::No application named '$WANTED_APP' exists in org '$DEPLOY_ORG'."
+              echo "Applications this token can see in that org:"
+              sed -E 's/^/  - /' /tmp/verdict.err || true
+              echo
+              echo "Create it once from a checkout of that folder, then re-run this workflow:"
+              echo "  deno deploy create --non-interactive \\"
+              echo "    --org \"$DEPLOY_ORG\" --app \"$WANTED_APP\" --source local"
+              echo "Or set DENO_DEPLOY_APP_PREFIX so the folder name matches an existing app."
+              exit 1 ;;
+            *)
+              echo "::warning::Could not read the app list; using the configured name."
+              head -3 /tmp/verdict.err || true
+              app="$WANTED_APP" ;;
+          esac
+
+          if [ "$app" != "$WANTED_APP" ]; then
+            echo "::warning::Deno Deploy knows this application as '$app'; using that."
+          fi
+          echo "Resolved to application '$app'."
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+
       # Deno caches modules and its build cache in the project directory.
       # Exact key only, so a lockfile change cannot restore a stale cache.
       - name: Cache Deno
@@ -445,7 +598,7 @@ jobs:
           deno deploy \
             --non-interactive \
             --org "${{ secrets.DENO_DEPLOY_ORG }}" \
-            --app "${{ matrix.project.app }}" \
+            --app "${{ steps.resolve.outputs.app }}" \
             --prod
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
