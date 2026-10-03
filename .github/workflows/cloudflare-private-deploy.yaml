@@ -852,17 +852,38 @@ jobs:
               process.stdin.on("data", (d) => (s += d));
               process.stdin.on("end", () => {
                 try {
-                  const rows = JSON.parse(s);
-                  const hit = Array.isArray(rows) && rows.some((r) => r && r.name === process.argv[1]);
+                  const parsed = JSON.parse(s);
+                  // Wrangler has returned this list both as a bare array and
+                  // wrapped in a { result: ... } envelope, so accept either
+                  // rather than treating a known project as absent.
+                  const rows = Array.isArray(parsed)
+                    ? parsed
+                    : [parsed.result, parsed.projects, parsed.data].find(Array.isArray) || [];
+                  const want = process.argv[1];
+                  const hit = rows.some((r) => r && (r.name === want || r.project_name === want));
                   process.exit(hit ? 0 : 1);
                 } catch (e) { process.exit(2); }
               });
             ' "${{ steps.pages.outputs.app }}"; then
               echo "Pages project already exists."
             else
-              echo "::warning::Cloudflare Pages project '${{ steps.pages.outputs.app }}' not found; creating it with production branch '${{ steps.pages.outputs.branch }}'."
-              npx wrangler pages project create "${{ steps.pages.outputs.app }}" \
-                --production-branch "${{ steps.pages.outputs.branch }}"
+              # The list check is a best effort: if it errored or returned a
+              # shape we do not recognise, this runs and the API decides.
+              echo "::warning::Cloudflare Pages project '${{ steps.pages.outputs.app }}' not found (or not listable); attempting to create it with production branch '${{ steps.pages.outputs.branch }}'."
+              if ! create_out="$(npx wrangler pages project create "${{ steps.pages.outputs.app }}" \
+                --production-branch "${{ steps.pages.outputs.branch }}" 2>&1)"; then
+                # "Already exists" is success, not a failure: it means the
+                # list was simply not authoritative. Failing here would block
+                # every deploy of an existing project. Anything else is a real
+                # error and is surfaced with wrangler's own message.
+                if printf '%s' "$create_out" | grep -qiE 'already exists|8000002'; then
+                  echo "::warning::The Pages project already exists; deploying to it."
+                  printf '%s\n' "$create_out" | tail -3
+                else
+                  printf '%s\n' "$create_out"
+                  exit 1
+                fi
+              fi
             fi
 
             # --commit-dirty=true is required, not cosmetic: the build output
