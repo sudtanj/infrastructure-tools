@@ -51,6 +51,11 @@ name: "Deploy Deno Projects (private repo)"
 #         --runtime-mode dynamic --entrypoint main.ts
 #   The default application name is the folder name (or the repository name
 #   for a project at the root).
+#
+#   NOTE: `--source local` belongs to `create` only. The deploy command has no
+#   `--source` flag and treats the value as a positional root path, failing
+#   with "Too many arguments: local". The deploy step passes only
+#   --non-interactive/--org/--app/--prod.
 # ---------------------------------------------------------------------------
 
 on:
@@ -438,9 +443,9 @@ jobs:
           set -euo pipefail
           echo "Deploying '${{ matrix.project.app }}' from this directory..."
           deno deploy \
+            --non-interactive \
             --org "${{ secrets.DENO_DEPLOY_ORG }}" \
             --app "${{ matrix.project.app }}" \
-            --source local \
             --prod
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
