@@ -137,13 +137,18 @@ jobs:
   terraform-plan:
     name: "Plan (${{ matrix.dir }})"
     needs: detect-directories
-    if: ${{ needs.detect-directories.outputs.matrix != '[]' }}
+    # '' when detect-directories failed rather than reporting an empty set;
+    # '[]' when it ran and found nothing.
+    if: ${{ needs.detect-directories.outputs.matrix != '' && needs.detect-directories.outputs.matrix != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
+        # `|| '[]'` is required: the matrix is built before this job's `if` is
+        # evaluated, so a failed detect-directories would otherwise turn
+        # fromJson('') into "empty input" and mask the real error.
+        dir: ${{ fromJson(needs.detect-directories.outputs.matrix || '[]') }}
 
     steps:
       - name: Checkout Code
@@ -203,6 +208,7 @@ jobs:
     if: |
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.detect-directories.outputs.matrix != '' &&
       needs.detect-directories.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     environment: production
@@ -210,7 +216,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: ${{ fromJson(needs.detect-directories.outputs.matrix) }}
+        # See terraform-plan: fromJson('') on a failed detect-directories
+        # reports "empty input" instead of the failure that caused it.
+        dir: ${{ fromJson(needs.detect-directories.outputs.matrix || '[]') }}
 
     steps:
       - name: Checkout Code

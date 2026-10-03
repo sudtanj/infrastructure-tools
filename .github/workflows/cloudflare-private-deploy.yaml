@@ -319,13 +319,20 @@ jobs:
   deploy:
     name: "Deploy ${{ matrix.project.dir }}"
     needs: [poll, detect]
-    if: ${{ needs.detect.outputs.projects != '[]' }}
+    # '' when detect was skipped (nothing to deploy) or failed; '[]' when it
+    # ran and found nothing.
+    if: ${{ needs.detect.outputs.projects != '' && needs.detect.outputs.projects != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        project: ${{ fromJSON(needs.detect.outputs.projects) }}
+        # `|| '[]'` is required, not defensive padding: when detect is skipped
+        # its outputs are empty strings, and the matrix is built before this
+        # job's `if` is evaluated. fromJSON('') raises "empty input" and fails
+        # the run outright, which is how a no-op poll used to look like an
+        # error.
+        project: ${{ fromJSON(needs.detect.outputs.projects || '[]') }}
 
     steps:
       - name: Checkout private repo
