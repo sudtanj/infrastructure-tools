@@ -464,7 +464,12 @@ jobs:
               # output directory -- the Pages-migrated-but-still-a-Worker
               # case. Keep the Worker: emit a second entry so adding Pages
               # never silently removes the existing workers.dev deployment.
-              if grep -Eiq '(^|[^a-z_])(main|assets|functions)([^a-z_]|$)' "$config"; then
+              #
+              # Anchored to real config keys. A loose word search also matched
+              # values -- `pages_build_output_dir = "./dist/main.js"` contains
+              # "main" -- which invented a Worker for a Pages-only project and
+              # failed the run on "Missing entry-point to Worker script".
+              if grep -Eq '(^[[:space:]]*main[[:space:]]*=|^[[:space:]]*\[assets\]|^[[:space:]]*functions[[:space:]]*=|"(main|assets|functions)"[[:space:]]*:)' "$config"; then
                 also_worker=1
                 echo "  '$dir' declares pages_build_output_dir AND a Worker entrypoint; deploying both."
               fi
