@@ -435,21 +435,36 @@ jobs:
               [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
             fi
 
-            # Classify. A wrangler config is AUTHORITATIVE: if the folder has
-            # one and it does not set pages_build_output_dir, it is a Worker,
-            # even if a stray _headers, _routes.json or public/ is lying
-            # around. Only a folder with NO wrangler config is classified from
-            # those signals, which is what stops the Worker's own assets from
-            # being published a second time as Pages.
+            # Classify, and record HOW it was decided so a wrong type shows up
+            # in this log instead of silently deploying to the wrong product.
+            #
+            # A wrangler config is AUTHORITATIVE: if the folder has one and it
+            # does not set pages_build_output_dir, it is a Worker, even if a
+            # stray _headers, _routes.json or public/ is lying around. Only a
+            # folder with NO config is classified from those signals, which is
+            # what stops a Worker's own assets being published a second time.
+            #
+            #   explicit - the project's wrangler config declared Pages
+            #   inferred  - no config, so a heuristic decided; worth a 2nd look
+            #   config    - the config declared a Worker
             type=worker
+            source='config'
             if [ -z "$config" ]; then
+              type=worker
+              source='none'
               if [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ] || [ -d "$dir/public" ]; then
                 type=pages
+                source='inferred'
               fi
             elif grep -Eq 'pages_build_output_dir' "$config"; then
               type=pages
+              source='explicit'
             fi
-            projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type")
+            if [ "$type" = pages ] && [ "$source" = inferred ]; then
+              echo "  NOTE: '$dir' was inferred to be Pages from its files alone."
+              echo "  Add a wrangler.toml to it with pages_build_output_dir = \"./public\" to declare this explicitly and pick the project name there."
+            fi
+            projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type"$'\t'"$source")
           done
 
           echo "Deploying ${#projects[@]} project(s):"
@@ -472,8 +487,10 @@ jobs:
               lock="${rest%%$'\t'*}"
               rest="${rest#*$'\t'}"
               reason="${rest%%$'\t'*}"
-              type="${rest#*$'\t'}"
-              echo "  - $dir (type: $type, reason: $reason, lockfile: ${lock:-none})"
+              rest="${rest#*$'\t'}"
+              type="${rest%%$'\t'*}"
+              source="${rest#*$'\t'}"
+              echo "  - $dir (type: $type via $source, reason: $reason, lockfile: ${lock:-none})"
             done
           fi
           if [ ${#skipped[@]} -gt 0 ]; then
@@ -491,8 +508,8 @@ jobs:
               const rows = process.argv.slice(1)
                 .filter(Boolean)
                 .map((row) => {
-                  const [dir, lock, reason, type] = row.split("\t");
-                  return { dir, lock, reason, type: type || "worker" };
+                  const [dir, lock, reason, type, source] = row.split("\t");
+                  return { dir, lock, reason, type: type || "worker", source: source || "config" };
                 });
               process.stdout.write(JSON.stringify(rows));
             ' "${projects[@]:-}")"
@@ -857,7 +874,7 @@ jobs:
           {
             echo "### Deploy: \`${{ matrix.project.dir }}\`"
             echo
-            echo "- Type: \`${{ matrix.project.type }}\`"
+            echo "- Type: \`${{ matrix.project.type }}\` (via \`${{ matrix.project.source }}\`)"
             echo "- Reason: \`${{ matrix.project.reason }}\`"
             echo "- Status: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
