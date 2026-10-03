@@ -449,6 +449,7 @@ jobs:
             #   config    - the config declared a Worker
             type=worker
             source='config'
+            also_worker=0
             if [ -z "$config" ]; then
               type=worker
               source='none'
@@ -459,12 +460,26 @@ jobs:
             elif grep -Eq 'pages_build_output_dir' "$config"; then
               type=pages
               source='explicit'
+              # ONE config can declare both a Worker entrypoint and a Pages
+              # output directory -- the Pages-migrated-but-still-a-Worker
+              # case. Keep the Worker: emit a second entry so adding Pages
+              # never silently removes the existing workers.dev deployment.
+              if grep -Eiq '(^|[^a-z_])(main|assets|functions)([^a-z_]|$)' "$config"; then
+                also_worker=1
+                echo "  '$dir' declares pages_build_output_dir AND a Worker entrypoint; deploying both."
+              fi
             fi
             if [ "$type" = pages ] && [ "$source" = inferred ]; then
               echo "  NOTE: '$dir' was inferred to be Pages from its files alone."
               echo "  Add a wrangler.toml to it with pages_build_output_dir = \"./public\" to declare this explicitly and pick the project name there."
             fi
             projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type"$'\t'"$source")
+            if [ "$also_worker" -eq 1 ]; then
+              # Same directory, different product. The Pages name comes from
+              # the config's `name`, and Pages and Workers are separate
+              # namespaces, so reusing it does not collide.
+              projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"worker"$'\t'"config-dual")
+            fi
           done
 
           echo "Deploying ${#projects[@]} project(s):"
@@ -728,7 +743,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: private/${{ matrix.project.dir }}/node_modules
-          key: node-modules-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
+          key: node-modules-${{ matrix.project.dir }}-${{ matrix.project.type }}-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
 
       - name: Cache wrangler state
         uses: actions/cache@v4
@@ -737,9 +752,9 @@ jobs:
             private/${{ matrix.project.dir }}/.wrangler
             ~/.cache/wrangler
             ~/.config/.wrangler
-          key: wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
+          key: wrangler-${{ matrix.project.dir }}-${{ matrix.project.type }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('private/{0}', matrix.project.lock)) }}
           restore-keys: |
-            wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-
+            wrangler-${{ matrix.project.dir }}-${{ matrix.project.type }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         working-directory: private/${{ matrix.project.dir }}
