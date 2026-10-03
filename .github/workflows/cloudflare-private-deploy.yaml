@@ -403,12 +403,18 @@ jobs:
               [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
             fi
 
-            # Classify. The config is the authority; a marker file is the
-            # fallback for a Pages project that has no wrangler config.
+            # Classify. A wrangler config is AUTHORITATIVE: if the folder has
+            # one and it does not set pages_build_output_dir, it is a Worker,
+            # even if a stray _headers or _routes.json is lying around. Only a
+            # folder with NO wrangler config falls back to the marker files.
+            # Without that, adding a Pages deployment could silently convert
+            # an existing Worker into a Pages project and break it.
             type=worker
-            if [ -n "$config" ] && grep -Eq 'pages_build_output_dir' "$config"; then
-              type=pages
-            elif [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ]; then
+            if [ -z "$config" ]; then
+              if [ -f "$dir/_headers" ] || [ -f "$dir/_routes.json" ]; then
+                type=pages
+              fi
+            elif grep -Eq 'pages_build_output_dir' "$config"; then
               type=pages
             fi
             projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type")
