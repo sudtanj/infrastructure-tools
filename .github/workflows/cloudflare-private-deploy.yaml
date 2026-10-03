@@ -843,10 +843,9 @@ jobs:
 
           if [ -n "${{ steps.pages.outputs.app }}" ]; then
             # Pages: create the project on first use, so a brand new site is
-            # not a manual out-of-band step. `project list --json` is the only
-            # reliable existence check; on any other failure fall through to
-            # create, which will surface the real error if it is not a
-            # missing project.
+            # not a manual out-of-band step. On every later run the project
+            # already exists and is simply updated -- creating again is treated
+            # as success, never as an error.
             if npx wrangler pages project list --json 2>/dev/null | node -e '
               let s = "";
               process.stdin.on("data", (d) => (s += d));
@@ -877,8 +876,11 @@ jobs:
                 # every deploy of an existing project. Anything else is a real
                 # error and is surfaced with wrangler's own message.
                 if printf '%s' "$create_out" | grep -qiE 'already exists|8000002'; then
-                  echo "::warning::The Pages project already exists; deploying to it."
-                  printf '%s\n' "$create_out" | tail -3
+                  # Expected, not a problem: the list was not authoritative.
+                  # Deliberately NOT echoing wrangler's output here -- it is a
+                  # red ERROR block for a run that is about to succeed, and
+                  # printing it makes a working deploy look broken.
+                  echo "The Pages project already exists; updating it with this deployment."
                 else
                   printf '%s\n' "$create_out"
                   exit 1
