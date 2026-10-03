@@ -46,16 +46,8 @@ name: "Deploy Deno Projects (private repo)"
 #   secret DENO_DEPLOY_APP_PREFIX  optional; prepended to the folder name to
 #                                 form the application name
 #
-#   IMPORTANT: put the app prefix and the private repo slug in repository
-#   VARIABLES, not secrets, if you use them:
-#     variable DENO_DEPLOY_APP_PREFIX   optional; prepended to the folder name
-#     variable PRIVATE_REPO             "owner/name"
-#   Anything read from `secrets` is masked, and if a job output contains a
-#   secret value GitHub drops that output entirely ("Skip output 'projects'
-#   since it may contain secret"), which silently leaves the deploy job with
-#   an empty matrix. Both are configuration, not credentials; only
-#   PRIVATE_REPO_TOKEN, DENO_DEPLOY_TOKEN and DENO_DEPLOY_ORG need to be
-#   secrets.
+#   Configuration values may remain secrets. The matrix carries only project
+#   directories and folder names; the deploy job builds app names locally.
 #
 # RUNNING IT BY HAND
 #   Re-run with `force` checked to deploy every project, even when the private
@@ -279,14 +271,10 @@ jobs:
         env:
           TARGET_SHA: ${{ needs.poll.outputs.sha }}
           FORCE: ${{ inputs.force || github.event.inputs.force }}
-          # Variables, not secrets. The app name derived from these ends up in the
-          # `projects` output, and GitHub discards any job output containing a
-          # secret -- which empties the matrix and skips the deploy job. The
-          # secret form is still accepted, with a warning, so an existing setup
-          # keeps working once the output guard explains what to change.
-          APP_PREFIX: ${{ vars.DENO_DEPLOY_APP_PREFIX || secrets.DENO_DEPLOY_APP_PREFIX }}
-          REPO_NAME: ${{ vars.PRIVATE_REPO || github.repository }}
-          PREFIX_IS_SECRET: ${{ secrets.DENO_DEPLOY_APP_PREFIX && 'true' || '' }}
+          # These values may be secrets. Never include them in `projects`:
+          # GitHub discards outputs containing secrets, emptying the matrix.
+          # The deploy job composes app names locally instead.
+          PRIVATE_REPO_NAME: ${{ secrets.PRIVATE_REPO || vars.PRIVATE_REPO || github.repository }}
         run: |
           set -euo pipefail
 
@@ -339,7 +327,6 @@ jobs:
               \( -name 'deno.json' -o -name 'deno.jsonc' \) -print | sort
           )
 
-          repo_name="${REPO_NAME#*/}"
           projects=()
           skipped=()
           # `${configs[@]+"${configs[@]}"}` and not `"${configs[@]:-}"`: the latter
@@ -370,14 +357,13 @@ jobs:
               continue
             fi
 
-            # Application name: optional prefix + folder name, or the repo
-            # name for a project at the root.
+            # Folder name only. The optional app prefix may be a secret, and
+            # the deploy job applies it after the matrix has been built.
             if [ "$dir" = "." ]; then
-              leaf="$repo_name"
+              leaf='.'
             else
               leaf="${dir##*/}"
             fi
-            app="${APP_PREFIX:+$APP_PREFIX-}${leaf}"
 
             # A `deploy` block is what Deno Deploy actually reads, so note its
             # presence for the summary. Absence is not fatal: the app may carry
@@ -387,7 +373,7 @@ jobs:
               deploy_cfg='inline'
             fi
 
-            projects+=("$dir"$'\t'"$app"$'\t'"$deploy_cfg"$'\t'"$reason")
+            projects+=("$dir"$'\t'"$leaf"$'\t'"$deploy_cfg"$'\t'"$reason")
           done
 
           echo "Deploying ${#projects[@]} Deno project(s):"
@@ -398,14 +384,14 @@ jobs:
             # the checkout, which almost always means the wrong repo or the
             # wrong branch.
             if force_on; then
-              echo "::error::force was requested but no Deno project was found in ${REPO_NAME:-the private repo}@${TARGET_SHA:0:12}."
+              echo "::error::force was requested but no Deno project was found in ${PRIVATE_REPO_NAME:-the private repo}@${TARGET_SHA:0:12}."
               echo "Check BUILD_REF points at the branch you meant, and that each project folder contains a deno.json or deno.jsonc."
               exit 1
             fi
           else
             for project in "${projects[@]}"; do
-              IFS=$'\t' read -r d a c r <<<"$project"
-              echo "  - dir=$d app=$a (config: $c, reason: $r)"
+              IFS=$'\t' read -r d l c r <<<"$project"
+              echo "  - dir=$d${l:+ (name: $l)} (config: $c, reason: $r)"
             done
           fi
           if [ ${#skipped[@]} -gt 0 ]; then
@@ -421,12 +407,14 @@ jobs:
           # "priv-api" becomes "priv - api" and trips `set -u`.
           declare -A clashes=()
           for project in "${projects[@]}"; do
-            IFS=$'\t' read -r _d a _c _r <<<"$project"
+            IFS=$'\t' read -r _d l _c _r <<<"$project"
             dir_of="${project%%$'\t'*}"
-            if [ -n "${clashes[$a]:-}" ]; then
-              clashes[$a]="${clashes[$a]}, $dir_of"
+            # Two root projects are impossible, so an empty leaf is unique.
+            key="${l:-.}"
+            if [ -n "${clashes[$key]:-}" ]; then
+              clashes[$key]="${clashes[$key]}, $dir_of"
             else
-              clashes[$a]="$dir_of"
+              clashes[$key]="$dir_of"
             fi
           done
           collision=""
@@ -446,8 +434,8 @@ jobs:
               const rows = process.argv.slice(1)
                 .filter(Boolean)
                 .map((row) => {
-                  const [dir, app, config, reason] = row.split("\t");
-                  return { dir, app, config, reason };
+                  const [dir, leaf, config, reason] = row.split("\t");
+                  return { dir, leaf, config, reason };
                 });
               process.stdout.write(JSON.stringify(rows));
             ' "${projects[@]:-}")"
@@ -456,10 +444,6 @@ jobs:
           # A bare integer, so it always survives even if GitHub drops the
           # `projects` output for containing a secret.
           echo "count=${#projects[@]}" >> "$GITHUB_OUTPUT"
-
-          if [ -n "${PREFIX_IS_SECRET:-}" ]; then
-            echo "::warning::DENO_DEPLOY_APP_PREFIX is set as a secret, so the app name may be masked out of the projects output and GitHub may drop that output entirely. Move it to a repository VARIABLE of the same name."
-          fi
 
           # No base is saved here. The `record` job writes the deployed commit
           # once the attempt has actually succeeded, which is also what the
@@ -480,7 +464,9 @@ jobs:
   # Job 3: deploy each detected project
   # ------------------------------------------------------------------
   deploy:
-    name: "Deploy ${{ matrix.project.app }}"
+    # The directory, not the application name: the name may be built from the
+    # DENO_DEPLOY_APP_PREFIX secret and GitHub masks that in job names.
+    name: "Deploy ${{ matrix.project.dir }}"
     needs: [poll, detect]
     # '' when detect was skipped (nothing to deploy) or failed; '[]' when it
     # ran and found nothing.
@@ -519,18 +505,29 @@ jobs:
       # bare "The requested app was not found, or you do not have access to
       # view it." plus a trace id. Resolve the name against the account first.
       - name: Resolve application
-        id: resolve
         shell: bash
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
           DEPLOY_ORG: ${{ secrets.DENO_DEPLOY_ORG }}
-          WANTED_APP: ${{ matrix.project.app }}
+          # The name is composed here, not in the detect job: a job output
+          # containing a secret is discarded outright, which emptied the matrix.
+          APP_PREFIX: ${{ vars.DENO_DEPLOY_APP_PREFIX || secrets.DENO_DEPLOY_APP_PREFIX }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO || vars.PRIVATE_REPO }}
+          LEAF: ${{ matrix.project.leaf }}
         run: |
           set -euo pipefail
 
           if [ -z "${DEPLOY_ORG:-}" ]; then
             echo "::error::The DENO_DEPLOY_ORG secret is not set; cannot resolve an application."
             exit 1
+          fi
+
+          # A dot leaf marks the project at the repository root, named after
+          # the private repo; other leaves are folder names.
+          if [ "${LEAF:-}" != "." ]; then
+            WANTED_APP="${APP_PREFIX:+$APP_PREFIX-}${LEAF}"
+          else
+            WANTED_APP="${APP_PREFIX:+$APP_PREFIX-}${PRIVATE_REPO##*/}"
           fi
           echo "Wanting '$WANTED_APP' in org '$DEPLOY_ORG'."
 
@@ -628,7 +625,7 @@ jobs:
               > /tmp/apps.json 2> /tmp/apps.err; then
             echo "::warning::Could not list apps in '$DEPLOY_ORG'; using the configured name."
             head -3 /tmp/apps.err || true
-            echo "app=$WANTED_APP" >> "$GITHUB_OUTPUT"
+            printf '%s' "$WANTED_APP" > /tmp/deno-app.txt
             exit 0
           fi
 
@@ -656,7 +653,9 @@ jobs:
             echo "::warning::Deno Deploy knows this application as '$app'; using that."
           fi
           echo "Resolved to application '$app'."
-          echo "app=$app" >> "$GITHUB_OUTPUT"
+          # A file, not a step output: the name may contain the app-prefix
+          # secret, and GitHub discards outputs containing a secret.
+          printf '%s' "$app" > /tmp/deno-app.txt
 
       # Deno caches modules and its build cache in the project directory.
       # Exact key only, so a lockfile change cannot restore a stale cache.
@@ -669,7 +668,7 @@ jobs:
             ~/.deno
           # Normalise the root case: a project at "." would otherwise produce
           # "private/./deno.lock", which glob does not match reliably.
-          key: deno-${{ matrix.project.app }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.dir == '.' && 'private/deno.lock' || format('private/{0}/deno.lock', matrix.project.dir)) }}
+          key: deno-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.dir == '.' && 'private/deno.lock' || format('private/{0}/deno.lock', matrix.project.dir)) }}
 
       # `deno check` names private files and imports. This repo is PUBLIC, so
       # capture the output and emit only pass/fail with paths stripped.
@@ -708,11 +707,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Deploying '${{ matrix.project.app }}' from this directory..."
+          if [ ! -s /tmp/deno-app.txt ]; then
+            echo "::error::Resolve application did not run or left no application name."
+            exit 1
+          fi
+          APP_NAME="$(cat /tmp/deno-app.txt)"
+          echo "Deploying '$APP_NAME' from this directory..."
           deno deploy \
             --non-interactive \
             --org "${{ secrets.DENO_DEPLOY_ORG }}" \
-            --app "${{ steps.resolve.outputs.app }}" \
+            --app "$APP_NAME" \
             --prod
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
@@ -721,8 +725,9 @@ jobs:
       - name: Summary
         if: always()
         run: |
+          APP_NAME="$(cat /tmp/deno-app.txt 2>/dev/null || echo '<unresolved>')"
           {
-            echo "### Deploy: \`${{ matrix.project.app }}\`"
+            echo "### Deploy: \`$APP_NAME\`"
             echo
             echo "- Directory: \`${{ matrix.project.dir }}\`"
             echo "- Config: \`${{ matrix.project.config }}\`"
@@ -767,10 +772,7 @@ jobs:
           # deploy job for no visible reason. `count` is a bare integer and
           # cannot be dropped, so the mismatch is detectable.
           if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_PROJECTS:-}" ]; then
-            echo "::error::GitHub discarded the 'projects' job output: it matched a repository secret, so the deploy job received an empty matrix."
-            echo "Detect found ${DETECT_COUNT} project(s). Move any configuration you read from \`secrets\` into repository variables:"
-            echo "  variable DENO_DEPLOY_APP_PREFIX, variable PRIVATE_REPO"
-            echo "Only PRIVATE_REPO_TOKEN, DENO_DEPLOY_TOKEN and DENO_DEPLOY_ORG belong in secrets."
+            echo "::error::GitHub discarded the 'projects' job output, so the deploy job received an empty matrix. Keep secret values out of project directory names and other matrix fields."
             exit 1
           fi
 
