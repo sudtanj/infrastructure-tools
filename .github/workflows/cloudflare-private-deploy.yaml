@@ -1,0 +1,470 @@
+name: "Deploy Cloudflare Workers (private repo)"
+
+# ---------------------------------------------------------------------------
+# Deploys Cloudflare Workers whose source lives in a PRIVATE repository,
+# using this PUBLIC repo's free GitHub-hosted runner minutes. Standard runners
+# on public repos are unmetered, unlike the private-repo minute quota.
+#
+# HOW THIS WORKS
+#   1. poll    - ask GitHub for the private repo's latest commit on the tracked
+#                branch; compare with the last one deployed (cached).
+#   2. detect  - checkout the private repo here and find every folder holding a
+#                wrangler.toml / .json / .jsonc that the push touched.
+#   3. deploy  - install, build and `wrangler deploy` each one in a matrix.
+#
+#   A workflow can only be triggered by events inside the repo hosting it, so
+#   there is no way to subscribe to pushes on another repository. This polls
+#   instead, which means nothing at all is installed in the private repo.
+#
+#   Trade-off: latency is up to one cron interval, and scheduled workflows in
+#   public repos are auto-disabled after ~60 days without repo activity. Run it
+#   manually (force=true) if the schedule goes quiet.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo: visible to everyone, and forkable.
+#   * CLOUDFLARE_API_TOKEN lives here and can deploy Workers. Anyone who can
+#     push to this repo can change what gets deployed and exfiltrate that
+#     token. Keep push access to trusted people only, and scope the token to
+#     the minimum Workers/R2/KV resources it needs.
+#   * Build output is reduced to pass/fail with paths stripped, so private file
+#     names and source lines do not land in a public log. `wrangler deploy`
+#     output is NOT redacted, because the URL it prints is the point of the run.
+#
+# SETUP
+#   secret CLOUDFLARE_API_TOKEN     required
+#   secret CLOUDFLARE_ACCOUNT_ID    required
+#   secret PRIVATE_REPO_TOKEN       read access to the private repo (required
+#                                   unless the App secrets below are set)
+#   secret PRIVATE_REPO             "owner/name" of the private repo
+#   secret BUILD_REF                branch to track (defaults to main)
+#   secret FREE_COMPUTE_APP_ID      optional; with FREE_COMPUTE_APP_PRIVATE_KEY
+#                                   mints a short-lived single-repo token
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Deploy even if the private repo has no new commits"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-deploy-${{ secrets.PRIVATE_REPO || github.repository }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  NPM_CONFIG_FUND: 'false'
+  NPM_CONFIG_AUDIT: 'false'
+  NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+  WRANGLER_SEND_METRICS: 'false'
+  CI: 'true'
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: has the private repo moved?
+  # ------------------------------------------------------------------
+  poll:
+    name: "Poll private repo"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.poll.outputs.changed }}
+      sha: ${{ steps.poll.outputs.sha }}
+      ref: ${{ steps.poll.outputs.ref }}
+
+    steps:
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+
+      # Restore BEFORE polling: the poll step reads this file to learn which
+      # commit was last deployed.
+      - name: Restore state for next poll
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/cf-deploy-state.txt
+          key: cf-deploy-state-${{ secrets.PRIVATE_REPO || github.repository }}
+
+      - name: Resolve repo and fetch latest commit
+        id: poll
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          CFG_REPO: ${{ secrets.PRIVATE_REPO }}
+          CFG_REF: ${{ secrets.BUILD_REF }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # ${VAR:-} everywhere: under `set -u` an unset variable is fatal.
+          TOKEN="${GH_TOKEN:-}"
+          if [ -n "${APP_TOKEN:-}" ]; then TOKEN="$APP_TOKEN"; fi
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN (or FREE_COMPUTE_APP_ID)."
+            exit 1
+          fi
+
+          REPO="${CFG_REPO:-}"
+          # Strict owner/name: no metacharacters, no traversal, no leading dash.
+          if ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::Set secret PRIVATE_REPO to 'owner/name'; got '${REPO}'."
+            exit 1
+          fi
+          REF="${CFG_REF:-main}"
+
+          if ! RESP=$(GH_TOKEN="$TOKEN" gh api "repos/${REPO}/commits/${REF}" --jq '.sha' 2>/dev/null); then
+            echo "::error::Cannot read ${REPO}@${REF}. Check the token has read access."
+            exit 1
+          fi
+          if [ -z "$RESP" ]; then
+            echo "::error::Empty response for ${REPO}@${REF}."
+            exit 1
+          fi
+
+          PREV=""
+          [ -f /tmp/cf-deploy-state.txt ] && PREV="$(cat /tmp/cf-deploy-state.txt)"
+
+          echo "Tracked:    $REPO@$REF"
+          echo "Latest:     ${RESP:0:12}"
+          echo "Last deploy: ${PREV:-<none>}"
+
+          CHANGED="false"
+          if [ "$RESP" != "$PREV" ]; then
+            CHANGED="true"
+            echo "New commit detected."
+          else
+            echo "No new commit; nothing to deploy."
+          fi
+
+          if [ "${FORCE:-false}" = "true" ]; then
+            CHANGED="true"
+            echo "force=true; deploying regardless."
+          fi
+
+          printf '%s' "$RESP" > /tmp/cf-deploy-state.txt
+
+          {
+            echo "changed=$CHANGED"
+            echo "sha=$RESP"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Save state for next poll
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/cf-deploy-state.txt
+          key: cf-deploy-state-${{ secrets.PRIVATE_REPO || github.repository }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Poll"
+            echo
+            echo "- Changed: \`${{ steps.poll.outputs.changed }}\`"
+            echo "- Ref: \`${{ steps.poll.outputs.ref }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 2: which Worker folders in the private repo need deploying?
+  # ------------------------------------------------------------------
+  detect:
+    name: "Detect workers"
+    needs: poll
+    if: ${{ needs.poll.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      projects: ${{ steps.detect.outputs.projects }}
+    steps:
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.ref }}
+          # Keep the token out of .git/config so later steps cannot leak it.
+          persist-credentials: false
+          path: private
+
+      - name: Find changed wrangler projects
+        id: detect
+        working-directory: private
+        shell: bash
+        env:
+          TARGET_SHA: ${{ needs.poll.outputs.sha }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # Compare against the PARENT of the deployed commit, so a push of
+          # several commits is seen in full. Falls back to "deploy everything"
+          # when that commit is not available locally.
+          base=''
+          if [ -f /tmp/cf-deploy-base.txt ]; then
+            base="$(cat /tmp/cf-deploy-base.txt)"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No comparable base commit; deploying every worker found."
+            base=''
+          fi
+
+          changed=()
+          if [ -n "$base" ]; then
+            mapfile -t changed < <(git diff --name-only "$base" "$TARGET_SHA")
+          fi
+
+          echo "Comparing ${base:-<nothing>}..${TARGET_SHA:0:12} (${#changed[@]} changed file(s)):"
+          if [ ${#changed[@]} -eq 0 ]; then
+            echo "  (none, full deploy)"
+          else
+            printf '  %s\n' "${changed[@]}"
+          fi
+
+          mapfile -t configs < <(
+            find . -path '*/node_modules' -prune -o \
+              \( -name 'wrangler.toml' -o -name 'wrangler.json' -o -name 'wrangler.jsonc' \) -print | sort
+          )
+          projects=()
+          skipped=()
+          for config in "${configs[@]:-}"; do
+            dir="$(dirname "${config#./}")"
+            # A wrangler config at the repo root means the whole repo is one
+            # worker; keep it as "." and treat every change as relevant.
+            reason=''
+            if [ ${#changed[@]} -eq 0 ]; then
+              reason='full'
+            elif [ "$dir" = "." ]; then
+              reason='changed'
+            else
+              for file in "${changed[@]}"; do
+                case "$file" in
+                  "$dir"/*|"$dir") reason='changed'; break ;;
+                esac
+              done
+            fi
+            if [ -z "$reason" ]; then
+              skipped+=("$dir")
+              continue
+            fi
+            lock=''
+            [ "$dir" != "." ] && [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
+            projects+=("$dir"$'\t'"$lock"$'\t'"$reason")
+          done
+
+          echo "Deploying ${#projects[@]} worker(s):"
+          if [ ${#projects[@]} -eq 0 ]; then
+            echo "  (none)"
+          else
+            for project in "${projects[@]}"; do
+              # Split on TAB only; a field may legitimately be empty.
+              dir="${project%%$'\t'*}"
+              rest="${project#*$'\t'}"
+              lock="${rest%%$'\t'*}"
+              reason="${rest#*$'\t'}"
+              echo "  - $dir (reason: $reason, lockfile: ${lock:-none})"
+            done
+          fi
+          if [ ${#skipped[@]} -gt 0 ]; then
+            echo "Unchanged, skipping: ${skipped[*]}"
+          fi
+
+          {
+            echo "projects=$(node -e '
+              const rows = process.argv.slice(1)
+                .filter(Boolean)
+                .map((row) => {
+                  const [dir, lock, reason] = row.split("\t");
+                  return { dir, lock, reason };
+                });
+              process.stdout.write(JSON.stringify(rows));
+            ' "${projects[@]:-}")"
+          } >> "$GITHUB_OUTPUT"
+
+          # Save the base for the next run. Cache is best-effort; when it is
+          # missing the next run simply redeploys everything, which is safe.
+          printf '%s' "$TARGET_SHA" > /tmp/cf-deploy-base.txt
+
+      - name: Save base commit for next run
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/cf-deploy-base.txt
+          key: cf-deploy-base-${{ secrets.PRIVATE_REPO || github.repository }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Detected workers"
+            echo
+            echo '```json'
+            echo '${{ steps.detect.outputs.projects }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 3: deploy each detected worker
+  # ------------------------------------------------------------------
+  deploy:
+    name: "Deploy ${{ matrix.project.dir }}"
+    needs: [poll, detect]
+    if: ${{ needs.detect.outputs.projects != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.projects) }}
+
+    steps:
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.ref }}
+          persist-credentials: false
+          path: private
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Only enable npm's cache when this project has a lockfile, else
+          # setup-node fails with "Dependencies lock file is not found".
+          cache: ${{ matrix.project.lock != '' && 'npm' || '' }}
+          cache-dependency-path: ${{ matrix.project.lock }}
+
+      - name: Prepare directories
+        run: |
+          set -euo pipefail
+          # A project dir of "." means the worker is the repo root itself.
+          if [ "${{ matrix.project.dir }}" = "." ]; then
+            echo "ROOT=true" >> "$GITHUB_ENV"
+          else
+            echo "ROOT=false" >> "$GITHUB_ENV"
+          fi
+
+      # Cache the installed tree. Hosted runners are ephemeral, so `npm ci`
+      # would otherwise delete and re-extract everything each run. Exact key
+      # only (no restore-keys) so a dependency change can never be restored
+      # against a stale node_modules.
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: private/${{ matrix.project.dir }}/node_modules
+          key: node-modules-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-node${{ env.NODE_VERSION }}-${{ hashFiles(matrix.project.lock) }}
+
+      - name: Cache wrangler state
+        uses: actions/cache@v4
+        with:
+          path: |
+            private/${{ matrix.project.dir }}/.wrangler
+            ~/.cache/wrangler
+            ~/.config/.wrangler
+          key: wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.lock) }}
+          restore-keys: |
+            wrangler-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install dependencies
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f package.json ]; then
+            echo "No package.json; skipping install."
+          elif [ -f node_modules/.package-lock.json ] && [ node_modules/.package-lock.json -nt package-lock.json ]; then
+            echo "node_modules restored from cache; skipping install."
+          elif [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit --no-fund
+          else
+            npm install --prefer-offline --no-audit --no-fund
+          fi
+
+      # Build output names private files and dependencies. This repo is PUBLIC,
+      # so capture it and emit only a pass/fail summary with paths stripped.
+      - name: Build (dry run)
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"
+              rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            echo "--- last lines of $label (paths stripped to basenames) ---"
+            tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            echo "--- end ---"
+            rm -f "$log"
+            return 1
+          }
+
+          if [ -f package.json ]; then
+            if grep -q '"build"[[:space:]]*:' package.json; then
+              run_quiet "build" npm run build
+            else
+              echo "No 'build' script; nothing to do."
+            fi
+          else
+            echo "No package.json; running wrangler dry-run directly."
+            npx wrangler deploy --dry-run
+          fi
+
+      # NOT redacted: the URL wrangler prints is the useful output here.
+      - name: Deploy
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f package.json ]; then
+            npx wrangler deploy
+          elif node -e 'process.exit(require("./package.json").scripts?.deploy ? 0 : 1)' 2>/dev/null; then
+            npm run deploy
+          else
+            echo "No deploy script; falling back to wrangler deploy."
+            npx wrangler deploy
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy: \`${{ matrix.project.dir }}\`"
+            echo
+            echo "- Reason: \`${{ matrix.project.reason }}\`"
+            echo "- Status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

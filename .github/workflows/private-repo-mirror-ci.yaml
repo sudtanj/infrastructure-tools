@@ -1,0 +1,267 @@
+name: "Private Repo Mirror CI"
+
+# ---------------------------------------------------------------------------
+# Runs a build pipeline for a PRIVATE repository on this PUBLIC repo's free
+# GitHub-hosted runner allowance. Standard runners on public repos are
+# unmetered, unlike the private-repo minute quota.
+#
+# HOW THIS LISTENS
+#   A workflow can only be triggered by events inside the repo hosting it, so
+#   there is no way to subscribe to pushes on another repository. This POLLS
+#   the private repo on a schedule and compares its latest commit with the
+#   last one built. Nothing is installed in the private repo.
+#
+#   Why polling: a push-triggered design needs either a workflow inside the
+#   private repo, or a webhook receiver on a public endpoint we operate.
+#   Polling is the only option that leaves the private repo untouched.
+#
+#   Trade-off: latency is up to one cron interval, and scheduled workflows in
+#   public repos are auto-disabled after ~60 days without repository activity.
+#   Run this workflow manually (force=true) if the schedule goes quiet.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo: visible to everyone, and forkable.
+#   * It holds a credential that can READ the private repo. Scope it to a
+#     single repository, read-only. Prefer a GitHub App installation token
+#     (FREE_COMPUTE_APP_ID, 1-hour expiry) over a long-lived PAT.
+#   * Build output names private files, paths and dependencies, so it is
+#     captured and reduced to a pass/fail summary with paths stripped. This
+#     prevents private source details from landing in a public log.
+#
+# SETUP
+#   secret PRIVATE_REPO_TOKEN      read access to the private repo (required
+#                                  unless the App secrets below are set)
+#   secret PRIVATE_REPO            "owner/name" (defaults to this repo)
+#   secret BUILD_REF               branch to track (defaults to main)
+#   secret FREE_COMPUTE_APP_ID     optional; with FREE_COMPUTE_APP_PRIVATE_KEY
+#                                  mints a short-lived, single-repo token
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if the private repo has no new commits"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # One pipeline per tracked repo at a time; queue rather than cancel.
+  group: private-repo-ci-${{ vars.PRIVATE_REPO || secrets.PRIVATE_REPO || github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: "Poll for changes"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.poll.outputs.changed }}
+      sha: ${{ steps.poll.outputs.sha }}
+      ref: ${{ steps.poll.outputs.ref }}
+
+    steps:
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+
+      # Restore BEFORE polling: the poll step reads this file to learn which
+      # commit was last built.
+      - name: Restore state for next poll
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/private-ci-state.txt
+          key: private-ci-state-${{ secrets.PRIVATE_REPO || github.repository }}
+
+      - name: Resolve repo and fetch latest commit
+        id: poll
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          CFG_REPO: ${{ secrets.PRIVATE_REPO }}
+          CFG_REF: ${{ secrets.BUILD_REF }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # ${VAR:-} everywhere: under `set -u` an unset variable is a hard
+          # failure, and these may legitimately be empty.
+          TOKEN="${GH_TOKEN:-}"
+          if [ -n "${APP_TOKEN:-}" ]; then TOKEN="$APP_TOKEN"; fi
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN (or FREE_COMPUTE_APP_ID)."
+            exit 1
+          fi
+
+          REPO="${CFG_REPO:-${GITHUB_REPOSITORY:-}}"
+          # Strict owner/name: no metacharacters, no traversal, no leading dash.
+          if ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::PRIVATE_REPO must look like owner/name"
+            exit 1
+          fi
+          REF="${CFG_REF:-main}"
+
+          # Ask the API for the latest commit; request only the SHA.
+          if ! RESP=$(GH_TOKEN="$TOKEN" gh api "repos/${REPO}/commits/${REF}" --jq '.sha' 2>/dev/null); then
+            echo "::error::Cannot read ${REPO}@${REF}. Check the token has read access."
+            exit 1
+          fi
+          if [ -z "$RESP" ]; then
+            echo "::error::Empty response for ${REPO}@${REF}."
+            exit 1
+          fi
+
+          PREV=""
+          [ -f /tmp/private-ci-state.txt ] && PREV="$(cat /tmp/private-ci-state.txt)"
+
+          echo "Tracked:    $REPO@$REF"
+          echo "Latest:     ${RESP:0:12}"
+          echo "Last built: ${PREV:-<none>}"
+
+          CHANGED="false"
+          if [ "$RESP" != "$PREV" ]; then
+            CHANGED="true"
+            echo "New commit detected."
+          else
+            echo "No new commit; skipping build."
+          fi
+
+          if [ "${FORCE:-false}" = "true" ]; then
+            CHANGED="true"
+            echo "force=true; building regardless."
+          fi
+
+          # Recorded unconditionally so a forced run records what it built.
+          printf '%s' "$RESP" > /tmp/private-ci-state.txt
+
+          {
+            echo "changed=$CHANGED"
+            echo "sha=$RESP"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Save state for next poll
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/private-ci-state.txt
+          key: private-ci-state-${{ secrets.PRIVATE_REPO || github.repository }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Poll"
+            echo
+            echo "- Changed: \`${{ steps.poll.outputs.changed }}\`"
+            echo "- Ref: \`${{ steps.poll.outputs.ref }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: "Build private repo"
+    needs: check
+    # Skipped when nothing changed, so no runner minutes are spent.
+    if: ${{ needs.check.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Mint GitHub App token (optional)
+        id: app-token
+        if: ${{ secrets.FREE_COMPUTE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FREE_COMPUTE_APP_ID }}
+          private-key: ${{ secrets.FREE_COMPUTE_APP_PRIVATE_KEY }}
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO || github.repository }}
+          ref: ${{ needs.check.outputs.ref }}
+          # Do not leave the token in .git/config for later steps to leak.
+          persist-credentials: false
+          path: private
+          token: ${{ steps.app-token.outputs.token || secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Detect and build
+        working-directory: private
+        env:
+          BUILD_SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # Build tools print file paths, dependency names and source excerpts.
+          # This repo is PUBLIC, so capture the output and emit only a summary.
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"
+              rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            echo "--- last lines of $label (paths stripped to basenames) ---"
+            tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            echo "--- end ---"
+            rm -f "$log"
+            return 1
+          }
+
+          DETECTED="none"
+          [ -f package.json ]   && DETECTED="node"
+          [ -f go.mod ]         && DETECTED="go"
+          [ -f Cargo.toml ]     && DETECTED="rust"
+          [ -f pyproject.toml ] && DETECTED="python"
+          [ -f Dockerfile ]     && DETECTED="docker"
+          echo "Detected: $DETECTED"
+
+          if [ "$DETECTED" = "none" ]; then
+            echo "::warning::No recognisable build system; nothing to run."
+            exit 0
+          fi
+
+          echo "::group::Build"
+          case "$DETECTED" in
+            node)
+              PM=npm
+              command -v bun >/dev/null 2>&1 && PM=bun
+              if [ "$PM" = "bun" ]; then
+                run_quiet "install" bun install --frozen-lockfile
+              else
+                run_quiet "install" npm ci
+              fi
+              if grep -q '"build"[[:space:]]*:' package.json; then
+                [ "$PM" = "bun" ] && run_quiet "build" bun run build \
+                                 || run_quiet "build" npm run build
+              else
+                echo "No 'build' script defined; install succeeded."
+              fi
+              ;;
+            go)     run_quiet "go build" go build ./... ;;
+            rust)   run_quiet "cargo build" cargo build --release ;;
+            python) run_quiet "compile" python -m compileall -q . ;;
+            docker) run_quiet "docker build" docker build -t "ci-mirror:${BUILD_SHA:0:12}" . ;;
+          esac
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Build"
+            echo
+            echo "- Repo: \`${{ secrets.PRIVATE_REPO || github.repository }}\`"
+            echo "- Ref: \`${{ needs.check.outputs.ref }}\`"
+            echo "- Commit: \`${{ needs.check.outputs.sha }}\`"
+            echo "- Status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
