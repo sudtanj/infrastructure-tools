@@ -118,9 +118,24 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           CFG_REPO: ${{ secrets.PRIVATE_REPO }}
           CFG_REF: ${{ secrets.BUILD_REF }}
-          FORCE: ${{ inputs.force }}
+          # `inputs.force` is the typed boolean; `github.event.inputs.force` is
+          # the raw form. Either can arrive empty depending on how the run was
+          # dispatched, and an empty force is exactly why a "deploy regardless"
+          # run can behave like an ordinary one and skip the deploy job.
+          FORCE: ${{ inputs.force || github.event.inputs.force }}
         run: |
           set -euo pipefail
+
+          # Accept every shape a boolean input can arrive in. GitHub
+          # interpolates a `type: boolean` input as "true"/"false", but a
+          # dispatch built from the raw event payload can hand over 1/yes/on.
+          # Testing for the literal string "true" alone ignores those.
+          force_on() {
+            case "$(printf '%s' "${FORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
 
           # ${VAR:-} everywhere: under `set -u` an unset variable is fatal.
           TOKEN="${GH_TOKEN:-}"
@@ -161,9 +176,10 @@ jobs:
             echo "No new commit; nothing to deploy."
           fi
 
-          if [ "${FORCE:-false}" = "true" ]; then
+          echo "Force input received: '${FORCE:-<empty>}'"
+          if force_on; then
             CHANGED="true"
-            echo "force=true; deploying regardless."
+            echo "force is ON; deploying regardless of the commit comparison."
           fi
 
           # Deliberately NOT written here. Recording the commit before the
@@ -183,6 +199,7 @@ jobs:
             echo "### Poll"
             echo
             echo "- Changed: \`${{ steps.poll.outputs.changed }}\`"
+            echo "- Force: \`${{ inputs.force || github.event.inputs.force || 'false' }}\`"
             echo "- Ref: \`${{ steps.poll.outputs.ref }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -225,9 +242,16 @@ jobs:
         shell: bash
         env:
           TARGET_SHA: ${{ needs.poll.outputs.sha }}
-          FORCE: ${{ inputs.force }}
+          FORCE: ${{ inputs.force || github.event.inputs.force }}
         run: |
           set -euo pipefail
+
+          force_on() {
+            case "$(printf '%s' "${FORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
 
           # Compare against the last commit that deployed cleanly, so a push of
           # several commits is seen in full. Falls back to "deploy everything"
@@ -245,8 +269,8 @@ jobs:
           # latest commit": without this, re-running with no new commits would
           # diff against the deployed commit, find nothing, and deploy
           # nothing -- the opposite of what force asks for.
-          if [ "${FORCE:-false}" = "true" ]; then
-            echo "force=true; ignoring the diff and selecting every worker."
+          if force_on; then
+            echo "force is ON; ignoring the diff and selecting every worker."
             base=''
           fi
 
@@ -272,7 +296,11 @@ jobs:
           )
           projects=()
           skipped=()
-          for config in "${configs[@]:-}"; do
+          # `${configs[@]+"${configs[@]}"}` and not `"${configs[@]:-}"`: the latter
+          # expands an EMPTY array to one empty string, and dirname of that is
+          # "." -- inventing a phantom project at the repo root that would
+          # then try to deploy the whole repository as one worker.
+          for config in ${configs[@]+"${configs[@]}"}; do
             dir="$(dirname "${config#./}")"
             # A wrangler config at the repo root means the whole repo is one
             # worker; keep it as "." and treat every change as relevant.
@@ -310,6 +338,15 @@ jobs:
           echo "Deploying ${#projects[@]} worker(s):"
           if [ ${#projects[@]} -eq 0 ]; then
             echo "  (none)"
+            # A forced run that finds nothing is a misconfiguration, not a
+            # reason to skip the deploy job quietly: there is no wrangler
+            # config in the checkout, which almost always means the wrong repo
+            # or the wrong branch.
+            if force_on; then
+              echo "::error::force was requested but no Cloudflare worker was found at ${TARGET_SHA:0:12}."
+              echo "Check BUILD_REF points at the branch you meant, and that each worker folder contains a wrangler.toml, wrangler.json or wrangler.jsonc."
+              exit 1
+            fi
           else
             for project in "${projects[@]}"; do
               # Split on TAB only; a field may legitimately be empty.
