@@ -35,8 +35,11 @@ name: "Private Repo Mirror CI"
 # ---------------------------------------------------------------------------
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # Scheduled polling is DISABLED. To re-enable it, uncomment the two lines
+  # below. It is off by default so the workflow does not poll -- and spend
+  # runner minutes -- until the secrets are in place. Manual runs still work.
+  # schedule:
+  #   - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       force:
