@@ -46,6 +46,17 @@ name: "Deploy Deno Projects (private repo)"
 #   secret DENO_DEPLOY_APP_PREFIX  optional; prepended to the folder name to
 #                                 form the application name
 #
+#   IMPORTANT: put the app prefix and the private repo slug in repository
+#   VARIABLES, not secrets, if you use them:
+#     variable DENO_DEPLOY_APP_PREFIX   optional; prepended to the folder name
+#     variable PRIVATE_REPO             "owner/name"
+#   Anything read from `secrets` is masked, and if a job output contains a
+#   secret value GitHub drops that output entirely ("Skip output 'projects'
+#   since it may contain secret"), which silently leaves the deploy job with
+#   an empty matrix. Both are configuration, not credentials; only
+#   PRIVATE_REPO_TOKEN, DENO_DEPLOY_TOKEN and DENO_DEPLOY_ORG need to be
+#   secrets.
+#
 # RUNNING IT BY HAND
 #   Re-run with `force` checked to deploy every project, even when the private
 #   repo has not moved since the last successful deploy. Without force, a run
@@ -236,6 +247,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       projects: ${{ steps.detect.outputs.projects }}
+      # A plain integer cannot contain a secret, so it always survives. The
+      # record job uses it to detect the case where GitHub dropped `projects`.
+      count: ${{ steps.detect.outputs.count }}
     steps:
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -265,8 +279,14 @@ jobs:
         env:
           TARGET_SHA: ${{ needs.poll.outputs.sha }}
           FORCE: ${{ inputs.force || github.event.inputs.force }}
-          APP_PREFIX: ${{ secrets.DENO_DEPLOY_APP_PREFIX }}
-          REPO_NAME: ${{ secrets.PRIVATE_REPO }}
+          # Variables, not secrets. The app name derived from these ends up in the
+          # `projects` output, and GitHub discards any job output containing a
+          # secret -- which empties the matrix and skips the deploy job. The
+          # secret form is still accepted, with a warning, so an existing setup
+          # keeps working once the output guard explains what to change.
+          APP_PREFIX: ${{ vars.DENO_DEPLOY_APP_PREFIX || secrets.DENO_DEPLOY_APP_PREFIX }}
+          REPO_NAME: ${{ vars.PRIVATE_REPO || github.repository }}
+          PREFIX_IS_SECRET: ${{ secrets.DENO_DEPLOY_APP_PREFIX && 'true' || '' }}
         run: |
           set -euo pipefail
 
@@ -432,6 +452,14 @@ jobs:
               process.stdout.write(JSON.stringify(rows));
             ' "${projects[@]:-}")"
           } >> "$GITHUB_OUTPUT"
+
+          # A bare integer, so it always survives even if GitHub drops the
+          # `projects` output for containing a secret.
+          echo "count=${#projects[@]}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${PREFIX_IS_SECRET:-}" ]; then
+            echo "::warning::DENO_DEPLOY_APP_PREFIX is set as a secret, so the app name may be masked out of the projects output and GitHub may drop that output entirely. Move it to a repository VARIABLE of the same name."
+          fi
 
           # No base is saved here. The `record` job writes the deployed commit
           # once the attempt has actually succeeded, which is also what the
@@ -729,8 +757,23 @@ jobs:
       - name: Write deployed commit
         env:
           DEPLOYED_SHA: ${{ needs.poll.outputs.sha }}
+          DETECT_COUNT: ${{ needs.detect.outputs.count }}
+          DETECT_PROJECTS: ${{ needs.detect.outputs.projects }}
         run: |
           set -euo pipefail
+
+          # GitHub drops a job output whose value matches a secret, leaving ''
+          # here while detect still counted projects -- which used to skip the
+          # deploy job for no visible reason. `count` is a bare integer and
+          # cannot be dropped, so the mismatch is detectable.
+          if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_PROJECTS:-}" ]; then
+            echo "::error::GitHub discarded the 'projects' job output: it matched a repository secret, so the deploy job received an empty matrix."
+            echo "Detect found ${DETECT_COUNT} project(s). Move any configuration you read from \`secrets\` into repository variables:"
+            echo "  variable DENO_DEPLOY_APP_PREFIX, variable PRIVATE_REPO"
+            echo "Only PRIVATE_REPO_TOKEN, DENO_DEPLOY_TOKEN and DENO_DEPLOY_ORG belong in secrets."
+            exit 1
+          fi
+
           printf '%s' "$DEPLOYED_SHA" > /tmp/deno-deploy-state.txt
           echo "Recorded $DEPLOYED_SHA as the last deployed commit."
 

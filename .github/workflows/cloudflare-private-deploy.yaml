@@ -214,6 +214,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       projects: ${{ steps.detect.outputs.projects }}
+      # A plain integer cannot contain a secret, so it always survives. The
+      # record job uses it to detect the case where GitHub dropped `projects`.
+      count: ${{ steps.detect.outputs.count }}
     steps:
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -372,6 +375,10 @@ jobs:
               process.stdout.write(JSON.stringify(rows));
             ' "${projects[@]:-}")"
           } >> "$GITHUB_OUTPUT"
+
+          # A bare integer, so it always survives even if GitHub drops the
+          # `projects` output for containing a secret.
+          echo "count=${#projects[@]}" >> "$GITHUB_OUTPUT"
 
           # No base is saved here. The `record` job writes the deployed commit
           # once the attempt has actually succeeded, which is also what the
@@ -567,8 +574,21 @@ jobs:
       - name: Write deployed commit
         env:
           DEPLOYED_SHA: ${{ needs.poll.outputs.sha }}
+          DETECT_COUNT: ${{ needs.detect.outputs.count }}
+          DETECT_PROJECTS: ${{ needs.detect.outputs.projects }}
         run: |
           set -euo pipefail
+
+          # GitHub drops a job output whose value matches a secret, leaving ''
+          # here while detect still counted projects -- which would skip the
+          # deploy job for no visible reason. `count` is a bare integer and
+          # cannot be dropped, so the mismatch is detectable.
+          if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_PROJECTS:-}" ]; then
+            echo "::error::GitHub discarded the 'projects' job output: it matched a repository secret, so the deploy job received an empty matrix."
+            echo "Detect found ${DETECT_COUNT} project(s). Any configuration read from \`secrets\` that ends up in a project name must move to a repository variable; only PRIVATE_REPO_TOKEN, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID belong in secrets."
+            exit 1
+          fi
+
           printf '%s' "$DEPLOYED_SHA" > /tmp/cf-deploy-state.txt
           echo "Recorded $DEPLOYED_SHA as the last deployed commit."
 
