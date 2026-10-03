@@ -1,0 +1,459 @@
+name: "Deploy Deno Projects (private repo)"
+
+# ---------------------------------------------------------------------------
+# Deploys Deno projects whose source lives in a PRIVATE repository, using this
+# PUBLIC repo's free GitHub-hosted runner minutes.
+#
+# Same shape as the Cloudflare workflow next to it: poll the private repo,
+# detect which folders changed, deploy each in a matrix.
+#
+#   1. poll    - has the private repo moved?
+#   2. detect  - checkout the private repo, find folders holding a
+#                deno.json / deno.jsonc that the push touched.
+#   3. deploy  - `deno deploy` each one.
+#
+# WHY A WORKFLOW CANNOT "LISTEN"
+#   A workflow is only triggered by events inside its own repo, so pushes
+#   elsewhere cannot be subscribed to. Polling is what keeps the private repo
+#   completely untouched.
+#
+# IMPORTANT DIFFERENCE FROM CLOUDFLARE
+#   Deno Deploy runs the build itself. `deno deploy` uploads the source and
+#   Deno performs install/build/deploy with the commands configured on the
+#   application, so this runner mostly checks out and uploads rather than
+#   building. If the goal is to offload heavy building to free minutes, the
+#   Cloudflare workflow is the better fit; use this one for Deno Deploy's
+#   integrated build, rollback and env management.
+#
+#   Requires Deno Deploy (NOT the retired "Deploy Classic", shut down
+#   2026-07-20, along with the deployctl CLI). The application must already
+#   exist in the organisation -- see SETUP.
+#
+# SECURITY MODEL
+#   * This file is public: visible to everyone and forkable.
+#   * DENO_DEPLOY_TOKEN can deploy apps. Keep push access to trusted people,
+#     and scope the token to the least privilege your plan offers.
+#   * Build output is reduced to pass/fail with paths stripped so private file
+#     names stay out of this public repo's logs. `deno deploy` output is left
+#     intact because the resulting URL is the point of the run.
+#
+# SETUP
+#   secret DENO_DEPLOY_TOKEN   required; from console.deno.com
+#   secret DENO_DEPLOY_ORG     required; your Deno Deploy organisation
+#   secret PRIVATE_REPO_TOKEN  read access to the private repo
+#   secret PRIVATE_REPO        "owner/name" -- NOT a URL
+#   secret BUILD_REF           branch to track (defaults to main)
+#   secret DENO_DEPLOY_APP_PREFIX  optional; prepended to the folder name to
+#                                 form the application name
+#
+#   Applications must exist first:
+#     deno deploy create --org "$ORG" --app "$APP" --source local \
+#         --runtime-mode dynamic --entrypoint main.ts
+#   The default application name is the folder name (or the repository name
+#   for a project at the root).
+# ---------------------------------------------------------------------------
+
+on:
+  # Scheduled polling is DISABLED. To re-enable it, uncomment the two lines
+  # below. It is off by default so the workflow does not poll -- and spend
+  # runner minutes -- until the secrets are in place. Manual runs still work.
+  # schedule:
+  #   - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Deploy even if the private repo has no new commits"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # `secrets` is NOT available in `concurrency`, so the group is named from a
+  # variable and falls back to this repo.
+  group: deno-deploy-${{ vars.PRIVATE_REPO || github.repository }}
+  cancel-in-progress: false
+
+env:
+  # Pinned so the CLI surface stays stable; Deno Deploy's build environment is
+  # configured per application, not here.
+  DENO_VERSION: 'v2.x'
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: has the private repo moved?
+  # ------------------------------------------------------------------
+  poll:
+    name: "Poll private repo"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.poll.outputs.changed }}
+      sha: ${{ steps.poll.outputs.sha }}
+      ref: ${{ steps.poll.outputs.ref }}
+
+    steps:
+      # Restore BEFORE polling: the poll step reads this file to learn which
+      # commit was last deployed.
+      - name: Restore state for next poll
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/deno-deploy-state.txt
+          key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}
+
+      - name: Resolve repo and fetch latest commit
+        id: poll
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          CFG_REPO: ${{ secrets.PRIVATE_REPO }}
+          CFG_REF: ${{ secrets.BUILD_REF }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # ${VAR:-} everywhere: under `set -u` an unset variable is fatal.
+          TOKEN="${GH_TOKEN:-}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN."
+            exit 1
+          fi
+
+          REPO="${CFG_REPO:-}"
+          # Strict owner/name: no metacharacters, no traversal, no leading dash.
+          if ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::Set secret PRIVATE_REPO to 'owner/name' (not a URL)."
+            exit 1
+          fi
+          REF="${CFG_REF:-main}"
+
+          if ! RESP=$(GH_TOKEN="$TOKEN" gh api "repos/${REPO}/commits/${REF}" --jq '.sha' 2>/dev/null); then
+            echo "::error::Cannot read ${REPO}@${REF}. Check the token has read access."
+            exit 1
+          fi
+          if [ -z "$RESP" ]; then
+            echo "::error::Empty response for ${REPO}@${REF}."
+            exit 1
+          fi
+
+          PREV=""
+          [ -f /tmp/deno-deploy-state.txt ] && PREV="$(cat /tmp/deno-deploy-state.txt)"
+
+          echo "Tracked:     $REPO@$REF"
+          echo "Latest:      ${RESP:0:12}"
+          echo "Last deploy: ${PREV:-<none>}"
+
+          CHANGED="false"
+          if [ "$RESP" != "$PREV" ]; then
+            CHANGED="true"
+            echo "New commit detected."
+          else
+            echo "No new commit; nothing to deploy."
+          fi
+
+          if [ "${FORCE:-false}" = "true" ]; then
+            CHANGED="true"
+            echo "force=true; deploying regardless."
+          fi
+
+          printf '%s' "$RESP" > /tmp/deno-deploy-state.txt
+
+          {
+            echo "changed=$CHANGED"
+            echo "sha=$RESP"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Save state for next poll
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/deno-deploy-state.txt
+          key: deno-deploy-state-${{ vars.PRIVATE_REPO || github.repository }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Poll"
+            echo
+            echo "- Changed: \`${{ steps.poll.outputs.changed }}\`"
+            echo "- Ref: \`${{ steps.poll.outputs.ref }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 2: which Deno folders in the private repo need deploying?
+  # ------------------------------------------------------------------
+  detect:
+    name: "Detect Deno projects"
+    needs: poll
+    if: ${{ needs.poll.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      projects: ${{ steps.detect.outputs.projects }}
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.ref }}
+          # Keep the token out of .git/config so later steps cannot leak it.
+          persist-credentials: false
+          path: private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Find changed Deno projects
+        id: detect
+        working-directory: private
+        shell: bash
+        env:
+          TARGET_SHA: ${{ needs.poll.outputs.sha }}
+          APP_PREFIX: ${{ secrets.DENO_DEPLOY_APP_PREFIX }}
+          REPO_NAME: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          set -euo pipefail
+
+          # Compare against the previously deployed commit so a multi-commit
+          # push is seen in full. Without a cached base, deploy everything.
+          base=''
+          if [ -f /tmp/deno-deploy-base.txt ]; then
+            base="$(cat /tmp/deno-deploy-base.txt)"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No comparable base commit; selecting every Deno project found."
+            base=''
+          fi
+
+          changed=()
+          if [ -n "$base" ]; then
+            mapfile -t changed < <(git diff --name-only "$base" "$TARGET_SHA")
+          fi
+
+          echo "Comparing ${base:-<nothing>}..${TARGET_SHA:0:12} (${#changed[@]} changed file(s)):"
+          if [ ${#changed[@]} -eq 0 ]; then
+            echo "  (none, full deploy)"
+          else
+            printf '  %s\n' "${changed[@]}"
+          fi
+
+          mapfile -t configs < <(
+            find . \( -name node_modules -o -name .git -o -name vendor \) -prune -o \
+              \( -name 'deno.json' -o -name 'deno.jsonc' \) -print | sort
+          )
+
+          repo_name="${REPO_NAME#*/}"
+          projects=()
+          skipped=()
+          for config in "${configs[@]:-}"; do
+            dir="$(dirname "${config#./}")"
+            reason=''
+            if [ ${#changed[@]} -eq 0 ]; then
+              reason='full'
+            elif [ "$dir" = "." ]; then
+              reason='changed'
+            else
+              for file in "${changed[@]}"; do
+                case "$file" in
+                  "$dir"/*|"$dir") reason='changed'; break ;;
+                esac
+              done
+            fi
+            if [ -z "$reason" ]; then
+              skipped+=("$dir")
+              continue
+            fi
+
+            # Application name: optional prefix + folder name, or the repo
+            # name for a project at the root.
+            if [ "$dir" = "." ]; then
+              leaf="$repo_name"
+            else
+              leaf="${dir##*/}"
+            fi
+            app="${APP_PREFIX:+$APP_PREFIX-}${leaf}"
+
+            # A `deploy` block is what Deno Deploy actually reads, so note its
+            # presence for the summary. Absence is not fatal: the app may carry
+            # the configuration server-side.
+            deploy_cfg='none'
+            if grep -q '"deploy"' "$config" 2>/dev/null; then
+              deploy_cfg='inline'
+            fi
+
+            projects+=("$dir"$'\t'"$app"$'\t'"$deploy_cfg"$'\t'"$reason")
+          done
+
+          echo "Deploying ${#projects[@]} Deno project(s):"
+          if [ ${#projects[@]} -eq 0 ]; then
+            echo "  (none)"
+          else
+            for project in "${projects[@]}"; do
+              IFS=$'\t' read -r d a c r <<<"$project"
+              echo "  - dir=$d app=$a (config: $c, reason: $r)"
+            done
+          fi
+          if [ ${#skipped[@]} -gt 0 ]; then
+            echo "Unchanged, skipping: ${skipped[*]}"
+          fi
+
+          # Application names come from folder names, so two folders sharing a
+          # basename (services/api and deep/nested/api) would resolve to the
+          # same app and one would silently overwrite the other. Fail loudly
+          # instead; DENO_DEPLOY_APP_PREFIX does not disambiguate either.
+          # NOTE: must be associative (declare -A). An indexed array would
+          # evaluate the subscript arithmetically, so an app name like
+          # "priv-api" becomes "priv - api" and trips `set -u`.
+          declare -A clashes=()
+          for project in "${projects[@]}"; do
+            IFS=$'\t' read -r _d a _c _r <<<"$project"
+            dir_of="${project%%$'\t'*}"
+            if [ -n "${clashes[$a]:-}" ]; then
+              clashes[$a]="${clashes[$a]}, $dir_of"
+            else
+              clashes[$a]="$dir_of"
+            fi
+          done
+          collision=""
+          for a in "${!clashes[@]}"; do
+            case "${clashes[$a]}" in
+              *,*) collision+="  app '$a' <- ${clashes[$a]}"$'\n' ;;
+            esac
+          done
+          if [ -n "$collision" ]; then
+            echo "::error::Ambiguous application names; give the folders distinct names or set one app per project."
+            printf '%s' "$collision"
+            exit 1
+          fi
+
+          {
+            echo "projects=$(node -e '
+              const rows = process.argv.slice(1)
+                .filter(Boolean)
+                .map((row) => {
+                  const [dir, app, config, reason] = row.split("\t");
+                  return { dir, app, config, reason };
+                });
+              process.stdout.write(JSON.stringify(rows));
+            ' "${projects[@]:-}")"
+          } >> "$GITHUB_OUTPUT"
+
+          printf '%s' "$TARGET_SHA" > /tmp/deno-deploy-base.txt
+
+      - name: Save base commit for next run
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/deno-deploy-base.txt
+          key: deno-deploy-base-${{ vars.PRIVATE_REPO || github.repository }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Detected Deno projects"
+            echo
+            echo '```json'
+            echo '${{ steps.detect.outputs.projects }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 3: deploy each detected project
+  # ------------------------------------------------------------------
+  deploy:
+    name: "Deploy ${{ matrix.project.app }}"
+    needs: [poll, detect]
+    if: ${{ needs.detect.outputs.projects != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.projects) }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.ref }}
+          persist-credentials: false
+          path: private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      # Deno caches modules and its build cache in the project directory.
+      # Exact key only, so a lockfile change cannot restore a stale cache.
+      - name: Cache Deno
+        uses: actions/cache@v4
+        with:
+          path: |
+            private/${{ matrix.project.dir }}/node_modules
+            ~/.cache/deno
+            ~/.deno
+          # Normalise the root case: a project at "." would otherwise produce
+          # "private/./deno.lock", which glob does not match reliably.
+          key: deno-${{ matrix.project.app }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.dir == '.' && 'private/deno.lock' || format('private/{0}/deno.lock', matrix.project.dir)) }}
+
+      # `deno check` names private files and imports. This repo is PUBLIC, so
+      # capture the output and emit only pass/fail with paths stripped.
+      - name: Type check
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"
+              rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            echo "--- last lines of $label (paths stripped to basenames) ---"
+            tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            echo "--- end ---"
+            rm -f "$log"
+            return 1
+          }
+
+          # An entrypoint is not required (static sites and framework presets
+          # differ), so a non-zero exit here is a warning rather than a failure.
+          if run_quiet "deno check" deno check --quiet; then
+            echo "Type check passed."
+          else
+            echo "::warning::Type check reported problems; deploying anyway."
+          fi
+
+      # NOT redacted: the URL Deno prints is the useful output of this run.
+      - name: Deploy
+        working-directory: private/${{ matrix.project.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Deploying '${{ matrix.project.app }}' from this directory..."
+          deno deploy \
+            --org "${{ secrets.DENO_DEPLOY_ORG }}" \
+            --app "${{ matrix.project.app }}" \
+            --source local \
+            --prod
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          DENO_DEPLOY_ORG: ${{ secrets.DENO_DEPLOY_ORG }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy: \`${{ matrix.project.app }}\`"
+            echo
+            echo "- Directory: \`${{ matrix.project.dir }}\`"
+            echo "- Config: \`${{ matrix.project.config }}\`"
+            echo "- Reason: \`${{ matrix.project.reason }}\`"
+            echo "- Status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
