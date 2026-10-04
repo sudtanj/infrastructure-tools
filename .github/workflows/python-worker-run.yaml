@@ -11,22 +11,58 @@ name: "Run private repo python-worker scripts over Tailscale"
 #                 `python-worker/**/*.py` files, and note whether that folder
 #                 has a requirements.txt. The `run` job re-enumerates the
 #                 scripts itself instead of passing a list between jobs, so no
-#                 private file names ever travel as a job output.
-#   2. run      - set up Python, install dependencies, install Tailscale, then
-#                   sudo tailscale up --exit-node=<target> --authkey=<key>
+#                 private file names ever travel as a job output.#   2. run      - set up Python, install dependencies, install Tailscale, then
+#                 sudo tailscale up --exit-node=<target> --authkey=<key>
 #                 A guard step refuses to continue unless Tailscale reports
 #                 BackendState=Running AND the exit node is reachable on the
 #                 tailnet, so a script can never silently run un-VPNed.
-#                 Every script runs, in sorted order, sequentially, in the same
-#                 job -- one Tailscale node, one exit-node route, stable egress
-#                 IP for the whole run.
-#   3. teardown - tailscale logout, so the node does not linger registered.
+#                 Then CloakBrowser starts as a stealth Chromium CDP server,
+#                 and every script runs, in sorted order, sequentially, in the
+#                 same job -- one Tailscale node, one exit-node route, stable
+#                 egress IP for the whole run.
+#   3. teardown - remove the browser container and log out of the tailnet, so
+#                 neither a container nor a registered node lingers.
 #
 # WHY SEQUENTIAL AND NOT A MATRIX
 #   A matrix would bring Tailscale up once per script: N auth keys burned,
 #   N nodes on the tailnet, N exit-node routes racing each other, and each
 #   script potentially seeing a different egress IP. The scripts very likely
 #   depend on a stable address and on each other's side effects.
+#
+# BROWSER (CloakBrowser)
+#   A stealth Chromium is started as a container and served over the Chrome
+#   DevTools Protocol on port 9222. Scripts connect to it from the runner:
+#
+#     from playwright.sync_api import sync_playwright
+#     pw = sync_playwright().start()
+#     browser = pw.chromium.connect_over_cdp(os.environ["CLOAKBROWSER_CDP_URL"])
+#
+#   Three variables are exported into the scripts' environment:
+#     CLOAKBROWSER_CDP_URL  http://127.0.0.1:9222   for connect_over_cdp()
+#     CDP_URL               same value, for a generic client
+#     CLOAKBROWSER_WS       the browser-level WebSocket URL, read once from
+#                           /json/version, for a client that speaks CDP
+#                           directly rather than through Playwright
+#
+#   The container is NOT declared under `services:`. GitHub Actions service
+#   containers have no `command` key, so `cloakserve` and its flags cannot be
+#   passed that way; a plain `docker run` reproduces the compose service exactly
+#   and, unlike `services:`, lets a failure print the container's own logs.
+#
+#   Two deliberate differences from the compose snippet:
+#     * The port is published as 127.0.0.1:9222, not 0.0.0.0:9222. The
+#       vendor's own docs bind it to loopback and warn that CDP is full control
+#       of the browser. On a hosted runner the two are equally reachable from
+#       the scripts and neither is reachable from outside, so this is the same
+#       access with less exposure.
+#     * The container is only started AFTER the exit-node guard passes, so a
+#       broken VPN fails the run before ~600 MB of image is pulled, and the
+#       browser's own traffic goes out through the exit node like everything
+#       else on the runner.
+#
+#   Uncheck `browser` when dispatching to skip it entirely, which is the escape
+#   hatch if the image cannot be pulled (Docker Hub rate-limits shared runner
+#   IPs) and you only want the scripts to run.
 #
 # EXIT NODE TARGET
 #   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
@@ -95,6 +131,11 @@ on:
         description: "Keep running later scripts after one fails"
         required: false
         default: false
+        type: boolean
+      browser:
+        description: "Start the CloakBrowser CDP server for the scripts to use"
+        required: false
+        default: true
         type: boolean
 
 permissions:
@@ -416,6 +457,78 @@ jobs:
             echo "DNS: resolved by the runner, not the exit node (TAILSCALE_ACCEPT_DNS=false)."
           fi
 
+      # --------------------- CloakBrowser (CDP) ---------------------
+
+      - name: Start CloakBrowser
+        if: ${{ inputs.browser != 'false' }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "::error::docker is not available on this runner; cannot start CloakBrowser."
+            exit 1
+          fi
+
+          # Idempotent: a leftover container from an earlier step or an earlier
+          # attempt on a reused runner would make the name collide.
+          docker rm -f cloakbrowser >/dev/null 2>&1 || true
+
+          # Same command line as the compose service:
+          #   cloakserve --no-sandbox --remote-debugging-port=9222
+          #               --remote-debugging-address=0.0.0.0
+          # Published on loopback only -- see BROWSER (CloakBrowser) above.
+          docker run -d \
+            --name cloakbrowser \
+            -p 127.0.0.1:9222:9222 \
+            --cap-add=SYS_ADMIN \
+            --shm-size=2gb \
+            --init \
+            cloakhq/cloakbrowser:latest \
+            cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
+
+          printf '%s' "$GITHUB_RUN_ID" > /tmp/cloak-run.txt
+
+      - name: Wait for CloakBrowser to accept CDP connections
+        if: ${{ inputs.browser != 'false' }}
+        run: |
+          set -euo pipefail
+          URL="http://127.0.0.1:9222"
+          DEADLINE=$(( SECONDS + 120 ))
+
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            # Stop waiting the moment the container dies; a crash in the first
+            # seconds should not burn the full two minutes.
+            if [ "$(docker inspect -f '{{.State.Running}}' cloakbrowser 2>/dev/null || echo false)" != "true" ]; then
+              echo "::error::The CloakBrowser container exited during startup."
+              docker logs --tail 50 cloakbrowser 2>&1 || true
+              exit 1
+            fi
+            if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          if ! jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.json >/dev/null 2>&1; then
+            echo "::error::CloakBrowser did not answer /json/version within 120s."
+            docker logs --tail 50 cloakbrowser 2>&1 || true
+            exit 1
+          fi
+
+          # Written once, sourced by the script step: every step is its own
+          # shell, so the resolved WebSocket URL cannot be carried in a
+          # variable from here.
+          {
+            printf 'export CLOAKBROWSER_CDP_URL=%q\n' "$URL"
+            printf 'export CDP_URL=%q\n' "$URL"
+            printf 'export CLOAKBROWSER_WS=%q\n' "$(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+          } > /tmp/cloak-cdp.env
+          chmod 600 /tmp/cloak-cdp.env
+
+          echo "CloakBrowser is serving CDP on ${URL}."
+          echo "Browser version: $(jq -r '.Browser // "unknown"' /tmp/cloak-version.json)"
+          echo "Browser CDP endpoint: $(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+
       # ------------------------- the scripts -------------------------
 
       - name: Run every python script
@@ -477,6 +590,17 @@ jobs:
           # shellcheck disable=SC1091
           . /tmp/py-env.sh
           rm -f /tmp/py-env.sh
+
+          # The CDP endpoint, when the browser was started. Written by the
+          # readiness step and absent when `browser` was unchecked.
+          if [ -s /tmp/cloak-cdp.env ]; then
+            # shellcheck disable=SC1091
+            . /tmp/cloak-cdp.env
+            echo "CloakBrowser: ${CLOAKBROWSER_CDP_URL}"
+          else
+            echo "CloakBrowser: not started for this run."
+          fi
+
           export PYTHONWORKER_ROOT="$PWD"
 
           : > /tmp/py-results.txt
@@ -526,11 +650,16 @@ jobs:
           fi
           echo "All ${#scripts[@]} script(s) completed under the exit node."
 
-      - name: Leave the tailnet
+      - name: Remove CloakBrowser and leave the tailnet
         if: always()
         run: |
-          # Always, even after a failed script: a node left joined keeps
-          # burning auth key uses and holds an exit-node route.
+          # Always, even after a failed script: the browser holds a Chromium
+          # process and ~600 MB, and a node left joined keeps burning auth key
+          # uses and holds an exit-node route.
+          if docker inspect cloakbrowser >/dev/null 2>&1; then
+            docker rm -f cloakbrowser >/dev/null 2>&1 || true
+            echo "CloakBrowser container removed."
+          fi
           sudo tailscale logout 2>&1 | tail -3 || true
 
       - name: Summary
@@ -541,6 +670,14 @@ jobs:
             echo
             echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
             echo "- Exit node: \`$(cat /tmp/exit-node-target.txt 2>/dev/null || echo '<never connected>')\`"
+            # Assigned first: `cat missing | sed` still exits 0, so an `||`
+            # fallback chained onto the pipeline would never fire.
+            if [ -s /tmp/cloak-cdp.env ]; then
+              browser="$(sed -n 's/^export CLOAKBROWSER_CDP_URL=//p' /tmp/cloak-cdp.env)"
+            else
+              browser='<not started>'
+            fi
+            echo "- CloakBrowser: \`${browser}\`"
             echo
             if [ -s /tmp/py-results.txt ]; then
               echo "| Script | Result |"
