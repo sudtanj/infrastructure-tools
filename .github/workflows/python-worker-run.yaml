@@ -49,16 +49,30 @@ name: "Run private repo python-worker scripts over Tailscale"
 #   passed that way; a plain `docker run` reproduces the compose service exactly
 #   and, unlike `services:`, lets a failure print the container's own logs.
 #
-#   Two deliberate differences from the compose snippet:
+#   THE COMMAND IS JUST `cloakserve --no-sandbox`. Do NOT add
+#   --remote-debugging-port here. cloakserve IS the CDP endpoint: it opens its
+#   own multiplexer on 9222 and hands out browser endpoints from it. Passing a
+#   Chromium --remote-debugging-port makes Chrome open a SECOND CDP listener
+#   on the same port, which the vendor documents as breaking the browser --
+#   the container starts, prints its banner, and then never answers
+#   /json/version. The same goes for --remote-debugging-address: it only
+#   affects that second listener, which must not exist. `--no-sandbox` is kept
+#   because Chromium's own sandbox is not usable in most container runtimes.
+#
+#   Three deliberate differences from the compose snippet:
 #     * The port is published as 127.0.0.1:9222, not 0.0.0.0:9222. The
 #       vendor's own docs bind it to loopback and warn that CDP is full control
 #       of the browser. On a hosted runner the two are equally reachable from
 #       the scripts and neither is reachable from outside, so this is the same
 #       access with less exposure.
 #     * The container is only started AFTER the exit-node guard passes, so a
-#       broken VPN fails the run before ~600 MB of image is pulled, and the
+#       broken VPN fails the run before the browser is launched, and the
 #       browser's own traffic goes out through the exit node like everything
 #       else on the runner.
+#     * The ~600 MB IMAGE is pulled early, in the background, and the start
+#       step waits for it. Pulling lazily made the pull the slowest thing in
+#       the run (~3 min) with the runner idle; overlapping it with dependency
+#       install and the Tailscale steps removes that from the critical path.
 #
 #   Uncheck `browser` when dispatching to skip it entirely, which is the escape
 #   hatch if the image cannot be pulled (Docker Hub rate-limits shared runner
@@ -89,6 +103,25 @@ name: "Run private repo python-worker scripts over Tailscale"
 #                                 scripts fails. "false" still routes all IP
 #                                 traffic through the exit node.
 #   secret PYTHON_VERSION         OPTIONAL, default "3.12".
+#
+# LOG REDACTION
+#   This workflow runs in a PUBLIC repo, so its log is public forever. The
+#   exit node address and the runner's egress IP are real infrastructure
+#   details, so neither is ever printed:
+#     * TAILSCALE_EXIT_NODE is registered with ::add-mask:: as if it were a
+#       secret, so GitHub replaces it with *** anywhere it would appear.
+#     * The log shows a 12-character SHA-256 FINGERPRINT of the exit node
+#       instead. Two runs can be compared, and a failure can be traced to a
+#       node, without the address ever being disclosed.
+#     * The egress IP is masked the instant it is read -- before it is
+#       compared, so even the "unchanged IP" failure cannot leak it -- and
+#       reported only as "recorded" or "changed".
+#     * Raw `tailscale status` is never printed; it lists every tailnet IP and
+#       host name. A jq rollup (state, peer count, exit-node-capable peers)
+#       answers the same questions without identifying anything.
+#     * Everything a script writes is passed through redact(), which replaces
+#       IPv4, IPv6 and *.ts.net host names. Loopback is kept, because
+#       127.0.0.1 is the CDP endpoint the scripts connect to.
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo: visible to everyone, and forkable.
@@ -152,6 +185,9 @@ concurrency:
 env:
   PYTHON_VERSION: ${{ secrets.PYTHON_VERSION || '3.12' }}
   PYTHONWORKER_DIR: 'python-worker'
+  # One place for the tag, so the prefetch step and the start step can never
+  # disagree about which image is being used.
+  CLOAK_IMAGE: 'cloakhq/cloakbrowser:latest'
   PYTHONUNBUFFERED: '1'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_NO_INPUT: '1'
@@ -289,6 +325,18 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
+      - name: Prefetch CloakBrowser image
+        if: ${{ inputs.browser != 'false' }}
+        run: |
+          set -euo pipefail
+          # ~600 MB, and it was by far the slowest step in the run because the
+          # runner sat idle while it downloaded. Started in the background so
+          # it overlaps dependency install and the Tailscale steps; the start
+          # step below waits for it and falls back to a foreground pull.
+          docker pull "$CLOAK_IMAGE" > /tmp/cloak-pull.log 2>&1 &
+          echo $! > /tmp/cloak-pull.pid
+          echo "Pulling ${CLOAK_IMAGE} in the background."
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -334,14 +382,46 @@ jobs:
             *) echo "::error::TAILSCALE_ACCEPT_DNS must be 'true' or 'false'."; exit 1 ;;
           esac
           echo "Python:    $(python --version 2>&1)"
-          echo "Exit node: ${TAILSCALE_EXIT_NODE}"
+          echo "Exit node: <masked>"
           echo "Accept DNS: ${TAILSCALE_ACCEPT_DNS}"
 
-      - name: Mask sensitive values
+      - name: Mask sensitive values and install log redaction
         run: |
+          set -euo pipefail
           # GitHub masks repository secrets on its own; this is belt and
           # braces for the value after it is written into an env file.
           echo "::add-mask::${TAILSCALE_AUTH_KEY}"
+
+          # The exit node is an IP address or a host name, and this log lives
+          # in a PUBLIC repo -- so it is masked like a secret even though it
+          # is not one. See LOG REDACTION in the header.
+          echo "::add-mask::${TAILSCALE_EXIT_NODE}"
+
+          # A one-way fingerprint of the exit node. The log can then prove
+          # WHICH node was used -- useful when a run fails -- without ever
+          # printing the address itself.
+          printf '%s' "$TAILSCALE_EXIT_NODE" | sha256sum | cut -c1-12 \
+            > /tmp/exit-node-fp.txt
+
+          # Redaction helper for anything echoed back from a script or from a
+          # command. Written to a file because every step is its own shell.
+          cat > /tmp/redact.sh <<'REDACT'
+          # Loopback is preserved on purpose: 127.0.0.1 is the CDP endpoint
+          # the scripts connect to, and hiding it only makes the log harder
+          # to read. Everything else that looks like an address or a tailnet
+          # host name is replaced.
+          redact() {
+            sed -E \
+              -e 's/\b127\.0\.0\.1\b/__KEEP_LOOPBACK__/g' \
+              -e 's/\b([0-9]{1,3}\.){3}[0-9]{1,3}\b/<ip>/g' \
+              -e 's/\b([0-9A-Fa-f]{1,4}:){5,7}[0-9A-Fa-f]{0,4}\b/<ipv6>/g' \
+              -e 's/\b[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.ts\.net\b/<tailnet-host>/g' \
+              -e 's/__KEEP_LOOPBACK__/127.0.0.1/g'
+          }
+          REDACT
+          chmod 600 /tmp/redact.sh
+
+          echo "Exit node fingerprint: $(cat /tmp/exit-node-fp.txt) (address masked)"
 
       # ---------------- Tailscale: install, join, verify ----------------
 
@@ -360,7 +440,6 @@ jobs:
           tailscale version
 
       - name: Join the tailnet through the exit node
-        id: tsnet
         run: |
           set -euo pipefail
           TARGET="$TAILSCALE_EXIT_NODE"
@@ -386,12 +465,19 @@ jobs:
           printf '%s' "$TARGET" > /tmp/exit-node-target.txt
 
           # Egress IP BEFORE the tunnel, so the check afterwards can prove
-          # traffic actually left somewhere else. Informational only: a
-          # failure here is never fatal.
+          # traffic actually left somewhere else. It is a real public address
+          # in a public log, so it is masked the moment it is read and only
+          # ever reported as "recorded" / "unavailable". A failure here is
+          # never fatal.
           curl -fsS --max-time 10 https://api.ipify.org > /tmp/egress-before.txt 2>/dev/null || \
             : > /tmp/egress-before.txt
           before="$(cat /tmp/egress-before.txt 2>/dev/null || true)"
-          echo "Egress IP before Tailscale: ${before:-<unavailable>}"
+          if [ -n "$before" ]; then
+            echo "::add-mask::${before}"
+            echo "Egress IP before Tailscale: recorded (masked)."
+          else
+            echo "Egress IP before Tailscale: unavailable."
+          fi
 
           sudo tailscale up \
             --authkey="$TAILSCALE_AUTH_KEY" \
@@ -406,9 +492,20 @@ jobs:
 
           sudo tailscale status --json > /tmp/ts.json
           state="$(jq -r '.BackendState // "unknown"' /tmp/ts.json)"
+
+          # Never print raw `tailscale status`: it lists every tailnet IP and
+          # host name. This rollup answers the same debugging questions
+          # without identifying anything.
+          safe_status() {
+            echo "  BackendState: $(jq -r '.BackendState // "unknown"' /tmp/ts.json 2>/dev/null)"
+            echo "  This node online: $(jq -r '.Self.Online // false' /tmp/ts.json 2>/dev/null)"
+            echo "  Peers seen: $(jq -r '(.Peer // []) | length' /tmp/ts.json 2>/dev/null)"
+            echo "  Peers that can be exit nodes: $(jq -r '[.Peer[]? | select(.ExitNodeOption == true)] | length' /tmp/ts.json 2>/dev/null)"
+          }
+
           if [ "$state" != "Running" ]; then
             echo "::error::Tailscale is not connected (BackendState=${state}). The scripts would run WITHOUT the VPN."
-            sudo tailscale status 2>&1 | head -20 || true
+            safe_status
             exit 1
           fi
 
@@ -420,21 +517,21 @@ jobs:
             matches="$(jq -r --arg t "$TARGET" \
               '[.Peer[]? | select(((.Tags // []) | index($t)) != null)]
                | map(select(.Online == true)) | length' /tmp/ts.json)"
-            what="online node advertising ${TARGET}"
+            what="an online node advertising the configured tag"
           else
             matches="$(jq -r --arg t "$TARGET" \
               '[.Peer[]?
                 | select((((.DNSName // "") | rtrimstr(".") | ascii_downcase) == ($t | ascii_downcase))
                          or (((.TailscaleIPs // []) | index($t)) != null))]
                | map(select(.Online == true)) | length' /tmp/ts.json)"
-            what="online node named or addressed ${TARGET}"
+            what="an online node with the configured name or address"
           fi
           if [ "${matches:-0}" -lt 1 ]; then
-            echo "::error::No ${what}. Check the tag spelling, and that the node ADVERTISES AN EXIT NODE (0.0.0.0/0), not just a subnet route."
-            sudo tailscale status 2>&1 | head -20 || true
+            echo "::error::Could not find ${what}. Check the exit-node spelling in the TAILSCALE_EXIT_NODE secret, and that the node ADVERTISES AN EXIT NODE (0.0.0.0/0), not just a subnet route."
+            safe_status
             exit 1
           fi
-          echo "Exit node: ${TARGET} is online."
+          echo "Exit node is online (fingerprint $(cat /tmp/exit-node-fp.txt))."
 
           # The default route is what "runs under the VPN" actually means, so
           # confirm it landed. Advisory only, because the shape of AllowedIPs
@@ -451,14 +548,18 @@ jobs:
           # `before` value from the previous step is gone.
           before="$(cat /tmp/egress-before.txt 2>/dev/null || true)"
           after="$(cat /tmp/egress-after.txt 2>/dev/null || true)"
+          if [ -n "$after" ]; then
+            # Masked before it can ever be compared into a message.
+            echo "::add-mask::${after}"
+          fi
           if [ -n "$before" ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
-            echo "::error::Egress IP is unchanged (${before}) after routing through the exit node. Traffic is NOT going through the VPN."
+            echo "::error::Egress IP is unchanged after routing through the exit node. Traffic is NOT going through the VPN."
             exit 1
           fi
           if [ -z "$after" ]; then
             echo "::warning::Could not read the post-tunnel egress IP (the exit node may block it). Relying on the Tailscale status checks above."
           else
-            echo "Egress IP after Tailscale:  ${after} (was ${before:-unknown}) -- traffic leaves via the exit node."
+            echo "Egress IP after Tailscale: changed (both values masked) -- traffic leaves via the exit node."
           fi
 
           if [ "$TAILSCALE_ACCEPT_DNS" = "true" ]; then
@@ -479,24 +580,40 @@ jobs:
             exit 1
           fi
 
+          # The prefetch step pulled this in the background. Wait for it here so
+          # the pull overlaps everything else instead of sitting on the
+          # critical path.
+          if [ -s /tmp/cloak-pull.pid ]; then
+            pid="$(cat /tmp/cloak-pull.pid)"
+            echo "Waiting for the background image pull to finish..."
+            while kill -0 "$pid" 2>/dev/null; do sleep 2; done
+          fi
+          if ! docker image inspect "$CLOAK_IMAGE" >/dev/null 2>&1; then
+            # Either the pull failed, or a background process did not survive
+            # into this step. Either way, retry in the foreground.
+            echo "::warning::Image not present; pulling ${CLOAK_IMAGE} in the foreground."
+            docker pull "$CLOAK_IMAGE" || {
+              echo "::error::Could not pull ${CLOAK_IMAGE}. Tail of the pull log:"
+              tail -n 20 /tmp/cloak-pull.log 2>/dev/null || true
+              exit 1
+            }
+          fi
+
           # Idempotent: a leftover container from an earlier step or an earlier
           # attempt on a reused runner would make the name collide.
           docker rm -f cloakbrowser >/dev/null 2>&1 || true
 
-          # Same command line as the compose service:
-          #   cloakserve --no-sandbox --remote-debugging-port=9222
-          #               --remote-debugging-address=0.0.0.0
-          # Published on loopback only -- see BROWSER (CloakBrowser) above.
+          # cloakserve IS the CDP endpoint and serves 9222 itself. See
+          # BROWSER (CloakBrowser) above for why --remote-debugging-port must
+          # NOT be added here.
           docker run -d \
             --name cloakbrowser \
             -p 127.0.0.1:9222:9222 \
             --cap-add=SYS_ADMIN \
             --shm-size=2gb \
             --init \
-            cloakhq/cloakbrowser:latest \
-            cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
-
-          printf '%s' "$GITHUB_RUN_ID" > /tmp/cloak-run.txt
+            "$CLOAK_IMAGE" \
+            cloakserve --no-sandbox
 
       - name: Wait for CloakBrowser to accept CDP connections
         if: ${{ inputs.browser != 'false' }}
@@ -516,7 +633,7 @@ jobs:
             if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.json 2>/dev/null; then
               break
             fi
-            sleep 2
+            sleep 1
           done
 
           if ! jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.json >/dev/null 2>&1; then
@@ -611,6 +728,12 @@ jobs:
             echo "CloakBrowser: not started for this run."
           fi
 
+          # Redaction helper from the mask step. Anything a script prints --
+          # its own address, an API endpoint, a tailnet host -- is filtered
+          # before it reaches this public log.
+          # shellcheck disable=SC1091
+          . /tmp/redact.sh
+
           export PYTHONWORKER_ROOT="$PWD"
 
           : > /tmp/py-results.txt
@@ -634,9 +757,9 @@ jobs:
               # No `set -e` here: the failure has to be recorded before this
               # step exits non-zero, or the summary loses the row.
               if [ "$VERBOSE" = "true" ]; then
-                cat "$log"
+                redact < "$log"
               else
-                tail -n 60 "$log"
+                redact < "$log" | tail -n 60
               fi
               if [ "$KEEP_GOING" != "true" ]; then
                 echo "::error::${name} failed and keep_going is off; skipping the remaining scripts."
@@ -649,7 +772,7 @@ jobs:
               fi
             fi
             if [ "$VERBOSE" = "true" ]; then
-              cat "$log"
+              redact < "$log"
             fi
             rm -f "$log"
           done
@@ -679,7 +802,7 @@ jobs:
             echo "### python-worker over Tailscale"
             echo
             echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
-            echo "- Exit node: \`$(cat /tmp/exit-node-target.txt 2>/dev/null || echo '<never connected>')\`"
+            echo "- Exit node: \`$(cat /tmp/exit-node-fp.txt 2>/dev/null || echo '<never connected>') (fingerprint, address withheld)\`"
             # Assigned first: `cat missing | sed` still exits 0, so an `||`
             # fallback chained onto the pipeline would never fire.
             if [ -s /tmp/cloak-cdp.env ]; then
