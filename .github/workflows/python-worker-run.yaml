@@ -293,9 +293,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          # Only cache when there is something to key on; a missing
-          # cache-dependency-path is an error in setup-python.
-          cache: ${{ needs.discover.outputs.requirements == 'true' }}
+          # `cache` is the PACKAGE MANAGER NAME, not a boolean. Both
+          # setup-python (pip/pipenv/poetry) and setup-node (npm/yarn/pnpm)
+          # compare this string against known names and fail with
+          # "Caching for 'true' is not supported" on anything else. So the
+          # expression yields 'pip' when there is a requirements.txt, and an
+          # empty string otherwise, which setup-python treats as "no caching".
+          cache: ${{ needs.discover.outputs.requirements == 'true' && 'pip' || '' }}
+          # Only consulted when caching is on, which is exactly when this
+          # file exists -- setup-python errors on a missing dependency path.
           cache-dependency-path: private/${{ env.PYTHONWORKER_DIR }}/requirements.txt
 
       - name: Install Python dependencies
