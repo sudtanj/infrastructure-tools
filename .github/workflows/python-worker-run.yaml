@@ -7,11 +7,13 @@ name: "Run private repo python-worker scripts over Tailscale"
 # VPN instead of straight out of the GitHub datacenter IP.
 #
 # HOW THIS WORKS
-#   1. discover - checkout the private repo into ./private, count the
-#                 `python-worker/**/*.py` files, and note whether that folder
-#                 has a requirements.txt. The `run` job re-enumerates the
-#                 scripts itself instead of passing a list between jobs, so no
-#                 private file names ever travel as a job output.#   2. run      - set up Python, install dependencies, install Tailscale, then
+#   1. discover - checkout the private repo into ./private, resolve the
+#                 entry points listed in `python-worker/entrypoints.txt`,
+#                 and note whether that folder has a requirements.txt. The
+#                 `run` job re-enumerates the scripts itself instead of
+#                 passing a list between jobs, so no private file names ever
+#                 travel as a job output.
+#   2. run      - set up Python, install dependencies, install Tailscale, then
 #                 sudo tailscale up --exit-node=<target> --authkey=<key>
 #                 A guard step refuses to continue unless Tailscale reports
 #                 BackendState=Running AND the exit node is reachable on the
@@ -28,6 +30,37 @@ name: "Run private repo python-worker scripts over Tailscale"
 #   N nodes on the tailnet, N exit-node routes racing each other, and each
 #   script potentially seeing a different egress IP. The scripts very likely
 #   depend on a stable address and on each other's side effects.
+#
+# WHICH FILES RUN
+#   With no setup at all, entry points are selected from the tree:
+#
+#     1. Tests are skipped: `test_*.py` and `*_test.py` belong to the test
+#        runner, not to this job.
+#     2. Imported modules are skipped: if some other candidate file imports
+#        it, it is a library. Run bare it exits 0 having done nothing, which
+#        reads as a pass and is worse than a skip.
+#     3. A CLI is skipped at runtime: a dispatching entry point wants a
+#        script name in argv, so it exits 2 printing a usage line. That exit
+#        is reported as "not a job" instead of a failure -- but only when
+#        nothing declared the file to be an entry point.
+#
+#   Nothing is hidden: every skipped file is named in the log with the rule
+#   that caught it, and the summary counts them separately from passes.
+#
+#   `python-worker/entrypoints.txt` overrides the inference entirely, for the
+#   cases a heuristic cannot know about:
+#
+#     # jobs that should run unattended
+#     heartbeat
+#     settlement/reconcile.py
+#
+#   One .py file per line, relative to the worker root. Blank lines and lines
+#   starting with `#` are ignored, the `.py` suffix may be left off, and a
+#   bare name with no `/` matches by file name anywhere under the root.
+#   Listing a file that does not exist fails the run on purpose -- a renamed
+#   entry point should stop everything loudly rather than quietly reduce the
+#   work -- and a listed file that exits 2 with a usage message is a real
+#   failure, because someone asserted it was a job.
 #
 # BROWSER (CloakBrowser)
 #   A stealth Chromium is started as a container and served over the Chrome
@@ -244,27 +277,150 @@ jobs:
             exit 1
           fi
 
-          # Every .py under python-worker, recursively, in a stable order, and
-          # never from a virtualenv, a cache dir, a dot-directory or a
-          # checkout inside a subfolder. Those hold copies of library code or
-          # build output, not your scripts. `*/.*/*` is what keeps `.git`,
-          # `.venv`, `.tox` and friends out in one rule.
+          # WHICH FILES COUNT AS SCRIPTS
+          #   `python-worker/entrypoints.txt` lists the real entry points,
+          #   one .py file per line, relative to the worker root. Blank lines
+          #   and lines starting with `#` are ignored, the .py suffix may be
+          #   left off, and a bare name (no `/`) matches by file name anywhere
+          #   under the root. Nothing else in the folder is run.
+          #
+          #   That is the point. Running every .py file treats helpers, modules
+          #   and test files as programs. Most exit 0 having done nothing,
+          #   which reads as a pass; an entry point that expects another
+          #   script as argv exits 2 printing `usage: ...`, which reads as a
+          #   failure the author never saw. Neither is a useful signal.
+          #
+          #   A listed file that does not exist is a hard error rather than a
+          #   silent skip: a renamed entry point should stop the run loudly
+          #   instead of quietly doing less work than expected.
+          #
+          #   With no entrypoints.txt the old behaviour is kept, with a
+          #   warning, so adding the manifest is never a prerequisite.
+          MANIFEST="$PYTHONWORKER_DIR/entrypoints.txt"
           scripts=()
-          while IFS= read -r f; do
-            [ -n "$f" ] && scripts+=("$f")
-          done < <(
-            find "$PYTHONWORKER_DIR" -type f -name '*.py' \
-              -not -path '*/__pycache__/*' \
-              -not -path '*/.*/*' \
-              -not -path '*/venv/*' \
-              -not -path '*/env/*' \
-              -not -path '*/node_modules/*' \
-              -not -path '*/site-packages/*' \
-              | LC_ALL=C sort
-          )
+          if [ -f "$MANIFEST" ]; then
+            echo "Entry points from ${PYTHONWORKER_DIR}/entrypoints.txt:"
+            while IFS= read -r line || [ -n "$line" ]; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              line="${line%"${line##*[![:space:]]}"}"
+              [ -z "$line" ] && continue
+              case "$line" in \#*) continue ;; esac
+              if [ "${line%.py}" != "$line" ]; then name="$line"; else name="$line.py"; fi
+              if [ -f "$PYTHONWORKER_DIR/$name" ]; then
+                scripts+=("$PYTHONWORKER_DIR/$name")
+                continue
+              fi
+              hits=()
+              while IFS= read -r h; do
+                [ -n "$h" ] && hits+=("$h")
+              done < <(
+                find "$PYTHONWORKER_DIR" -type f -name "$name" \
+                  -not -path '*/__pycache__/*' \
+                  -not -path '*/venv/*' \
+                  -not -path '*/env/*' \
+                  -not -path '*/node_modules/*' \
+                  -not -path '*/site-packages/*' \
+                  -not -path '*/.*/*' \
+                  | LC_ALL=C sort
+              )
+              case "${#hits[@]}" in
+                1) scripts+=("${hits[0]}") ;;
+                0)
+                  echo "::error::entrypoints.txt lists '${line}', but no such file exists under ${PYTHONWORKER_DIR}/."
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${PYTHONWORKER_DIR}/ instead:"
+                  for h in "${hits[@]}"; do echo "  - ${h#"$PYTHONWORKER_DIR"/}"; done
+                  exit 1
+                  ;;
+              esac
+            done < "$MANIFEST"
+            if [ "${#scripts[@]}" -eq 0 ]; then
+              echo "::error::${PYTHONWORKER_DIR}/entrypoints.txt lists no scripts."
+              exit 1
+            fi
+            # A file listed twice must not run twice.
+            deduped=()
+            for s in "${scripts[@]}"; do
+              seen=0
+              for d in "${deduped[@]+"${deduped[@]}"}"; do
+                [ "$d" = "$s" ] && seen=1
+              done
+              [ "$seen" -eq 0 ] && deduped+=("$s")
+            done
+            scripts=("${deduped[@]}")
+          else
+            # No entrypoints.txt, so the entry points are selected from the
+            # tree itself and nothing has to be maintained by hand.
+            #
+            #   1. Tests. `test_*.py` and `*_test.py` belong to the test
+            #      runner.
+            #   2. Modules. A file that some other candidate imports is a
+            #      library, not a job. Run bare it exits 0 having done
+            #      nothing, which reads as a pass and is worse than a skip.
+            #
+            # The third case cannot be seen without running the file: a
+            # dispatching entry point wants a script name in argv, so it
+            # exits 2 printing a usage line. The run step recognises that
+            # and reports it as a CLI rather than a failure.
+            echo "No ${PYTHONWORKER_DIR}/entrypoints.txt; selecting entry points automatically."
+            candidates=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && candidates+=("$f")
+            done < <(
+              # Every .py under python-worker, recursively, in a stable order,
+              # and never from a virtualenv, a cache dir, a dot-directory or a
+              # checkout inside a subfolder. Those hold copies of library code
+              # or build output, not your scripts. `*/.*/*` is what keeps
+              # `.git`, `.venv`, `.tox` and friends out in one rule.
+              find "$PYTHONWORKER_DIR" -type f -name '*.py' \
+                -not -path '*/__pycache__/*' \
+                -not -path '*/.*/*' \
+                -not -path '*/venv/*' \
+                -not -path '*/env/*' \
+                -not -path '*/node_modules/*' \
+                -not -path '*/site-packages/*' \
+                | LC_ALL=C sort
+            )
+            excluded=0
+            for f in "${candidates[@]}"; do
+              base="${f##*/}"; base="${base%.*}"
+              case "$base" in
+                test_*|*_test)
+                  echo "  not an entry point: ${f#"$PYTHONWORKER_DIR"/} (test file)"
+                  excluded=$((excluded + 1))
+                  continue
+                  ;;
+              esac
+              # Escaped because the name is used as a regex below.
+              esc="$(printf '%s' "$base" | sed 's/[][\.*^$()+?{}|\\]/\\&/g')"
+              importers="$(grep -rlE \
+                "(^|[[:space:]])(import|from)[[:space:]][^#]{0,120}['\"]?[^[:space:]]*${esc}(['\"]|[[:space:]]|$)" \
+                --include='*.py' "$PYTHONWORKER_DIR" 2>/dev/null | grep -vxF "$f" || true)"
+              if [ -n "$importers" ]; then
+                echo "  not an entry point: ${f#"$PYTHONWORKER_DIR"/} (imported by $(printf '%s\n' "$importers" | wc -l) other file(s))"
+                excluded=$((excluded + 1))
+                continue
+              fi
+              scripts+=("$f")
+            done
+            echo "Selected ${#scripts[@]} entry point(s) from ${#candidates[@]} candidate(s); ${excluded} excluded above."
+            echo "Add ${PYTHONWORKER_DIR}/entrypoints.txt to state the list explicitly instead of inferring it."
+          fi
+
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            {
+              echo "::error::No entry points selected under ${PYTHONWORKER_DIR}/."
+              echo "Every file was excluded as a test or as an imported module."
+              echo "Add ${PYTHONWORKER_DIR}/entrypoints.txt to name them explicitly."
+            } >&2
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           count=${#scripts[@]}
-          echo "Found ${count} Python script(s) under ${PYTHONWORKER_DIR}/ on ${REF}:"
+          echo "Found ${count} Python entry point(s) under ${PYTHONWORKER_DIR}/ on ${REF}:"
           for s in "${scripts[@]+"${scripts[@]}"}"; do
             echo "  - ${s#"$PYTHONWORKER_DIR"/}"
           done
@@ -301,7 +457,7 @@ jobs:
             echo
             echo "- Ref: \`${{ steps.find.outputs.ref || 'unknown' }}\`"
             echo "- Commit: \`${{ steps.find.outputs.sha }}\`"
-            echo "- Scripts: \`${{ steps.find.outputs.count || '0' }}\`"
+            echo "- Entry points selected: \`${{ steps.find.outputs.count || '0' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ------------------------------------------------------------------
@@ -539,14 +695,13 @@ jobs:
           fi
           echo "Exit node is online (fingerprint $(cat /tmp/exit-node-fp.txt))."
 
-          # The default route is what "runs under the VPN" actually means, so
-          # confirm it landed. Advisory only, because the shape of AllowedIPs
-          # on an exit-node client is not a documented contract.
-          if jq -r '.Self.AllowedIPs[]?' /tmp/ts.json | grep -qx '0.0.0.0/0'; then
-            echo "Default route: 0.0.0.0/0 is routed via the exit node."
-          else
-            echo "::warning::AllowedIPs does not list 0.0.0.0/0. The exit node accepted but may not be carrying the default route."
-          fi
+          # Whether the default route really went through the exit node is
+          # settled empirically below, by comparing the egress IP from before
+          # the tunnel with the one after it. `.Self.AllowedIPs` was
+          # consulted here once, but it is not a documented contract on an
+          # exit-node client: a run showed the exit node carrying all traffic
+          # while AllowedIPs omitted 0.0.0.0/0, which produced a warning
+          # directly above the line proving the opposite.
 
           curl -fsS --max-time 10 https://api.ipify.org > /tmp/egress-after.txt 2>/dev/null || \
             : > /tmp/egress-after.txt
@@ -750,21 +905,107 @@ jobs:
           set -uo pipefail
           cd "private/$PYTHONWORKER_DIR"
 
+          # Same entry-point rule as the discover job, applied to the paths
+          # relative to the worker root (this step has cd'd into it). Reading
+          # the same manifest is what keeps the count in the log and the
+          # behaviour here from disagreeing.
           scripts=()
-          while IFS= read -r f; do
-            [ -n "$f" ] && scripts+=("$f")
-          done < <(
-            find . -type f -name '*.py' \
-              -not -path '*/__pycache__/*' \
-              -not -path '*/.*/*' \
-              -not -path '*/venv/*' \
-              -not -path '*/env/*' \
-              -not -path '*/node_modules/*' \
-              -not -path '*/site-packages/*' \
-              | sed 's|^\./||' | LC_ALL=C sort
-          )
+          AUTO=false
+          if [ -f entrypoints.txt ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              line="${line%"${line##*[![:space:]]}"}"
+              [ -z "$line" ] && continue
+              case "$line" in \#*) continue ;; esac
+              if [ "${line%.py}" != "$line" ]; then name="$line"; else name="$line.py"; fi
+              if [ -f "$name" ]; then
+                scripts+=("$name")
+                continue
+              fi
+              hits=()
+              while IFS= read -r h; do
+                [ -n "$h" ] && hits+=("$h")
+              done < <(
+                find . -type f -name "$name" \
+                  -not -path '*/__pycache__/*' \
+                  -not -path '*/venv/*' \
+                  -not -path '*/env/*' \
+                  -not -path '*/node_modules/*' \
+                  -not -path '*/site-packages/*' \
+                  -not -path '*/.*/*' \
+                  | sed 's|^\./||' | LC_ALL=C sort
+              )
+              case "${#hits[@]}" in
+                1) scripts+=("${hits[0]}") ;;
+                0)
+                  echo "::error::entrypoints.txt lists '${line}', but no such file exists in ${PYTHONWORKER_DIR}/."
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${PYTHONWORKER_DIR}/ instead:"
+                  for h in "${hits[@]}"; do echo "  - ${h}"; done
+                  exit 1
+                  ;;
+              esac
+            done < entrypoints.txt
+            if [ "${#scripts[@]}" -eq 0 ]; then
+              echo "::error::entrypoints.txt lists no scripts."
+              exit 1
+            fi
+            deduped=()
+            for s in "${scripts[@]}"; do
+              seen=0
+              for d in "${deduped[@]+"${deduped[@]}"}"; do
+                [ "$d" = "$s" ] && seen=1
+              done
+              [ "$seen" -eq 0 ] && deduped+=("$s")
+            done
+            scripts=("${deduped[@]}")
+          else
+            # Same automatic selection as the discover job: tests and
+            # imported modules are not entry points. The leading ./ is kept
+            # here so the importer paths from grep match the candidates.
+            AUTO=true
+            candidates=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && candidates+=("$f")
+            done < <(
+              find . -type f -name '*.py' \
+                -not -path '*/__pycache__/*' \
+                -not -path '*/.*/*' \
+                -not -path '*/venv/*' \
+                -not -path '*/env/*' \
+                -not -path '*/node_modules/*' \
+                -not -path '*/site-packages/*' \
+                | LC_ALL=C sort
+            )
+            excluded=0
+            for f in "${candidates[@]}"; do
+              base="${f##*/}"; base="${base%.*}"
+              case "$base" in
+                test_*|*_test)
+                  echo "  not an entry point: ${f#./} (test file)"
+                  excluded=$((excluded + 1))
+                  continue
+                  ;;
+              esac
+              esc="$(printf '%s' "$base" | sed 's/[][\.*^$()+?{}|\\]/\\&/g')"
+              importers="$(grep -rlE \
+                "(^|[[:space:]])(import|from)[[:space:]][^#]{0,120}['\"]?[^[:space:]]*${esc}(['\"]|[[:space:]]|$)" \
+                --include='*.py' . 2>/dev/null | grep -vxF "$f" || true)"
+              if [ -n "$importers" ]; then
+                echo "  not an entry point: ${f#./} (imported by $(printf '%s\n' "$importers" | wc -l) other file(s))"
+                excluded=$((excluded + 1))
+                continue
+              fi
+              scripts+=("${f#./}")
+            done
+            echo "Selected ${#scripts[@]} entry point(s) from ${#candidates[@]} candidate(s); ${excluded} excluded above."
+          fi
           if [ "${#scripts[@]}" -eq 0 ]; then
-            echo "::error::No Python scripts found in ${PYTHONWORKER_DIR}/."
+            echo "::error::No Python entry points found in ${PYTHONWORKER_DIR}/."
+            echo "Every .py file was excluded as a test or an imported module."
+            echo "Add ${PYTHONWORKER_DIR}/entrypoints.txt to name the entry points explicitly."
             exit 1
           fi
 
@@ -826,11 +1067,26 @@ jobs:
             log="/tmp/py-${safe}.log"
 
             echo "==> ${name}"
-            if python "$s" > "$log" 2>&1; then
+            # rc is captured explicitly rather than testing the command
+            # directly, because the CLI branch below has to read the exit
+            # status. With `set -u` an unset rc would abort the whole step.
+            rc=0
+            python "$s" > "$log" 2>&1 || rc=$?
+
+            if [ "$rc" -eq 0 ]; then
               echo "[ok] ${name}"
               printf 'ok\t%s\n' "$name" >> /tmp/py-results.txt
+            elif [ "$AUTO" = "true" ] && [ "$rc" -eq 2 ] && grep -qiE 'usage:' "$log"; then
+              # A CLI that prints usage and exits 2 is saying it needs
+              # arguments, not that it broke. That reading is only trusted
+              # when nothing declared this file to be an entry point: with
+              # an explicit entrypoints.txt a usage error stays a failure,
+              # because someone asserted this was a job.
+              echo "[~] ${name} exited ${rc} printing a usage message -- treated as a CLI, not a job"
+              printf 'cli\t%s\n' "$name" >> /tmp/py-results.txt
+              rm -f "$log"
+              continue
             else
-              rc=$?
               failures=$((failures + 1))
               echo "[x] ${name} exited ${rc}"
               printf 'fail\t%s\t%s\n' "$name" "$rc" >> /tmp/py-results.txt
@@ -898,6 +1154,7 @@ jobs:
               while IFS=$'\t' read -r status name rc; do
                 case "$status" in
                   ok)   echo "| \`${name}\` | passed |" ;;
+                  cli)  echo "| \`${name}\` | not a job (CLI, printed usage) |" ;;
                   fail) echo "| \`${name}\` | failed (exit ${rc}) |" ;;
                   skip) echo "| \`${name}\` | skipped |" ;;
                 esac
