@@ -401,15 +401,19 @@ jobs:
           # expression yields 'npm' when there is a lock file, and an empty
           # string otherwise, which setup-node treats as "no caching".
           cache: ${{ needs.discover.outputs.lockfile == 'true' && 'npm' || '' }}
-          # The exact lock file discover found, so an npm-shrinkwrap.json-only
-          # project still gets a resolvable path.
-          cache-dependency-path: ${{ needs.discover.outputs.lock_path }}
+          # `private/` is required: discover runs with working-directory=private
+          # and reports the path relative to THAT, but setup-node resolves the
+          # glob from the workspace root. Without the prefix it reports
+          # "Some specified paths were not resolved".
+          cache-dependency-path: private/${{ needs.discover.outputs.lock_path }}
 
       - name: Install dependencies
         if: ${{ needs.discover.outputs.install != 'none' }}
         run: |
           set -euo pipefail
-          cd "$TSWORKER_DIR"
+          # `private/` matches where actions/checkout put the repo. The step
+          # starts at the workspace root, not inside the checkout.
+          cd "private/$TSWORKER_DIR"
           # --ignore-scripts is deliberately NOT passed: a native module that
           # needs its install step (better-sqlite3, sharp) would then fail at
           # import time instead. devDependencies are kept too, because the
@@ -421,7 +425,7 @@ jobs:
           else
             npm install --no-fund --no-audit --loglevel=error
           fi
-          echo "Dependencies installed in ${TSWORKER_DIR}/."
+          echo "Dependencies installed in private/${TSWORKER_DIR}/."
 
       - name: Verify required secrets
         run: |

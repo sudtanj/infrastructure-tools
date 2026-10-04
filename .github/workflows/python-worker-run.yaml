@@ -308,11 +308,15 @@ jobs:
         if: ${{ needs.discover.outputs.requirements == 'true' }}
         run: |
           set -euo pipefail
+          # `private/` matches where actions/checkout put the repo. The step
+          # starts at the workspace root, not inside the checkout, so without
+          # this the requirements file is simply not there.
+          cd "private/$PYTHONWORKER_DIR"
           python -m pip install --upgrade pip
           # --quiet: this log is public, and pip's resolution chatter can
           # contain private package names and file paths.
-          python -m pip install --quiet -r "$PYTHONWORKER_DIR/requirements.txt"
-          echo "Installed dependencies from ${PYTHONWORKER_DIR}/requirements.txt."
+          python -m pip install --quiet -r requirements.txt
+          echo "Installed dependencies from private/${PYTHONWORKER_DIR}/requirements.txt."
 
       - name: Verify required secrets
         run: |
