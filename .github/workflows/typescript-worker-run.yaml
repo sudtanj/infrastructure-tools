@@ -1,0 +1,818 @@
+name: "Run private repo typescript-worker scripts over Tailscale"
+
+# ---------------------------------------------------------------------------
+# Clones a PRIVATE repository, finds every TypeScript script in its root-level
+# `typescript-worker/` folder, brings Tailscale up on an EXIT NODE, and only
+# then runs the scripts -- so all of their traffic leaves the runner through
+# the VPN instead of straight out of the GitHub datacenter IP.
+#
+# This is the TypeScript twin of python-worker-run.yaml. Same shape, same
+# guards, same secrets; the differences are the folder, the file extension and
+# how a `.ts` file gets executed.
+#
+# HOW THIS WORKS
+#   1. discover - checkout the private repo into ./private, count the
+#                 `typescript-worker/**/*.ts` files, and note how the folder
+#                 declares its dependencies. The `run` job re-enumerates the
+#                 scripts itself instead of passing a list between jobs, so no
+#                 private file names ever travel as a job output.
+#   2. run      - set up Node, install dependencies, install Tailscale, then
+#                 sudo tailscale up --exit-node=<target> --authkey=<key>
+#                 A guard step refuses to continue unless Tailscale reports
+#                 BackendState=Running AND the exit node is reachable on the
+#                 tailnet, so a script can never silently run un-VPNed.
+#                 Then CloakBrowser starts as a stealth Chromium CDP server,
+#                 and every script runs, in sorted order, sequentially, in the
+#                 same job -- one Tailscale node, one exit-node route, stable
+#                 egress IP for the whole run.
+#   3. teardown - remove the browser container and log out of the tailnet, so
+#                 neither a container nor a registered node lingers.
+#
+# WHY SEQUENTIAL AND NOT A MATRIX
+#   A matrix would bring Tailscale up once per script: N auth keys burned,
+#   N nodes on the tailnet, N exit-node routes racing each other, and each
+#   script potentially seeing a different egress IP. The scripts very likely
+#   depend on a stable address and on each other's side effects.
+#
+# HOW A .ts FILE IS EXECUTED
+#   There is no `node script.ts` that works everywhere, so the runner is
+#   chosen once, in the discovery step, and reported before anything runs:
+#     1. typescript-worker/node_modules/.bin/tsx      -> `tsx <file>`
+#     2. typescript-worker/node_modules/.bin/ts-node  -> `ts-node <file>`
+#     3. otherwise                                     -> `node <file>`
+#   Option 3 relies on Node's built-in type stripping, which is ON by default
+#   from Node 23.6 and is why NODE_VERSION defaults to 24. It handles ordinary
+#   annotated TypeScript with no build step, but it REJECTS constructs that
+#   need real emit: `enum`, `namespace`, parameter properties, and
+#   decorators. If your scripts use those, add tsx or ts-node as a
+#   devDependency and this workflow will pick it up automatically.
+#   When NODE_VERSION is pinned below 23.6, the flag is passed explicitly so
+#   the fallback still works instead of failing on a syntax error.
+#
+# BROWSER (CloakBrowser)
+#   A stealth Chromium is started as a container and served over the Chrome
+#   DevTools Protocol on port 9222. Scripts connect to it from the runner:
+#
+#     import { chromium } from 'playwright-core';
+#     const browser = await chromium.connectOverCDP(
+#       process.env.CLOAKBROWSER_CDP_URL!);
+#
+#   Three variables are exported into the scripts' environment:
+#     CLOAKBROWSER_CDP_URL  http://127.0.0.1:9222   for connectOverCDP()
+#     CDP_URL               same value, for a generic client
+#     CLOAKBROWSER_WS       the browser-level WebSocket URL, read once from
+#                           /json/version, for a client that speaks CDP
+#                           directly rather than through Playwright
+#
+#   The container is NOT declared under `services:`. GitHub Actions service
+#   containers have no `command` key, so `cloakserve` and its flags cannot be
+#   passed that way; a plain `docker run` reproduces the compose service exactly
+#   and, unlike `services:`, lets a failure print the container's own logs.
+#
+#   Two deliberate differences from the compose snippet:
+#     * The port is published as 127.0.0.1:9222, not 0.0.0.0:9222. The
+#       vendor's own docs bind it to loopback and warn that CDP is full control
+#       of the browser. On a hosted runner the two are equally reachable from
+#       the scripts and neither is reachable from outside, so this is the same
+#       access with less exposure.
+#     * The container is only started AFTER the exit-node guard passes, so a
+#       broken VPN fails the run before ~600 MB of image is pulled, and the
+#       browser's own traffic goes out through the exit node like everything
+#       else on the runner.
+#
+#   Uncheck `browser` when dispatching to skip it entirely, which is the escape
+#   hatch if the image cannot be pulled (Docker Hub rate-limits shared runner
+#   IPs) and you only want the scripts to run.
+#
+# EXIT NODE TARGET
+#   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
+#     tag:vpn            a tagged node (recommended -- survives IP changes)
+#     vpn.example.com    a MagicDNS hostname
+#     100.80.1.2         a Tailscale IPv4 address
+#   The target must ADVERTISE an exit node. A plain subnet router (which only
+#   advertises specific subnets) will not work: --exit-node needs 0.0.0.0/0.
+#
+# SETUP
+#   secret PRIVATE_REPO_TOKEN     read access to the private repo (required)
+#   secret PRIVATE_REPO           "owner/name" of the private repo (required)
+#   secret BUILD_REF              branch to run from (defaults to main)
+#   secret TAILSCALE_AUTH_KEY     required. Use a REUSABLE + ephemeral +
+#                                 pre-authorized + tagged key. A single-use
+#                                 reusable key is the second best option; a
+#                                 pre-authorized key is the most secure, and a
+#                                 plain user key needs manual login approval.
+#   secret TAILSCALE_EXIT_NODE    required. See EXIT NODE TARGET above.
+#   secret TAILSCALE_ACCEPT_DNS   OPTIONAL, default "false". Set it to "true"
+#                                 ONLY when the exit node runs a DNS resolver
+#                                 and MagicDNS is enabled on the tailnet --
+#                                 otherwise every hostname lookup in the
+#                                 scripts fails. "false" still routes all IP
+#                                 traffic through the exit node.
+#   secret NODE_VERSION           OPTIONAL, default "24". Needs to be >= 23.6
+#                                 for the bare `node file.ts` fallback to work
+#                                 without a flag; lower versions still run,
+#                                 with the flag passed explicitly.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo: visible to everyone, and forkable.
+#   * The runner executes ARBITRARY TypeScript from the private repo. Anyone
+#     who can push to the private repo controls what runs here, and anyone who
+#     can push to THIS repo can change what gets executed. Keep push access to
+#     trusted people on both.
+#   * The scripts receive the repository's other secrets as environment
+#     variables, because they are the ones that need to call real services --
+#     but they do NOT get PRIVATE_REPO_TOKEN (the clone credential) or
+#     TAILSCALE_AUTH_KEY (the VPN credential). GITHUB_TOKEN is not exposed
+#     either. Values are JSON-quoted and sourced, not eval'd.
+#   * A successful script's output is NOT printed: it goes to a log file and
+#     only a one-line pass is shown, because this run's log is public. On
+#     failure the last 60 lines are printed so the stack trace is debuggable.
+#     Check "verbose" when dispatching to see everything.
+#   * `npm ci` is preferred over `npm install`: it installs exactly the lock
+#     file and runs no lifecycle scripts, so a pushed dependency cannot execute
+#     code before the VPN is even up.
+#   * Teardown runs even when a script fails, so a failed run does not leave a
+#     container or a registered node behind.
+# ---------------------------------------------------------------------------
+
+on:
+  # Scheduled runs are DISABLED by default so this does not silently run
+  # private code -- and spend runner minutes -- until you ask it to. Uncomment
+  # the two lines below to poll on an interval.
+  # schedule:
+  #   - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Run one script by name, or 'all'"
+        required: false
+        default: "all"
+        type: string
+      verbose:
+        description: "Print each script's full output, not just pass/fail"
+        required: false
+        default: false
+        type: boolean
+      keep_going:
+        description: "Keep running later scripts after one fails"
+        required: false
+        default: false
+        type: boolean
+      browser:
+        description: "Start the CloakBrowser CDP server for the scripts to use"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # `secrets` is NOT available in `concurrency`, so this is keyed on this repo.
+  # Never cancel in progress: a half-torn-down VPN and a cancelled run leave
+  # the exit node route applied to nothing useful, and cancel the rest of the
+  # scripts mid-flight.
+  group: tsworker-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: ${{ secrets.NODE_VERSION || '24' }}
+  TSWORKER_DIR: 'typescript-worker'
+  NPM_CONFIG_FUND: 'false'
+  NPM_CONFIG_AUDIT: 'false'
+  NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+  CI: 'true'
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: what is in the private repo's typescript-worker folder?
+  # ------------------------------------------------------------------
+  discover:
+    name: "Find typescript scripts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # A bare integer can never contain a secret, so it always survives
+      # GitHub's "output may contain a secret" scrubber. A JSON list of
+      # paths would not be so lucky.
+      count: ${{ steps.find.outputs.count }}
+      ref: ${{ steps.find.outputs.ref }}
+      sha: ${{ steps.find.outputs.sha }}
+      # `npm ci` needs a lock file; `npm install` needs a manifest.
+      lockfile: ${{ steps.find.outputs.lockfile }}
+      # `node <file>` vs `node --experimental-strip-types <file>`.
+      strip_flag: ${{ steps.find.outputs.strip_flag }}
+      # How dependencies get installed, so the run step agrees.
+      install: ${{ steps.find.outputs.install }}
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          # Keep the clone token out of .git/config so later steps cannot leak
+          # it, and so a script cannot read it back out of the git config.
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: Enumerate scripts
+        id: find
+        working-directory: private
+        env:
+          REF: ${{ secrets.BUILD_REF || 'main' }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$TSWORKER_DIR" ]; then
+            {
+              echo "::error::No '${TSWORKER_DIR}/' folder at the root of the private repo."
+              echo "Root contents:"
+              ls -1
+            } >&2
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Every .ts under typescript-worker, recursively, in a stable order,
+          # and never from node_modules, a build output dir, a dot-directory
+          # or a type declaration. `*.d.ts` is a type file, not a program:
+          # running one exits 0 and does nothing, which would read as a pass.
+          # `*/.*/*` is what keeps .git, .cache and friends out in one rule;
+          # note it needs the `.*`, since `*/./*` would only match a bare dot.
+          scripts=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && scripts+=("$f")
+          done < <(
+            find "$TSWORKER_DIR" -type f -name '*.ts' \
+              -not -name '*.d.ts' \
+              -not -path '*/node_modules/*' \
+              -not -path '*/dist/*' \
+              -not -path '*/build/*' \
+              -not -path '*/out/*' \
+              -not -path '*/.*/*' \
+              | LC_ALL=C sort
+          )
+
+          count=${#scripts[@]}
+          echo "Found ${count} TypeScript script(s) under ${TSWORKER_DIR}/ on ${REF}:"
+          for s in "${scripts[@]+"${scripts[@]}"}"; do
+            echo "  - ${s#"$TSWORKER_DIR"/}"
+          done
+
+          # Dependency source. `npm ci` is the default whenever a lock file
+          # exists: it installs exactly what is locked down and runs no
+          # lifecycle scripts.
+          lockfile=false
+          install=none
+          if [ -f "$TSWORKER_DIR/package-lock.json" ] \
+             || [ -f "$TSWORKER_DIR/npm-shrinkwrap.json" ]; then
+            lockfile=true
+            install=ci
+            echo "Dependencies: npm ci against the lock file in ${TSWORKER_DIR}/."
+          elif [ -f "$TSWORKER_DIR/package.json" ]; then
+            install=install
+            echo "Dependencies: npm install (no lock file in ${TSWORKER_DIR}/)."
+            echo "::warning::No package-lock.json; versions can drift between runs."
+          else
+            echo "Dependencies: no package.json; the bare Node runtime is used."
+          fi
+
+          # How a .ts file gets executed, decided ONCE here so the run step
+          # and the log cannot disagree about it.
+          runner=none
+          if [ -x "$TSWORKER_DIR/node_modules/.bin/tsx" ]; then
+            runner=tsx
+          elif [ -x "$TSWORKER_DIR/node_modules/.bin/ts-node" ]; then
+            runner=ts-node
+          fi
+          if [ "$runner" = none ]; then
+            runner=node
+            echo "TypeScript runner: bare 'node', using built-in type stripping."
+            echo "  Scripts using enum, namespace, parameter properties or"
+            echo "  decorators need tsx or ts-node as a devDependency."
+          else
+            echo "TypeScript runner: ${runner} from node_modules/.bin."
+          fi
+
+          # Type stripping is on by default from Node 23.6. Below that the
+          # flag is required, and this turns out to be harmless on newer
+          # versions, so it is passed whenever the version could be older.
+          strip=false
+          if [ "$runner" = node ]; then
+            major="${NODE_VERSION#v}"
+            major="${major%%.*}"
+            minor="${NODE_VERSION#*.*}"
+            case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
+            case "$major" in
+              ''|*[!0-9]*)
+                # Unparseable version string: assume the older runtime and
+                # pass the flag, which newer Node accepts as a no-op.
+                strip=true
+                ;;
+              *)
+                # Type stripping is on by default from 23.6, so the whole of
+                # 22 and earlier needs the flag, and so does 23.0-23.5.
+                if [ "$major" -lt 23 ]; then
+                  strip=true
+                elif [ "$major" -eq 23 ] && [ "$minor" -lt 6 ]; then
+                  strip=true
+                fi
+                ;;
+            esac
+            if [ "$strip" = true ]; then
+              echo "Node ${NODE_VERSION}: passing --experimental-strip-types."
+            fi
+          fi
+
+          # `git rev-parse` failing inside an echo would not trip `set -e`, so
+          # the empty sha is caught explicitly instead of landing in the
+          # summary as a blank commit.
+          sha="$(git rev-parse HEAD 2>/dev/null || true)"
+          if [ -z "$sha" ]; then
+            echo "::error::Could not read the checked-out commit." >&2
+            exit 1
+          fi
+
+          {
+            echo "count=$count"
+            echo "ref=$REF"
+            echo "sha=$sha"
+            echo "lockfile=$lockfile"
+            echo "strip_flag=$strip"
+            echo "install=$install"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Discover"
+            echo
+            echo "- Ref: \`${{ steps.find.outputs.ref || 'unknown' }}\`"
+            echo "- Commit: \`${{ steps.find.outputs.sha }}\`"
+            echo "- Scripts: \`${{ steps.find.outputs.count || '0' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # Job 2: VPN up first, then the scripts.
+  # ------------------------------------------------------------------
+  run:
+    name: "Run scripts over Tailscale"
+    needs: discover
+    # A matrix would be built before this `if`, so there is no fromJSON('')
+    # to blow up here -- this is a plain integer comparison, and it also
+    # covers the "folder exists but holds no .ts" case.
+    if: ${{ needs.discover.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.discover.outputs.ref }}
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Only cache when there is a lock file to key on; a missing
+          # cache-dependency-path is an error in setup-node.
+          cache: ${{ needs.discover.outputs.lockfile == 'true' }}
+          cache-dependency-path: private/${{ env.TSWORKER_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        if: ${{ needs.discover.outputs.install != 'none' }}
+        run: |
+          set -euo pipefail
+          cd "$TSWORKER_DIR"
+          # --ignore-scripts is deliberately NOT passed: a native module that
+          # needs its install step (better-sqlite3, sharp) would then fail at
+          # import time instead. devDependencies are kept too, because the
+          # TypeScript runner itself (tsx / ts-node) is usually a devDep.
+          if [ "${{ needs.discover.outputs.install }}" = "ci" ]; then
+            # --quiet: this log is public, and npm's resolution chatter can
+            # contain private package names and file paths.
+            npm ci --no-fund --no-audit --loglevel=error
+          else
+            npm install --no-fund --no-audit --loglevel=error
+          fi
+          echo "Dependencies installed in ${TSWORKER_DIR}/."
+
+      - name: Verify required secrets
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in TAILSCALE_AUTH_KEY TAILSCALE_EXIT_NODE; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          case "$TAILSCALE_ACCEPT_DNS" in
+            true|false) ;;
+            *) echo "::error::TAILSCALE_ACCEPT_DNS must be 'true' or 'false'."; exit 1 ;;
+          esac
+          echo "Node:      $(node --version 2>&1)"
+          echo "Exit node: ${TAILSCALE_EXIT_NODE}"
+          echo "Accept DNS: ${TAILSCALE_ACCEPT_DNS}"
+
+      - name: Mask sensitive values
+        run: |
+          # GitHub masks repository secrets on its own; this is belt and
+          # braces for the value after it is written into an env file.
+          echo "::add-mask::${TAILSCALE_AUTH_KEY}"
+
+      # ---------------- Tailscale: install, join, verify ----------------
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if command -v tailscale >/dev/null 2>&1; then
+            echo "Tailscale is already present; skipping the installer."
+          else
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          if ! command -v tailscale >/dev/null 2>&1; then
+            echo "::error::Tailscale did not install; the scripts cannot run over the VPN."
+            exit 1
+          fi
+          tailscale version
+
+      - name: Join the tailnet through the exit node
+        run: |
+          set -euo pipefail
+          TARGET="$TAILSCALE_EXIT_NODE"
+
+          # Three accepted shapes, and nothing else. This is the only place a
+          # secret reaches a command line, so it is checked against a strict
+          # pattern first: no spaces, no quotes, no semicolons, no leading
+          # dash that could be read as a flag. `tag:` is the one place a
+          # colon is allowed, so an IPv6 literal is rejected on purpose --
+          # use the tag or the MagicDNS name instead.
+          # Note the shape: a bare failing `case` under `set -e` would abort
+          # the step before the error message could be printed.
+          valid=false
+          case "$TARGET" in
+            tag:*) if [[ "$TARGET" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then valid=true; fi ;;
+            *)    if [[ "$TARGET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then valid=true; fi ;;
+          esac
+          if [ "$valid" != true ]; then
+            echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+            exit 1
+          fi
+
+          printf '%s' "$TARGET" > /tmp/exit-node-target.txt
+
+          # Egress IP BEFORE the tunnel, so the check afterwards can prove
+          # traffic actually left somewhere else. Informational only: a
+          # failure here is never fatal.
+          curl -fsS --max-time 10 https://api.ipify.org > /tmp/egress-before.txt 2>/dev/null || \
+            : > /tmp/egress-before.txt
+          before="$(cat /tmp/egress-before.txt 2>/dev/null || true)"
+          echo "Egress IP before Tailscale: ${before:-<unavailable>}"
+
+          sudo tailscale up \
+            --authkey="$TAILSCALE_AUTH_KEY" \
+            --exit-node="$TARGET" \
+            --accept-dns="$TAILSCALE_ACCEPT_DNS" \
+            --hostname="github-actions-${GITHUB_RUN_ID}"
+
+      - name: Verify the exit node is actually in use
+        run: |
+          set -euo pipefail
+          TARGET="$(cat /tmp/exit-node-target.txt)"
+
+          sudo tailscale status --json > /tmp/ts.json
+          state="$(jq -r '.BackendState // "unknown"' /tmp/ts.json)"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state}). The scripts would run WITHOUT the VPN."
+            sudo tailscale status 2>&1 | head -20 || true
+            exit 1
+          fi
+
+          # The exit node has to be on the tailnet, reachable, and online.
+          # `tailscale up` refuses an offline exit node, so this catches the
+          # other failure: a target that exists but advertises no exit node
+          # (a plain subnet router) or that is online but not serving routes.
+          if [ "${TARGET#tag:}" != "$TARGET" ]; then
+            matches="$(jq -r --arg t "$TARGET" \
+              '[.Peer[]? | select(((.Tags // []) | index($t)) != null)]
+               | map(select(.Online == true)) | length' /tmp/ts.json)"
+            what="online node advertising ${TARGET}"
+          else
+            matches="$(jq -r --arg t "$TARGET" \
+              '[.Peer[]?
+                | select((((.DNSName // "") | rtrimstr(".") | ascii_downcase) == ($t | ascii_downcase))
+                         or (((.TailscaleIPs // []) | index($t)) != null))]
+               | map(select(.Online == true)) | length' /tmp/ts.json)"
+            what="online node named or addressed ${TARGET}"
+          fi
+          if [ "${matches:-0}" -lt 1 ]; then
+            echo "::error::No ${what}. Check the tag spelling, and that the node ADVERTISES AN EXIT NODE (0.0.0.0/0), not just a subnet route."
+            sudo tailscale status 2>&1 | head -20 || true
+            exit 1
+          fi
+          echo "Exit node: ${TARGET} is online."
+
+          # The default route is what "runs under the VPN" actually means, so
+          # confirm it landed. Advisory only, because the shape of AllowedIPs
+          # on an exit-node client is not a documented contract.
+          if jq -r '.Self.AllowedIPs[]?' /tmp/ts.json | grep -qx '0.0.0.0/0'; then
+            echo "Default route: 0.0.0.0/0 is routed via the exit node."
+          else
+            echo "::warning::AllowedIPs does not list 0.0.0.0/0. The exit node accepted but may not be carrying the default route."
+          fi
+
+          curl -fsS --max-time 10 https://api.ipify.org > /tmp/egress-after.txt 2>/dev/null || \
+            : > /tmp/egress-after.txt
+          # Read straight from the file: each step is its own shell, so the
+          # `before` value from the previous step is gone.
+          before="$(cat /tmp/egress-before.txt 2>/dev/null || true)"
+          after="$(cat /tmp/egress-after.txt 2>/dev/null || true)"
+          if [ -n "$before" ] && [ -n "$after" ] && [ "$before" = "$after" ]; then
+            echo "::error::Egress IP is unchanged (${before}) after routing through the exit node. Traffic is NOT going through the VPN."
+            exit 1
+          fi
+          if [ -z "$after" ]; then
+            echo "::warning::Could not read the post-tunnel egress IP (the exit node may block it). Relying on the Tailscale status checks above."
+          else
+            echo "Egress IP after Tailscale:  ${after} (was ${before:-unknown}) -- traffic leaves via the exit node."
+          fi
+
+          if [ "$TAILSCALE_ACCEPT_DNS" = "true" ]; then
+            echo "DNS: sent through the tailnet / exit node."
+          else
+            echo "DNS: resolved by the runner, not the exit node (TAILSCALE_ACCEPT_DNS=false)."
+          fi
+
+      # --------------------- CloakBrowser (CDP) ---------------------
+
+      - name: Start CloakBrowser
+        if: ${{ inputs.browser != 'false' }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "::error::docker is not available on this runner; cannot start CloakBrowser."
+            exit 1
+          fi
+
+          # Idempotent: a leftover container from an earlier step or an earlier
+          # attempt on a reused runner would make the name collide.
+          docker rm -f cloakbrowser >/dev/null 2>&1 || true
+
+          # Same command line as the compose service:
+          #   cloakserve --no-sandbox --remote-debugging-port=9222
+          #               --remote-debugging-address=0.0.0.0
+          # Published on loopback only -- see BROWSER (CloakBrowser) above.
+          docker run -d \
+            --name cloakbrowser \
+            -p 127.0.0.1:9222:9222 \
+            --cap-add=SYS_ADMIN \
+            --shm-size=2gb \
+            --init \
+            cloakhq/cloakbrowser:latest \
+            cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
+
+      - name: Wait for CloakBrowser to accept CDP connections
+        if: ${{ inputs.browser != 'false' }}
+        run: |
+          set -euo pipefail
+          URL="http://127.0.0.1:9222"
+          DEADLINE=$(( SECONDS + 120 ))
+
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            # Stop waiting the moment the container dies; a crash in the first
+            # seconds should not burn the full two minutes.
+            if [ "$(docker inspect -f '{{.State.Running}}' cloakbrowser 2>/dev/null || echo false)" != "true" ]; then
+              echo "::error::The CloakBrowser container exited during startup."
+              docker logs --tail 50 cloakbrowser 2>&1 || true
+              exit 1
+            fi
+            if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          if ! jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.json >/dev/null 2>&1; then
+            echo "::error::CloakBrowser did not answer /json/version within 120s."
+            docker logs --tail 50 cloakbrowser 2>&1 || true
+            exit 1
+          fi
+
+          # Written once, sourced by the script step: every step is its own
+          # shell, so the resolved WebSocket URL cannot be carried in a
+          # variable from here.
+          {
+            printf 'export CLOAKBROWSER_CDP_URL=%q\n' "$URL"
+            printf 'export CDP_URL=%q\n' "$URL"
+            printf 'export CLOAKBROWSER_WS=%q\n' "$(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+          } > /tmp/cloak-cdp.env
+          chmod 600 /tmp/cloak-cdp.env
+
+          echo "CloakBrowser is serving CDP on ${URL}."
+          echo "Browser version: $(jq -r '.Browser // "unknown"' /tmp/cloak-version.json)"
+          echo "Browser CDP endpoint: $(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+
+      # ------------------------- the scripts -------------------------
+
+      - name: Run every typescript script
+        env:
+          REQUESTED: ${{ inputs.script || 'all' }}
+          VERBOSE: ${{ inputs.verbose || 'false' }}
+          KEEP_GOING: ${{ inputs.keep_going || 'false' }}
+          INSTALL: ${{ needs.discover.outputs.install }}
+          STRIP_FLAG: ${{ needs.discover.outputs.strip_flag }}
+          # The scripts get the repo's secrets, but not the two credentials
+          # this workflow itself uses to clone the repo and join the VPN.
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: |
+          set -uo pipefail
+          cd "private/$TSWORKER_DIR"
+
+          scripts=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && scripts+=("$f")
+          done < <(
+            find . -type f -name '*.ts' \
+              -not -name '*.d.ts' \
+              -not -path '*/node_modules/*' \
+              -not -path '*/dist/*' \
+              -not -path '*/build/*' \
+              -not -path '*/out/*' \
+              -not -path '*/.*/*' \
+              | sed 's|^\./||' | LC_ALL=C sort
+          )
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::No TypeScript scripts found in ${TSWORKER_DIR}/."
+            exit 1
+          fi
+
+          # Optional single-script mode. Accepts the name with or without the
+          # .ts suffix, so both "scrape" and "scrape.ts" work.
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "all" ]; then
+            want="${REQUESTED%.ts}"
+            chosen=()
+            for s in "${scripts[@]}"; do
+              base="$(basename "$s" .ts)"
+              if [ "$base" = "$want" ]; then chosen+=("$s"); fi
+            done
+            if [ "${#chosen[@]}" -eq 0 ]; then
+              echo "::error::No script named '${want}' in ${TSWORKER_DIR}/. Available:"
+              for s in "${scripts[@]}"; do echo "  - $(basename "$s" .ts)"; done
+              exit 1
+            fi
+            scripts=("${chosen[@]}")
+            echo "Single-script mode: ${#scripts[@]} selected."
+          fi
+
+          # The runner matches what the discover job reported, so the log and
+          # the behaviour cannot disagree. tsx/ts-node are invoked through
+          # npx --no-install: that resolves the local binary and FAILS rather
+          # than silently downloading a different one from the registry.
+          RUNNER=node
+          if [ -x ./node_modules/.bin/tsx ]; then
+            RUNNER=tsx
+          elif [ -x ./node_modules/.bin/ts-node ]; then
+            RUNNER=ts-node
+          fi
+          echo "Executing ${#scripts[@]} script(s) with: ${RUNNER}"
+
+          # @sh quoting means a secret containing spaces, quotes or newlines
+          # survives being sourced. Two credentials are removed on purpose:
+          # the clone token and the VPN key have no business being visible to
+          # the scripts.
+          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY)
+                 | to_entries[]
+                 | "export \(.key)=\(.value | @sh)"' <<< "$ALL_SECRETS" > /tmp/ts-env.sh
+          chmod 600 /tmp/ts-env.sh
+          # shellcheck disable=SC1091
+          . /tmp/ts-env.sh
+          rm -f /tmp/ts-env.sh
+
+          # The CDP endpoint, when the browser was started. Written by the
+          # readiness step and absent when `browser` was unchecked.
+          if [ -s /tmp/cloak-cdp.env ]; then
+            # shellcheck disable=SC1091
+            . /tmp/cloak-cdp.env
+            echo "CloakBrowser: ${CLOAKBROWSER_CDP_URL}"
+          else
+            echo "CloakBrowser: not started for this run."
+          fi
+
+          export TSWORKER_ROOT="$PWD"
+
+          : > /tmp/ts-results.txt
+          failures=0
+
+          for i in "${!scripts[@]}"; do
+            s="${scripts[$i]}"
+            name="$(basename "$s")"
+            safe="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+            log="/tmp/ts-${safe}.log"
+
+            echo "==> ${name}"
+            case "$RUNNER" in
+              tsx)    rc=0; npx --no-install tsx "$s" > "$log" 2>&1 || rc=$? ;;
+              ts-node) rc=0; npx --no-install ts-node "$s" > "$log" 2>&1 || rc=$? ;;
+              *)
+                # Node's own type stripping, flag only when needed.
+                if [ "$STRIP_FLAG" = "true" ]; then
+                  rc=0; node --experimental-strip-types "$s" > "$log" 2>&1 || rc=$?
+                else
+                  rc=0; node "$s" > "$log" 2>&1 || rc=$?
+                fi
+                ;;
+            esac
+
+            if [ "$rc" -eq 0 ]; then
+              echo "[ok] ${name}"
+              printf 'ok\t%s\n' "$name" >> /tmp/ts-results.txt
+            else
+              failures=$((failures + 1))
+              echo "[x] ${name} exited ${rc}"
+              printf 'fail\t%s\t%s\n' "$name" "$rc" >> /tmp/ts-results.txt
+              # No `set -e` here: the failure has to be recorded before this
+              # step exits non-zero, or the summary loses the row.
+              if [ "$VERBOSE" = "true" ]; then
+                cat "$log"
+              else
+                tail -n 60 "$log"
+              fi
+              if [ "$KEEP_GOING" != "true" ]; then
+                echo "::error::${name} failed and keep_going is off; skipping the remaining scripts."
+                rest=("${scripts[@]:$((i + 1))}")
+                for r in "${rest[@]+"${rest[@]}"}"; do
+                  printf 'skip\t%s\n' "$(basename "$r")" >> /tmp/ts-results.txt
+                done
+                rm -f "$log"
+                break
+              fi
+            fi
+            if [ "$VERBOSE" = "true" ]; then
+              cat "$log"
+            fi
+            rm -f "$log"
+          done
+
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::${failures} script(s) failed."
+            exit 1
+          fi
+          echo "All ${#scripts[@]} script(s) completed under the exit node."
+
+      - name: Remove CloakBrowser and leave the tailnet
+        if: always()
+        run: |
+          # Always, even after a failed script: the browser holds a Chromium
+          # process and ~600 MB, and a node left joined keeps burning auth key
+          # uses and holds an exit-node route.
+          if docker inspect cloakbrowser >/dev/null 2>&1; then
+            docker rm -f cloakbrowser >/dev/null 2>&1 || true
+            echo "CloakBrowser container removed."
+          fi
+          sudo tailscale logout 2>&1 | tail -3 || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### typescript-worker over Tailscale"
+            echo
+            echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
+            echo "- Exit node: \`$(cat /tmp/exit-node-target.txt 2>/dev/null || echo '<never connected>')\`"
+            # Assigned first: `cat missing | sed` still exits 0, so an `||`
+            # fallback chained onto the pipeline would never fire.
+            if [ -s /tmp/cloak-cdp.env ]; then
+              browser="$(sed -n 's/^export CLOAKBROWSER_CDP_URL=//p' /tmp/cloak-cdp.env)"
+            else
+              browser='<not started>'
+            fi
+            echo "- CloakBrowser: \`${browser}\`"
+            echo
+            if [ -s /tmp/ts-results.txt ]; then
+              echo "| Script | Result |"
+              echo "| --- | --- |"
+              while IFS=$'\t' read -r status name rc; do
+                case "$status" in
+                  ok)   echo "| \`${name}\` | passed |" ;;
+                  fail) echo "| \`${name}\` | failed (exit ${rc}) |" ;;
+                  skip) echo "| \`${name}\` | skipped |" ;;
+                esac
+              done < /tmp/ts-results.txt
+            else
+              echo "No script ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
