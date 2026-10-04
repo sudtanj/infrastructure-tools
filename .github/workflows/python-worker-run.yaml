@@ -612,6 +612,9 @@ jobs:
           # cloakserve IS the CDP endpoint and serves 9222 itself. See
           # BROWSER (CloakBrowser) above for why --remote-debugging-port must
           # NOT be added here.
+          # Binding the mapping to 127.0.0.1 keeps CDP off every other
+          # interface on the runner. If that mapping turns out not to forward,
+          # the next step detects it and restarts on the host network.
           docker run -d \
             --name cloakbrowser \
             -p 127.0.0.1:9222:9222 \
@@ -626,30 +629,77 @@ jobs:
         run: |
           set -euo pipefail
           URL="http://127.0.0.1:9222"
-          DEADLINE=$(( SECONDS + 120 ))
 
-          while [ "$SECONDS" -lt "$DEADLINE" ]; do
-            # Stop waiting the moment the container dies; a crash in the first
-            # seconds should not burn the full two minutes.
-            if [ "$(docker inspect -f '{{.State.Running}}' cloakbrowser 2>/dev/null || echo false)" != "true" ]; then
-              echo "::error::The CloakBrowser container exited during startup."
-              docker logs --tail 50 cloakbrowser 2>&1 || true
-              exit 1
+          container_running() {
+            [ "$(docker inspect -f '{{.State.Running}}' cloakbrowser 2>/dev/null || echo false)" = "true" ]
+          }
+
+          # `GET /` is cloakserve's OWN status endpoint (bin/cloakserve:
+          # handle_root) and answers as soon as the multiplexer is listening.
+          # Do NOT probe /json/version here: that document is produced by a
+          # browser process, and cloakserve spawns one PER CONNECTION SEED --
+          # so with no client connected there is no browser to describe it and
+          # the request never completes. Waiting on it deadlocks and always
+          # times out.
+          wait_for_published_port() {
+            local budget="$1"
+            local until=$(( SECONDS + budget ))
+            rm -f /tmp/cloak-status.json
+            while [ "$SECONDS" -lt "$until" ]; do
+              # Stop waiting the moment the container dies; a crash in the
+              # first seconds should not burn the whole budget.
+              if ! container_running; then
+                echo "::error::The CloakBrowser container exited during startup."
+                docker logs --tail 50 cloakbrowser 2>&1 || true
+                exit 1
+              fi
+              if curl -fsS --max-time 5 "$URL/" > /tmp/cloak-status.json 2>/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
+          # First give the published port a normal startup budget.
+          if ! wait_for_published_port 120; then
+            # It stayed silent, so find out whether cloakserve is up at all or
+            # whether Docker is simply not forwarding. These have different
+            # causes and only one of them is fixable here.
+            echo "::warning::127.0.0.1:9222 has not answered; asking the container itself."
+            if docker exec cloakbrowser curl -fsS --max-time 5 http://127.0.0.1:9222/ > /dev/null 2>&1; then
+              echo "cloakserve answers on its own loopback, so Docker's published port is what is broken."
+              echo "Retrying on the host network, where the CDP URL is reachable without any port mapping."
+              # Note: cloakserve binds 0.0.0.0 when it sees /.dockerenv, so on
+              # the host network this is a listener on the runner's own address
+              # with no authentication. That is acceptable on a GitHub-hosted
+              # runner -- a single-tenant VM destroyed when the job ends -- and
+              # it is the vendor's own binding, not a choice made here.
+              docker rm -f cloakbrowser >/dev/null 2>&1 || true
+              docker run -d \
+                --name cloakbrowser \
+                --network host \
+                --cap-add=SYS_ADMIN \
+                --shm-size=2gb \
+                --init \
+                "$CLOAK_IMAGE" \
+                cloakserve --no-sandbox >/dev/null
+              # Failure falls through to the diagnostics below, which say
+              # which of the two paths was tried.
+              wait_for_published_port 120 || true
             fi
-            # `GET /` is cloakserve's OWN status endpoint and answers as soon as
-            # the multiplexer is listening. Do NOT probe /json/version here:
-            # that document is produced by a browser process, and cloakserve
-            # spawns one PER CONNECTION SEED -- so with no client connected
-            # there is no browser to describe it and the request never
-            # completes. Waiting on it deadlocks and always times out.
-            if curl -fsS --max-time 5 "$URL/" > /tmp/cloak-status.json 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
+          fi
 
           if [ ! -s /tmp/cloak-status.json ]; then
-            echo "::error::CloakBrowser did not answer its status endpoint within 120s."
+            echo "::error::CloakBrowser did not answer its status endpoint."
+            echo "--- published ports ---"
+            docker port cloakbrowser 2>&1 || true
+            echo "--- listening sockets inside the container (9222 is 0x240A) ---"
+            docker exec cloakbrowser sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' 2>&1 \
+              | awk 'NR<=2 || $2 ~ /:240A$/' || true
+            echo "--- what the runner sees ---"
+            curl -v --max-time 5 "$URL/" 2>&1 | tail -n 15 || true
+            echo "--- container logs ---"
             docker logs --tail 50 cloakbrowser 2>&1 || true
             exit 1
           fi
