@@ -60,9 +60,15 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   Three variables are exported into the scripts' environment:
 #     CLOAKBROWSER_CDP_URL  http://127.0.0.1:9222   for connectOverCDP()
 #     CDP_URL               same value, for a generic client
-#     CLOAKBROWSER_WS       the browser-level WebSocket URL, read once from
-#                           /json/version, for a client that speaks CDP
-#                           directly rather than through Playwright
+#     CLOAKBROWSER_WS       the browser-level WebSocket URL, for a client that
+#                           speaks CDP directly rather than through Playwright.
+#                           Often EMPTY: cloakserve spawns a browser per
+#                           connection seed, so no browser exists yet and
+#                           there is no WebSocket URL to hand out. That is
+#                           normal, and connectOverCDP() does not need it.
+#
+#   Append ?fingerprint=<seed> to the URL for an isolated browser identity;
+#   the container's own startup banner recommends exactly that.
 #
 #   The container is NOT declared under `services:`. GitHub Actions service
 #   containers have no `command` key, so `cloakserve` and its flags cannot be
@@ -739,31 +745,55 @@ jobs:
               docker logs --tail 50 cloakbrowser 2>&1 || true
               exit 1
             fi
-            if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.json 2>/dev/null; then
+            # `GET /` is cloakserve's OWN status endpoint and answers as soon as
+            # the multiplexer is listening. Do NOT probe /json/version here:
+            # that document is produced by a browser process, and cloakserve
+            # spawns one PER CONNECTION SEED -- so with no client connected
+            # there is no browser to describe it and the request never
+            # completes. Waiting on it deadlocks and always times out.
+            if curl -fsS --max-time 5 "$URL/" > /tmp/cloak-status.json 2>/dev/null; then
               break
             fi
             sleep 1
           done
 
-          if ! jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.json >/dev/null 2>&1; then
-            echo "::error::CloakBrowser did not answer /json/version within 120s."
+          if [ ! -s /tmp/cloak-status.json ]; then
+            echo "::error::CloakBrowser did not answer its status endpoint within 120s."
             docker logs --tail 50 cloakbrowser 2>&1 || true
             exit 1
           fi
+          echo "CloakBrowser multiplexer is up on ${URL}."
+          echo "Browser processes: $(jq -r 'if type=="array" then length elif .processes then (.processes|length) else 0 end' /tmp/cloak-status.json 2>/dev/null || echo unknown)"
+
+          # The browser-level WebSocket URL is a nicety, not a gate: it only
+          # exists once a browser process does. connect_over_cdp(CDP_URL) is
+          # what the vendor documents and does not need it.
+          ws=""
+          # Written to a scratch name first: `curl > file` truncates the target
+          # before it can fail, which would leave a misleading empty document
+          # behind on every run.
+          rm -f /tmp/cloak-version.json /tmp/cloak-version.tmp
+          if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.tmp 2>/dev/null \
+             && jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.tmp >/dev/null 2>&1; then
+            mv /tmp/cloak-version.tmp /tmp/cloak-version.json
+            ws="$(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+            echo "Browser CDP endpoint: ${ws}"
+          else
+            echo "Browser CDP endpoint: not spawned yet (cloakserve starts one on first connect)."
+          fi
 
           # Written once, sourced by the script step: every step is its own
-          # shell, so the resolved WebSocket URL cannot be carried in a
-          # variable from here.
+          # shell, so these cannot be carried in variables from here.
           {
             printf 'export CLOAKBROWSER_CDP_URL=%q\n' "$URL"
             printf 'export CDP_URL=%q\n' "$URL"
-            printf 'export CLOAKBROWSER_WS=%q\n' "$(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+            printf 'export CLOAKBROWSER_WS=%q\n' "$ws"
           } > /tmp/cloak-cdp.env
           chmod 600 /tmp/cloak-cdp.env
 
-          echo "CloakBrowser is serving CDP on ${URL}."
-          echo "Browser version: $(jq -r '.Browser // "unknown"' /tmp/cloak-version.json)"
-          echo "Browser CDP endpoint: $(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
+          echo "Scripts should connect with:"
+          echo "  chromium.connectOverCDP(process.env.CLOAKBROWSER_CDP_URL)"
+          echo "Append ?fingerprint=<seed> for an isolated browser identity."
 
       # ------------------------- the scripts -------------------------
 
