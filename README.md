@@ -26,6 +26,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
 │   ├── upsert-github-runner.sh    # Upsert GitHub Actions self-hosted runner
+│   ├── init-n8n.sh                   # Deploy n8n workflow automation, tuned for free tier
 │   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
 │   └── init-portainer.sh             # Deploy latest Portainer only
 ├── terraform_free_tier_gcp/
@@ -68,6 +69,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 
 - **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates.
 - **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
+- **`init-n8n.sh`**: Idempotent n8n deployment sized for the free-tier `e2-micro`. Uses SQLite instead of Postgres/Redis, caps the container at 0.50 CPU / 512 MiB with a matching V8 heap limit, disables telemetry/version/template calls to preserve the free egress allowance, publishes the UI on loopback plus the Tailscale address only, and installs a daily local backup of the data volume. The credential `N8N_ENCRYPTION_KEY` is generated once and persisted in `/etc/n8n/n8n.env` (mode 600) so re-runs never orphan stored credentials.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
 - **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
 
@@ -90,6 +92,21 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - [Terraform CLI](https://developer.hashicorp.com/terraform/downloads) >= 1.6.0
 - Tailscale auth key
 - Bcrypt-hashed password for Portainer admin access
+
+### Running a bash script on the VM
+
+Dispatch **Run Bash Scripts on GCP VM** (`.github/workflows/gcp-bash-script-runner.yaml`) and pick a script, or `all`. The script is streamed to the VM over `gcloud compute ssh --tunnel-through-iap` and executed there with `bash -s`. Scripts that need root use `sudo` when they are not already running as root.
+
+Settings are read from repository secrets whose names begin with one of the prefixes in the workflow's `SECRET_FILTER`. n8n settings use the `N8N_` prefix:
+
+| Secret | Purpose |
+| --- | --- |
+| `N8N_ENCRYPTION_KEY` | Optional. Pins the credential encryption key instead of letting the script generate and persist one. A value that differs from the key already in `/etc/n8n/n8n.env` is rejected, because changing it would make stored credentials unreadable. |
+| `N8N_MEMORY_LIMIT` | Container memory cap (default `512m`). The `e2-micro` has 1 GB shared with Portainer and the Actions runner, so the script warns when the cap plus its reserved budget exceeds host RAM. |
+| `N8N_PUBLIC_URL` | Public URL for editor links and webhook callbacks. Derived from the Tailscale address when unset. |
+| `N8N_BACKUP_ENABLED` | Set to `false` to skip installing the daily backup timer. |
+
+On the first run, open the UI and create the owner account. The setup URL embeds a bearer token, so the script never logs it; read it yourself with `docker logs n8n 2>&1 | grep -m1 '/rest/owner/setup/'`.
 
 ### GCP Local Deployment
 

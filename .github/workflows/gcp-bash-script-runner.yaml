@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - all
+          - init-n8n
           - init-portainer
           - init-paseo-codex
           - init-tailscale
@@ -182,7 +183,10 @@ jobs:
           SCRIPT_PATH: ${{ matrix.script }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
           # Optional: comma-separated prefixes to filter. Empty = export everything.
-          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY,GH_RUNNER_"
+          # N8N_ lets a secret N8N_ENCRYPTION_KEY override the key the script generates
+          # and persists in /etc/n8n/n8n.env. The script refuses to start if the supplied
+          # key differs from the one already on disk, since that would orphan credentials.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_"
         run: |
           set +e
           LOG=$(mktemp)
