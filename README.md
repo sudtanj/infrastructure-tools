@@ -67,7 +67,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 
 ### 3. Startup & Management Scripts (`bash-scripts/`)
 
-- **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates.
+- **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates. Pulls the latest image from the registry on every run before touching the running container, and forwards Claude Code auth (`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN`) straight through to the sessions Paseo launches.
 - **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
 - **`init-n8n.sh`**: Idempotent n8n deployment sized for the free-tier `e2-micro`. Uses SQLite instead of Postgres/Redis, caps the container at 0.50 CPU / 512 MiB with a matching V8 heap limit, disables telemetry/version/template calls to preserve the free egress allowance, publishes the UI on loopback plus the Tailscale address only, and installs a daily local backup of the data volume. The credential `N8N_ENCRYPTION_KEY` is generated once and persisted in `/etc/n8n/n8n.env` (mode 600) so re-runs never orphan stored credentials.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
@@ -107,6 +107,18 @@ Settings are read from repository secrets whose names begin with one of the pref
 | `N8N_BACKUP_ENABLED` | Set to `false` to skip installing the daily backup timer. |
 
 On the first run, open the UI and create the owner account. The setup URL embeds a bearer token, so the script never logs it; read it yourself with `docker logs n8n 2>&1 | grep -m1 '/rest/owner/setup/'`.
+
+Claude Code auth for the Paseo container uses the `ANTHROPIC_` and `CLAUDE_CODE_` prefixes. All are optional — with none set, run `claude /login` once inside the container (credentials persist in the `paseo-home` volume):
+
+| Secret | Purpose |
+| --- | --- |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Subscription auth (Pro/Max). Generated with `claude setup-token` on your own machine; charges your subscription, not usage. |
+| `ANTHROPIC_API_KEY` | API-key billing instead of subscription (`sk-ant-...`). Leave unset if using the subscription. |
+| `ANTHROPIC_BASE_URL` | BYOK: your Anthropic-API-compatible gateway, instead of `api.anthropic.com`. |
+| `ANTHROPIC_AUTH_TOKEN` | BYOK: bearer token sent as `Authorization: Bearer` instead of `x-api-key`. |
+| `ANTHROPIC_MODEL` | Optional default model (for example `claude-sonnet-5-5`). Unset uses Claude Code's built-in default. |
+
+Only secrets that are actually set get forwarded — an absent secret never lands in the container as an empty string. Every run of the script also pulls the latest `sudtanj/paseo-codex` image before touching the running container, so a failed pull leaves the current deployment up.
 
 ### GCP Local Deployment
 
