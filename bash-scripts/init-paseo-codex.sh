@@ -167,7 +167,7 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --cpus "$CPU_LIMIT" \
   --cpu-shares 256 \
   --memory "$MEM_LIMIT" \
-  --memory-reservation 192m \
+  --memory-reservation 384m \
   --memory-swap "$MEM_SWAP_LIMIT" \
   --memory-swappiness 30 \
   --pids-limit "$PIDS_LIMIT" \
