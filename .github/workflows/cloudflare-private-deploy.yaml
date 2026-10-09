@@ -91,11 +91,13 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 # ---------------------------------------------------------------------------
 
 on:
-  # Scheduled polling is DISABLED. To re-enable it, uncomment the two lines
-  # below. It is off by default so the workflow does not poll -- and spend
-  # runner minutes -- until the secrets are in place. Manual runs still work.
-  # schedule:
-  #   - cron: "*/10 * * * *"
+  # Poll every 15 minutes. Each poll is a single authenticated API call (about
+  # 4 per hour against a 5,000/hour limit) and a no-change run stops at the
+  # poll job. GitHub may delay scheduled runs under load, so treat the interval
+  # as best-effort. Comment these two lines out to pause polling; manual runs
+  # still work.
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force:
