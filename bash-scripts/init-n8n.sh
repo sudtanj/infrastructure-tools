@@ -32,8 +32,8 @@ SYSTEMD_DIR="${N8N_SYSTEMD_DIR:-/etc/systemd/system}"
 
 PORT="${N8N_PORT:-5678}"
 CPU_LIMIT="${N8N_CPU_LIMIT:-0.50}"
-MEMORY_LIMIT="${N8N_MEMORY_LIMIT:-512m}"
-MAX_OLD_SPACE_MB="${N8N_MAX_OLD_SPACE_MB:-384}"
+MEMORY_LIMIT="${N8N_MEMORY_LIMIT:-256m}"
+MAX_OLD_SPACE_MB="${N8N_MAX_OLD_SPACE_MB:-192}"
 HEALTH_TIMEOUT="${N8N_HEALTH_TIMEOUT:-180}"
 EXECUTIONS_TIMEOUT="${N8N_EXECUTIONS_TIMEOUT:-300}"
 TIMEZONE="${N8N_TIMEZONE:-UTC}"
@@ -218,12 +218,29 @@ ok "volume ready"
 # 5. Image
 # ---------------------------------------------------------------------------
 step "pulling ${IMAGE}"
-if [ "${VERBOSE:-0}" = "1" ]; then
-  "${DOCKER[@]}" pull "${IMAGE}" || fail "failed to pull ${IMAGE}"
-else
-  "${DOCKER[@]}" pull "${IMAGE}" >/dev/null 2>&1 || fail "failed to pull ${IMAGE}"
+# The VM is IPv6-only and some registries (docker.n8n.io, Docker Hub) are flaky or lack IPv6,
+# so retry and then fall back to mirrors. Pull output carries no secrets, so the last lines are
+# shown on failure to make the cause visible in the log.
+PULL_CANDIDATES=("${IMAGE}")
+if [ -z "${N8N_IMAGE:-}" ]; then
+  PULL_CANDIDATES+=("ghcr.io/n8n-io/n8n:latest" "docker.io/n8nio/n8n:latest")
 fi
-ok "image present"
+
+PULLED=""
+for candidate in "${PULL_CANDIDATES[@]}"; do
+  for attempt in 1 2 3; do
+    if PULL_OUT="$("${DOCKER[@]}" pull "${candidate}" 2>&1)"; then
+      PULLED="${candidate}"
+      break 2
+    fi
+    warn "pull of ${candidate} failed (attempt ${attempt}/3)"
+    printf '%s\n' "${PULL_OUT}" | tail -n 5 >&2
+    [ "${attempt}" -lt 3 ] && sleep $(( attempt * 5 ))
+  done
+done
+[ -n "${PULLED}" ] || fail "failed to pull ${IMAGE} (and mirrors); check IPv6/DNS access to the registry"
+IMAGE="${PULLED}"
+ok "image present (${IMAGE})"
 
 step "pruning dangling images to protect the 30 GB boot disk"
 PRUNED="$("${DOCKER[@]}" image prune -f 2>/dev/null | tail -n1 || true)"
