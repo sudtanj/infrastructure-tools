@@ -22,6 +22,14 @@
 #   --cpu-quota PCT       Hard CPU cap for all containers combined, % of one vCPU (default 100)
 #   --container-cpus N    Per-container hard cap via `docker update --cpus N` (e.g. 0.4)
 #   --swap-size N         Swapfile size in GB (default 2)
+#   --nat64               Add NAT64 + DNS64 so IPv6-only workloads can reach IPv4-only sites
+#   --nat64-mode MODE     auto (default) | public | local
+#                           public = DNS64 resolvers + a public NAT64 gateway (zero local CPU; for IPv6-only VMs)
+#                           local  = tayga (NAT64) + unbound (DNS64) in one small container (needs IPv4 egress);
+#                                    serves IPv6-only Docker networks and Tailscale peers
+#   --dns64-servers LIST  Space-separated DNS64 resolvers for public mode
+#   --force-nat64         Allow public mode even if this VM has an external IPv4 address (not recommended)
+#   --nat64-off           Remove NAT64/DNS64 config and container, then exit
 #
 # COS wipes /etc on reboot. Persist by running this as the startup script:
 #   gcloud compute instances add-metadata VM --zone ZONE \
@@ -32,6 +40,8 @@ set -uo pipefail
 SWAP_GB=2; DRY_RUN=0; NO_RESTART=0; ACTION=apply
 USE_ZRAM=0; USE_BBR=0; TS_LEAN=0; NO_LOGGING=0; NO_UPDATES=0
 CPU_QUOTA=100; CONTAINER_CPUS=""
+NAT64=0; NAT64_MODE=auto; FORCE_NAT64=0; NAT64_ACTIVE=""; DOCKER_V6=0
+DNS64_SERVERS="2a00:1098:2c::1 2a00:1098:2b::1 2a01:4f8:c2c:123f::1"
 STATE_DIR=/var/lib/optimize-vm
 MARK="# managed by optimize-vm.sh"
 
@@ -78,9 +88,14 @@ while [[ $# -gt 0 ]]; do
     --ts-lean) TS_LEAN=1 ;;          --no-logging-agent) NO_LOGGING=1 ;;
     --no-updates) NO_UPDATES=1 ;;
     --cpu-quota) CPU_QUOTA="${2:?}"; shift ;;
+    --nat64) NAT64=1 ;;
+    --nat64-mode) NAT64=1; NAT64_MODE="${2:?}"; shift ;;
+    --dns64-servers) DNS64_SERVERS="${2:?}"; shift ;;
+    --force-nat64) FORCE_NAT64=1 ;;
+    --nat64-off) ACTION=nat64off ;;
     --container-cpus) CONTAINER_CPUS="${2:?}"; shift ;;
     --swap-size) SWAP_GB="${2:?}"; shift ;;
-    -h|--help) sed -n '2,32p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,45p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac; shift
 done
@@ -131,10 +146,68 @@ info "OS: ${PRETTY_NAME:-unknown} | RAM: ${MEM_MB} MB | vCPU: $(nproc)"
 (( DRY_RUN )) && warn "DRY RUN — nothing will be changed"
 mkdir -p "$STATE_DIR"
 
+IFACE="$(ip -o route get 8.8.8.8 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+[[ -z "$IFACE" ]] && IFACE="$(ip -o -6 route get 2001:4860:4860::8888 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+IFACE="${IFACE:-ens4}"
+
+has_global_ipv6() { ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; }
+has_external_ipv4() {
+  have curl || return 1
+  curl -fsS -m 3 -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip' 2>/dev/null \
+    | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+# ---------- NAT64 decision (needed early: public mode changes Docker's IPv6 config) ----------
+if (( NAT64 )); then
+  EXT4=0; has_external_ipv4 && EXT4=1
+  mode="$NAT64_MODE"
+  if [[ $mode == auto ]]; then
+    if (( EXT4 )); then mode=local; elif has_global_ipv6; then mode=public; else mode=none; fi
+  fi
+  case "$mode" in
+    none)   warn "NAT64: no external IPv4 and no global IPv6 on this VM. Enable IPv6 on the subnet first." ;;
+    public)
+      if ! has_global_ipv6; then warn "NAT64 public mode needs a global IPv6 address; skipping"
+      elif (( EXT4 && ! FORCE_NAT64 )); then
+        warn "This VM has an external IPv4 address. Public DNS64 would route IPv4-only sites through a third-party gateway"
+        warn "instead of directly. Skipping. Use --nat64-mode local, or --force-nat64 to override."
+      else NAT64_ACTIVE=public; DOCKER_V6=1; fi ;;
+    local)  NAT64_ACTIVE=local ;;
+    *)      warn "Unknown --nat64-mode '$mode' (use auto|public|local)" ;;
+  esac
+  [[ -n "$NAT64_ACTIVE" ]] && info "NAT64 mode: $NAT64_ACTIVE"
+fi
+
+# ---------- helper for NAT64 firewall rules ----------
+ipt_ensure() {   # ipt_ensure <iptables|ip6tables> <table> <chain> <rule...>  (idempotent insert)
+  local bin="$1" tbl="$2" chain="$3"; shift 3
+  have "$bin" || return 0
+  "$bin" -t "$tbl" -C "$chain" "$@" 2>/dev/null || run "$bin" -t "$tbl" -I "$chain" "$@"
+}
+ipt_remove() {
+  local bin="$1" tbl="$2" chain="$3"; shift 3
+  have "$bin" || return 0
+  while "$bin" -t "$tbl" -C "$chain" "$@" 2>/dev/null; do run "$bin" -t "$tbl" -D "$chain" "$@"; done
+}
+
+# ---------- --nat64-off ----------
+if [[ $ACTION == nat64off ]]; then
+  info "Removing NAT64/DNS64"
+  rm -f /etc/systemd/resolved.conf.d/99-dns64.conf; systemctl restart systemd-resolved 2>/dev/null
+  have docker && docker rm -f nat64 >/dev/null 2>&1 && info "removed nat64 container"
+  ipt_remove iptables nat POSTROUTING -s 192.168.255.0/24 ! -o nat64 -j MASQUERADE
+  for b in iptables ip6tables; do
+    ipt_remove $b filter FORWARD -i nat64 -j ACCEPT; ipt_remove $b filter FORWARD -o nat64 -j ACCEPT
+    for i in docker0 'br+' tailscale0; do for pr in udp tcp; do ipt_remove $b filter INPUT -i "$i" -p $pr --dport 53 -j ACCEPT; done; done
+  done
+  info "Done. (Docker IPv6 settings in /etc/docker/daemon.json were left as is.)"; exit 0
+fi
+
 # =====================================================================
 # 1. MEMORY (swap thrash = CPU burn, so keep swapping rare)
 # =====================================================================
-info "[1/6] Memory"
+info "[1/7] Memory"
 if (( USE_ZRAM )); then
   if swapon --show=NAME --noheadings | grep -q zram; then skip "zram already active"
   elif modprobe zram 2>/dev/null && [[ -e /sys/block/zram0 ]]; then
@@ -172,7 +245,7 @@ run sh -c 'echo 0 > /sys/kernel/mm/ksm/run' 2>/dev/null
 # =====================================================================
 # 2. SYSCTLS tuned for low CPU
 # =====================================================================
-info "[2/6] Sysctls"
+info "[2/7] Sysctls"
 if (( USE_BBR )) && modprobe tcp_bbr 2>/dev/null && grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
   NET_CC=$'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr'
 else
@@ -217,6 +290,9 @@ net.ipv4.tcp_rmem = 4096 87380 4194304
 net.ipv4.tcp_wmem = 4096 65536 4194304
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+# forwarding=1 makes the kernel IGNORE router advertisements unless accept_ra=2 (would drop the IPv6 default route)
+net.ipv6.conf.all.accept_ra = 2
+net.ipv6.conf.default.accept_ra = 2
 net.netfilter.nf_conntrack_max = $CT_MAX
 net.netfilter.nf_conntrack_tcp_timeout_established = 3600
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
@@ -224,13 +300,14 @@ fs.inotify.max_user_watches = 262144
 fs.inotify.max_user_instances = 512
 EOF
 run sysctl -p /etc/sysctl.d/99-optimize-vm.conf >/dev/null 2>&1 || true
+run sysctl -qw "net.ipv6.conf.${IFACE}.accept_ra=2" 2>/dev/null || true
 
 # =====================================================================
 # 3. DOCKER
 # =====================================================================
 DOCKER_CHANGED=0
 if have docker && unit_exists docker.service; then
-  info "[3/6] Docker"
+  info "[3/7] Docker"
   MEM_HIGH=$(( MEM_MB * 62 / 100 )); MEM_MAX=$(( MEM_MB * 72 / 100 ))
   write_file /etc/systemd/system/containers.slice <<EOF >/dev/null && run systemctl daemon-reload
 $MARK
@@ -251,10 +328,12 @@ EOF
   if have jq; then
     DESIRED='{"log-driver":"local","log-opts":{"max-size":"10m","max-file":"3"},"live-restore":true,"userland-proxy":false,"mtu":1460,"max-concurrent-downloads":1,"max-concurrent-uploads":1}'
     [[ "$CG_DRIVER" == systemd ]] && DESIRED="$(jq '. + {"cgroup-parent":"containers.slice"}' <<<"$DESIRED")"
+    (( DOCKER_V6 )) && DESIRED="$(jq '. + {"ipv6":true,"fixed-cidr-v6":"fd00:d0c:64::/64","ip6tables":true,"experimental":true}' <<<"$DESIRED")"
     MERGED="$(jq -s '.[0] * .[1]' /etc/docker/daemon.json <(echo "$DESIRED"))"
   else
     CGP=""; [[ "$CG_DRIVER" == systemd ]] && CGP=',"cgroup-parent":"containers.slice"'
-    MERGED="{\"live-restore\":true,\"storage-driver\":\"overlay2\",\"mtu\":1460,\"log-driver\":\"local\",\"log-opts\":{\"max-size\":\"10m\",\"max-file\":\"3\"},\"userland-proxy\":false,\"max-concurrent-downloads\":1,\"max-concurrent-uploads\":1${CGP}}"
+    V6=""; (( DOCKER_V6 )) && V6=',"ipv6":true,"fixed-cidr-v6":"fd00:d0c:64::/64","ip6tables":true,"experimental":true'
+    MERGED="{\"live-restore\":true,\"storage-driver\":\"overlay2\",\"mtu\":1460,\"log-driver\":\"local\",\"log-opts\":{\"max-size\":\"10m\",\"max-file\":\"3\"},\"userland-proxy\":false,\"max-concurrent-downloads\":1,\"max-concurrent-uploads\":1${CGP}${V6}}"
   fi
   write_file /etc/docker/daemon.json <<<"$MERGED" >/dev/null && DOCKER_CHANGED=1
   [[ "$CG_DRIVER" != systemd ]] && warn "cgroup driver is '$CG_DRIVER': containers.slice cap unused; per-container limits below still apply"
@@ -305,13 +384,13 @@ EOF
   done
   info "Applied CPU weights to running containers (docker update isn't saved on recreate; set cpus: in compose)"
 else
-  skip "[3/6] Docker not found"
+  skip "[3/7] Docker not found"
 fi
 
 # =====================================================================
 # 4. TAILSCALE
 # =====================================================================
-info "[4/6] Tailscale"
+info "[4/7] Tailscale"
 if unit_exists tailscaled.service; then
   if write_file /etc/systemd/system/tailscaled.service.d/99-optimize-vm.conf <<EOF >/dev/null
 $MARK
@@ -341,9 +420,157 @@ if ts_cmd status 2>/dev/null | grep -q relay; then
 fi
 
 # =====================================================================
-# 5. COS BACKGROUND AGENTS
+# 5. NAT64 + DNS64
 # =====================================================================
-info "[5/6] Background services"
+nat64_verify_dns64() {
+  have resolvectl || return 1
+  resolvectl query -t AAAA ipv4only.arpa 2>&1 | grep -q 'AAAA' && resolvectl query -t A google.com >/dev/null 2>&1
+}
+
+nat64_public() {
+  local conf=/etc/systemd/resolved.conf.d/99-dns64.conf chg=0
+  unit_exists systemd-resolved.service || { warn "systemd-resolved not found; set DNS64 servers manually: $DNS64_SERVERS"; return; }
+  if write_file "$conf" <<EOF
+$MARK
+[Resolve]
+DNS=${DNS64_SERVERS}
+Domains=~.
+DNSSEC=no
+EOF
+  then chg=1; fi
+  (( DRY_RUN )) && return
+  (( chg )) && { systemctl restart systemd-resolved; sleep 1; }
+  if nat64_verify_dns64; then
+    info "DNS64 OK: IPv4-only names now resolve to synthesized IPv6 addresses"
+  else
+    bad "DNS64 check failed; reverting so DNS keeps working"
+    rm -f "$conf"; systemctl restart systemd-resolved
+    return
+  fi
+  if have curl; then
+    code="$(curl -sS -m 8 -o /dev/null -w '%{http_code}' http://ipv4.google.com 2>/dev/null || true)"
+    if [[ "$code" =~ ^[23] ]]; then info "NAT64 OK: reached an IPv4-only site over IPv6 (HTTP $code)"
+    else warn "Could not reach an IPv4-only site via NAT64 (got '${code:-no response}'). The public gateway may be down; try --dns64-servers."; fi
+  fi
+}
+
+nat64_local() {
+  have docker || { warn "Docker is required for local NAT64"; return; }
+  local dir="$STATE_DIR/nat64" ips=() dev a ifaces="" sum cur
+  mkdir -p "$dir"
+  # Listen on loopback, the Docker bridge and the tailnet addresses (never on the public NIC)
+  ips=(127.0.0.1 ::1)
+  for dev in docker0 tailscale0; do
+    while read -r a; do [[ -n "$a" ]] && ips+=("${a%%/*}"); done < <(ip -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4}')
+  done
+  for a in "${ips[@]}"; do ifaces+="  interface: ${a}@53"$'\n'; done
+
+  write_file "$dir/Dockerfile" <<'EOF' >/dev/null
+FROM alpine:3.20
+RUN apk add --no-cache tayga unbound iproute2
+COPY tayga.conf /etc/tayga.conf
+COPY unbound.conf /etc/unbound/unbound.conf
+COPY entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+EOF
+  write_file "$dir/tayga.conf" <<'EOF' >/dev/null
+tun-device nat64
+ipv4-addr 192.168.255.1
+ipv6-addr fd64::1
+prefix 64:ff9b::/96
+dynamic-pool 192.168.255.0/24
+data-dir /var/db/tayga
+EOF
+  write_file "$dir/unbound.conf" <<EOF >/dev/null
+server:
+  verbosity: 0
+  use-syslog: no
+  chroot: ""
+  pidfile: ""
+  ip-freebind: yes
+${ifaces}  access-control: 127.0.0.0/8 allow
+  access-control: ::1/128 allow
+  access-control: 172.16.0.0/12 allow
+  access-control: 100.64.0.0/10 allow
+  access-control: fd00::/8 allow
+  access-control: fd7a:115c:a1e0::/48 allow
+  access-control: 0.0.0.0/0 refuse
+  access-control: ::/0 refuse
+  do-ip4: yes
+  do-ip6: yes
+  module-config: "dns64 iterator"
+  dns64-prefix: 64:ff9b::/96
+  num-threads: 1
+  msg-cache-size: 4m
+  rrset-cache-size: 8m
+  cache-min-ttl: 300
+  prefetch: no
+  hide-identity: yes
+  hide-version: yes
+forward-zone:
+  name: "."
+  forward-addr: 2606:4700:4700::1111
+  forward-addr: 2001:4860:4860::8888
+  forward-addr: 1.1.1.1
+  forward-addr: 8.8.8.8
+EOF
+  write_file "$dir/entrypoint.sh" <<'EOF' >/dev/null
+#!/bin/sh
+mkdir -p /var/db/tayga
+tayga --mktun -c /etc/tayga.conf || exit 1
+ip link set nat64 up
+ip addr replace 192.168.255.1/32 dev nat64
+ip addr replace fd64::1/128 dev nat64
+ip route replace 192.168.255.0/24 dev nat64
+ip route replace 64:ff9b::/96 dev nat64
+tayga -c /etc/tayga.conf -d & TP=$!
+unbound -d -c /etc/unbound/unbound.conf & UP=$!
+trap 'kill $TP $UP 2>/dev/null; exit 0' TERM INT
+# exit if either dies so Docker's restart policy brings both back
+while kill -0 $TP 2>/dev/null && kill -0 $UP 2>/dev/null; do sleep 30; done
+exit 1
+EOF
+
+  if (( DRY_RUN )); then echo "${c_dim}    (dry-run) would build image and run container 'nat64'${c_off}"
+  else
+    sum="$(cat "$dir"/Dockerfile "$dir"/tayga.conf "$dir"/unbound.conf "$dir"/entrypoint.sh | sha256sum | cut -c1-16)"
+    cur="$(docker inspect -f '{{index .Config.Labels "optimize-vm.cfg"}}' nat64 2>/dev/null || true)"
+    if [[ "$cur" == "$sum" ]] && [[ -n "$(docker ps -q -f name='^nat64$')" ]]; then
+      skip "nat64 container already running with current config"
+    else
+      info "Building and starting nat64 container (tayga + unbound)"
+      if docker build -q -t optimize-vm/nat64 "$dir" >/dev/null; then
+        docker rm -f nat64 >/dev/null 2>&1
+        docker run -d --name nat64 --restart unless-stopped --network host \
+          --cap-add NET_ADMIN --device /dev/net/tun \
+          --memory 64m --memory-swap 64m --cpu-shares 512 \
+          --label "optimize-vm.cfg=$sum" optimize-vm/nat64 >/dev/null \
+          || warn "failed to start nat64 container"
+      else warn "image build failed (can Docker reach Docker Hub? with IPv6 only, run --nat64-mode public first)"; fi
+    fi
+  fi
+
+  # Host plumbing: forward + masquerade the translated IPv4 side, allow DNS from docker/tailnet
+  ipt_ensure iptables nat POSTROUTING -s 192.168.255.0/24 ! -o nat64 -j MASQUERADE
+  for b in iptables ip6tables; do
+    ipt_ensure $b filter FORWARD -i nat64 -j ACCEPT
+    ipt_ensure $b filter FORWARD -o nat64 -j ACCEPT
+    for i in docker0 'br+' tailscale0; do for pr in udp tcp; do ipt_ensure $b filter INPUT -i "$i" -p $pr --dport 53 -j ACCEPT; done; done
+  done
+  run sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
+}
+
+if [[ -n "$NAT64_ACTIVE" ]]; then
+  info "[5/7] NAT64 + DNS64 ($NAT64_ACTIVE)"
+  case "$NAT64_ACTIVE" in public) nat64_public ;; local) nat64_local ;; esac
+else
+  skip "[5/7] NAT64/DNS64 not requested (use --nat64)"
+fi
+
+# =====================================================================
+# 6. COS BACKGROUND AGENTS
+# =====================================================================
+info "[6/7] Background services"
 stop_unit() { unit_exists "$1" && { run systemctl stop "$1" 2>/dev/null; run systemctl mask --runtime "$1" >/dev/null 2>&1; info "stopped $1"; }; }
 for u in node-problem-detector.service crash-reporter.service crash-sender.service kdump.service; do stop_unit "$u"; done
 (( NO_LOGGING )) && for u in fluent-bit.service google-cloud-ops-agent.service; do stop_unit "$u"; done
@@ -372,7 +599,7 @@ done
 # =====================================================================
 # 6. JOURNALD (less logging = less CPU and IO)
 # =====================================================================
-info "[6/6] journald"
+info "[7/7] journald"
 if write_file /etc/systemd/journald.conf.d/99-optimize-vm.conf <<EOF >/dev/null
 $MARK
 [Journal]
@@ -392,6 +619,16 @@ run systemctl daemon-reload
 
 echo; info "Done."
 (( DRY_RUN )) || show_status
+case "$NAT64_ACTIVE" in
+  public) echo; info "NAT64 (public): this VM resolves via DNS64 and reaches IPv4-only sites through a third-party gateway."
+          echo "    Traffic to IPv4-only sites leaves via that gateway; use TLS. Test: curl -6 -I http://ipv4.google.com"
+          echo "    New Docker containers get IPv6 (restart/recreate old ones). Managed alternative: Cloud NAT64 + Cloud DNS DNS64 policy." ;;
+  local)  echo; info "NAT64 (local): translator 64:ff9b::/96 + DNS64 resolver are running in container 'nat64'."
+          echo "    Docker:    docker network create --ipv6 --subnet fd00:64:1::/64 v6net"
+          echo "               docker run --network v6net --dns <docker0-IP> ...   (v6-only containers reach IPv4 sites)"
+          echo "    Tailscale: tailscale set --advertise-routes=64:ff9b::/96  (approve in admin console), then point"
+          echo "               IPv6-only peers' DNS at this node's tailnet IP (port 53)." ;;
+esac
 cat <<'EOF'
 
 ----------------------------------------------------------------------
