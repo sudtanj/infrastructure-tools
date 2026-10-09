@@ -20,7 +20,10 @@
 #   --no-logging-agent    Stop COS Cloud Logging agent (fluent-bit). Big CPU saver, lose Cloud Logging
 #   --no-updates          Stop COS auto-update engine (saves CPU/IO, but no auto security updates)
 #   --cpu-quota PCT       Hard CPU cap for all containers combined, % of one vCPU (default 100)
-#   --container-cpus N    Per-container hard cap via `docker update --cpus N` (e.g. 0.4)
+#   --container-cpus N    Hard CPU cap applied to EVERY container the moment it starts, incl. ones your CI
+#                         recreates (default: same as --cpu-quota, i.e. 1.00 = one vCPU). Containers that set
+#                         their own `cpus:` in compose keep theirs.
+#   --limits              Show the effective CPU cap of every container and exit
 #   --swap-size N         Swapfile size in GB (default 2)
 #   --nat64               Add NAT64 + DNS64 so IPv6-only workloads can reach IPv4-only sites
 #   --nat64-mode MODE     auto (default) | public | local
@@ -93,12 +96,15 @@ while [[ $# -gt 0 ]]; do
     --dns64-servers) DNS64_SERVERS="${2:?}"; shift ;;
     --force-nat64) FORCE_NAT64=1 ;;
     --nat64-off) ACTION=nat64off ;;
+    --limits) ACTION=limits ;;
     --container-cpus) CONTAINER_CPUS="${2:?}"; shift ;;
     --swap-size) SWAP_GB="${2:?}"; shift ;;
-    -h|--help) sed -n '2,45p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,50p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac; shift
 done
+
+[[ -z "$CONTAINER_CPUS" ]] && CONTAINER_CPUS="$(awk -v q="$CPU_QUOTA" 'BEGIN{printf "%.2f", q/100}')"
 
 TS_CTR=""
 if have docker; then
@@ -137,7 +143,26 @@ show_status() {
   echo "cc=$(sysctl -n net.ipv4.tcp_congestion_control) qdisc=$(sysctl -n net.core.default_qdisc) swappiness=$(sysctl -n vm.swappiness)"
   echo; ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 8
 }
+show_limits() {
+  have docker || return 0
+  echo; echo "=== Effective CPU caps (1.00 = one full vCPU) ==="
+  printf '%-26s %-8s %-9s %s\n' CONTAINER CPU-CAP IN-SLICE SHARES
+  local id n nc cp sh cap ins
+  for id in $(docker ps -q 2>/dev/null); do
+    n="$(docker inspect -f '{{.Name}}' "$id" | tr -d /)"
+    nc="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$id")"
+    cp="$(docker inspect -f '{{.HostConfig.CgroupParent}}' "$id")"
+    sh="$(docker inspect -f '{{.HostConfig.CpuShares}}' "$id")"
+    cap="NONE"; [[ "$nc" != 0 ]] && cap="$(awk -v n="$nc" 'BEGIN{printf "%.2f", n/1e9}')"
+    ins="no"; [[ "$cp" == containers.slice ]] && ins=yes
+    printf '%-26s %-8s %-9s %s\n' "$n" "$cap" "$ins" "$sh"
+  done
+  echo "containers.slice total quota: $(systemctl show containers.slice -p CPUQuotaPerSecUSec --value 2>/dev/null || echo n/a)"
+  echo "cpu guard service:            $(systemctl is-active optimize-vm-cpuguard.service 2>/dev/null)"
+  echo "(IN-SLICE=no is fine: that container predates the daemon change and is capped individually.)"
+}
 [[ $ACTION == status ]] && { show_status; exit 0; }
+[[ $ACTION == limits ]] && { show_limits; exit 0; }
 
 # ---------- preflight ----------
 MEM_MB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
@@ -342,6 +367,7 @@ EOF
 $MARK
 [Service]
 OOMScoreAdjust=-500
+CPUQuota=80%
 EOF
 
   # Weekly prune at idle priority
@@ -372,17 +398,52 @@ EOF
   if (( DOCKER_CHANGED && ! NO_RESTART )); then warn "Restarting Docker (live-restore keeps containers up)"; run systemctl restart docker
   elif (( DOCKER_CHANGED )); then warn "Docker config changed: sudo systemctl restart docker"; fi
 
-  # Per-container CPU weights/caps (works regardless of cgroup driver)
-  for id in $(docker ps -q 2>/dev/null); do
-    name="$(docker inspect -f '{{.Name}}' "$id" | tr -d /)"
-    if [[ "$name" == "$TS_CTR" && -n "$TS_CTR" ]]; then
-      run docker update --cpu-shares 2048 --memory 128m --memory-swap 256m "$id" >/dev/null
-    else
-      if [[ -n "$CONTAINER_CPUS" ]]; then run docker update --cpu-shares 256 --cpus "$CONTAINER_CPUS" "$id" >/dev/null
-      else run docker update --cpu-shares 256 "$id" >/dev/null; fi
-    fi
-  done
-  info "Applied CPU weights to running containers (docker update isn't saved on recreate; set cpus: in compose)"
+  # CPU guard: caps EVERY container the moment it starts (works with any cgroup driver and
+  # survives CI redeploys, which recreate containers and wipe `docker update` limits).
+  # Containers that set their own --cpus (compose `cpus:`) keep their own cap.
+  GUARD_CHG=0
+  if write_file "$STATE_DIR/cpuguard.sh" 0755 <<'EOF'
+#!/bin/bash
+CAP="$1"
+apply() {
+  local id="$1" name nano shares mem
+  name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | tr -d /)"
+  [ -z "$name" ] && return
+  case "$name" in
+    *tailscale*) shares=2048; mem="--memory 128m --memory-swap 256m" ;;
+    *)           shares=256;  mem="" ;;
+  esac
+  nano="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$id" 2>/dev/null)"
+  if [ "$nano" = "0" ]; then
+    docker update --cpus "$CAP" --cpu-shares "$shares" $mem "$id" >/dev/null 2>&1
+  else
+    docker update --cpu-shares "$shares" $mem "$id" >/dev/null 2>&1
+  fi
+}
+for id in $(docker ps -q); do apply "$id"; done
+docker events --filter type=container --filter event=start --format '{{.ID}}' | while read -r id; do apply "$id"; done
+EOF
+  then GUARD_CHG=1; fi
+  if write_file /etc/systemd/system/optimize-vm-cpuguard.service <<EOF
+$MARK
+[Unit]
+Description=Cap CPU of every Docker container at start (limit ${CONTAINER_CPUS} vCPU)
+After=docker.service
+Requires=docker.service
+[Service]
+ExecStart=/bin/bash $STATE_DIR/cpuguard.sh ${CONTAINER_CPUS}
+Restart=always
+RestartSec=10
+Nice=10
+CPUWeight=20
+[Install]
+WantedBy=multi-user.target
+EOF
+  then GUARD_CHG=1; fi
+  run systemctl daemon-reload
+  run systemctl enable --now optimize-vm-cpuguard.service >/dev/null 2>&1
+  (( GUARD_CHG )) && run systemctl restart optimize-vm-cpuguard.service
+  info "CPU guard active: every container capped at ${CONTAINER_CPUS} vCPU (slice total ${CPU_QUOTA}%)"
 else
   skip "[3/7] Docker not found"
 fi
@@ -402,6 +463,7 @@ Environment=GOMAXPROCS=1
 Environment=TS_NO_LOGS_NO_SUPPORT=true
 OOMScoreAdjust=-900
 CPUWeight=200
+CPUQuota=80%
 Restart=always
 RestartSec=10
 EOF
@@ -618,7 +680,7 @@ then run systemctl restart systemd-journald; fi
 run systemctl daemon-reload
 
 echo; info "Done."
-(( DRY_RUN )) || show_status
+(( DRY_RUN )) || { show_status; show_limits; }
 case "$NAT64_ACTIVE" in
   public) echo; info "NAT64 (public): this VM resolves via DNS64 and reaches IPv4-only sites through a third-party gateway."
           echo "    Traffic to IPv4-only sites leaves via that gateway; use TLS. Test: curl -6 -I http://ipv4.google.com"
