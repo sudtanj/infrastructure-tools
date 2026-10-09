@@ -11,6 +11,10 @@ TS_SOCKET="/run/tailscale/tailscaled.sock"
 TS_CACHE_DIR="/var/tmp"
 TS_VERSION="${TS_VERSION:-}"
 
+# Free-tier e2-micro: run at lowest CPU/IO priority so the update does not starve the VM
+renice -n 19 -p $$ >/dev/null 2>&1 || true
+command -v ionice >/dev/null 2>&1 && ionice -c3 -p $$ 2>/dev/null || true
+
 echo "[*] update-tailscale start"
 
 [ -x "${TS_BIN_DIR}/tailscaled" ] || { echo "[x] ${TS_BIN_DIR}/tailscaled not found; run cloud-init first" >&2; exit 1; }
@@ -55,6 +59,18 @@ rollback() {
   sudo mv -f "${TS_BIN_DIR}/tailscale.bak" "${TS_BIN_DIR}/tailscale" 2>/dev/null || true
   sudo systemctl restart tailscaled.service || true
 }
+
+# Same resource limits as cloud-init (drop-in so the cloud-init unit stays untouched)
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+sudo tee /etc/systemd/system/tailscaled.service.d/10-free-tier.conf >/dev/null <<DROPIN
+[Service]
+Nice=10
+CPUWeight=50
+CPUQuota=50%
+MemoryHigh=96M
+Environment=GOGC=50
+Environment=GOMEMLIMIT=80MiB
+DROPIN
 
 echo "[>] stopping tailscaled"
 sudo systemctl stop tailscaled.service || true

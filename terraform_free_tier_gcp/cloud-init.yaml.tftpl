@@ -121,6 +121,13 @@ write_files:
       StateDirectoryMode=0750
       CacheDirectory=tailscale
       CacheDirectoryMode=0750
+      # free-tier e2-micro: keep tailscaled from starving the VM (esp. on restart/update)
+      Nice=10
+      CPUWeight=50
+      CPUQuota=50%
+      MemoryHigh=96M
+      Environment=GOGC=50
+      Environment=GOMEMLIMIT=80MiB
 
       [Install]
       WantedBy=multi-user.target
@@ -169,7 +176,7 @@ runcmd:
       | sort -V | tail -1 \
       | sed -E 's/tailscale_([0-9]+\.[0-9]+\.[0-9]+)_amd64\.tgz/\1/')
     [ -n "$TS_VERSION" ] || { echo "cannot determine latest Tailscale version" >&2; exit 1; }
-    TMPDIR=/var/tmp bash /tmp/install-tailscale.sh "$TS_VERSION" /var/lib/docker/tailscale-bin
+    TMPDIR=/var/tmp nice -n 19 $(command -v ionice >/dev/null && echo "ionice -c3") bash /tmp/install-tailscale.sh "$TS_VERSION" /var/lib/docker/tailscale-bin
 
   - systemctl daemon-reload
   - systemctl enable tailscaled.service
