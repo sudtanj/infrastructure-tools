@@ -14,6 +14,7 @@ on:
           - init-portainer
           - init-paseo-codex
           - init-tailscale
+          - update-tailscale
           - upsert-github-runner
           # add new script names here as you create them
 permissions:

@@ -71,6 +71,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
 - **`init-n8n.sh`**: Idempotent n8n deployment sized for the free-tier `e2-micro`. Uses SQLite instead of Postgres/Redis, caps the container at 0.50 CPU / 512 MiB with a matching V8 heap limit, disables telemetry/version/template calls to preserve the free egress allowance, publishes the UI on loopback plus the Tailscale address only, and installs a daily local backup of the data volume. The credential `N8N_ENCRYPTION_KEY` is generated once and persisted in `/etc/n8n/n8n.env` (mode 600) so re-runs never orphan stored credentials.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
+- **`update-tailscale.sh`**: Updates the Tailscale binaries installed by `cloud-init.yaml.tftpl` (`/var/lib/docker/tailscale-bin`) to the latest stable (or `TS_VERSION`), restarting `tailscaled` and rolling back if it fails to start. Keeps the node auth and systemd unit untouched.
 - **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
 
 ### 4. GitHub Actions CI/CD (`.github/workflows/`)
