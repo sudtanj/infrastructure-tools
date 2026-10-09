@@ -66,10 +66,14 @@ sudo tee /etc/systemd/system/tailscaled.service.d/10-free-tier.conf >/dev/null <
 [Service]
 Nice=10
 CPUWeight=50
-CPUQuota=50%
-MemoryHigh=96M
-Environment=GOGC=50
-Environment=GOMEMLIMIT=80MiB
+CPUQuota=20%
+IOWeight=10
+CPUSchedulingPolicy=batch
+MemoryHigh=48M
+MemoryMax=80M
+Environment=GOGC=40
+Environment=TS_NO_LOGS_NO_SUPPORT=true
+Environment=GOMEMLIMIT=40MiB
 DROPIN
 
 echo "[>] stopping tailscaled"

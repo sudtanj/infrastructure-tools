@@ -124,10 +124,14 @@ write_files:
       # free-tier e2-micro: keep tailscaled from starving the VM (esp. on restart/update)
       Nice=10
       CPUWeight=50
-      CPUQuota=50%
-      MemoryHigh=96M
-      Environment=GOGC=50
-      Environment=GOMEMLIMIT=80MiB
+      CPUQuota=20%
+      IOWeight=10
+      CPUSchedulingPolicy=batch
+      MemoryHigh=48M
+      MemoryMax=80M
+      Environment=GOGC=40
+      Environment=TS_NO_LOGS_NO_SUPPORT=true
+      Environment=GOMEMLIMIT=40MiB
 
       [Install]
       WantedBy=multi-user.target
