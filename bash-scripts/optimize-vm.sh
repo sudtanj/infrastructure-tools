@@ -35,11 +35,19 @@ CPU_QUOTA=100; CONTAINER_CPUS=""
 STATE_DIR=/var/lib/optimize-vm
 MARK="# managed by optimize-vm.sh"
 
-# ---------- self-elevate ----------
+# ---------- self-elevate (works from a file AND when piped: `bash -s < optimize-vm.sh`) ----------
+# This block must stay the FIRST command: when piped, bash has read only up to here, so
+# `cat` below captures the rest of the script, which is then re-run under sudo.
 if [[ $EUID -ne 0 ]]; then
-  if [[ -f "${BASH_SOURCE[0]:-}" ]]; then exec sudo -E bash "${BASH_SOURCE[0]}" "$@"; fi
-  echo "[x] Not root and script was piped. Use:  ... | sudo bash -s -- [options]" >&2; exit 1
+  if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+    exec sudo -n -E bash "${BASH_SOURCE[0]}" "$@"
+  else
+    _t="$(mktemp /tmp/optimize-vm.XXXXXX)" && cat > "$_t" && exec sudo -n -E bash "$_t" "$@"
+    echo "[x] Could not elevate with sudo (is passwordless sudo available for this user?)" >&2; exit 1
+  fi
 fi
+# Clean up the temp copy created above (we are root and running from it)
+[[ "${BASH_SOURCE[0]:-}" == /tmp/optimize-vm.* ]] && rm -f "${BASH_SOURCE[0]}"
 
 c_grn=$'\e[32m'; c_ylw=$'\e[33m'; c_red=$'\e[31m'; c_dim=$'\e[2m'; c_off=$'\e[0m'
 info() { echo "${c_grn}[+]${c_off} $*"; }
