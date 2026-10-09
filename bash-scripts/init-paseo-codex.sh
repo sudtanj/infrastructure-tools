@@ -31,14 +31,16 @@ PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 # --- Resource caps (kernel-enforced via cgroups) ----------------------
 # Memory has a hard floor of 256 MB: anything lower gets bumped up.
 MIN_MEM_MB=256
-CPU_LIMIT="${CPU_LIMIT:-0.40}"
-# 448m: supervisor + worker are two Node processes and the startup plugin burst
-# (codex/copilot/cursor/grok/kimi/minimax...) spikes memory. 320m got SIGKILLed.
-MEM_LIMIT="${MEM_LIMIT:-448m}"
-MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-640m}"   # total memory+swap (small: swap burns CPU/IO)
-PIDS_LIMIT="${PIDS_LIMIT:-192}"
+# 0.60 CPU: a higher cap lets session spawns burst and finish sooner; the low
+# --cpu-shares below still makes other services win when the CPU is contended.
+CPU_LIMIT="${CPU_LIMIT:-0.60}"
+# 640m: supervisor + worker + several Claude/Codex sessions are separate Node
+# processes, and the startup plugin burst spikes memory. 320m/448m were unstable.
+MEM_LIMIT="${MEM_LIMIT:-640m}"
+MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-896m}"   # total memory+swap (small: swap burns CPU/IO)
+PIDS_LIMIT="${PIDS_LIMIT:-256}"
 # --max-old-space-size applies PER Node process, so keep it modest.
-NODE_HEAP_MB="${NODE_HEAP_MB:-160}"
+NODE_HEAP_MB="${NODE_HEAP_MB:-224}"
 HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
 
 IMAGE="sudtanj/paseo-codex:latest"
@@ -286,7 +288,7 @@ echo "[i] network mode: $(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONT
 OOM_INFO=$(docker inspect -f '{{.State.OOMKilled}} restarts={{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "[i] oom-killed: ${OOM_INFO}"
 case "$OOM_INFO" in
-  true*) echo "[!] container was OOM-killed - raise MEM_LIMIT (e.g. 512m)" >&2 ;;
+  true*) echo "[!] container was OOM-killed - host RAM is only 1 GB, so close idle sessions or stop other services rather than raising MEM_LIMIT much past 700m" >&2 ;;
 esac
 if ip link show tailscale0 >/dev/null 2>&1; then
   echo "[+] tailscale0 visible"
