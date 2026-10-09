@@ -48,6 +48,17 @@ CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 PASEO_PORT="${PASEO_PORT:-6767}"
 
+# --- Hard resource caps (enforced by the kernel via cgroups) ---
+# Sized to leave room for tailscaled/n8n/docker on the 1 GB e2-micro. Swap is
+# kept small: heavy swapping burns free-tier disk IO and CPU, so a runaway
+# session gets OOM-killed (and restarted) instead of dragging the VM down.
+CPU_LIMIT="${CPU_LIMIT:-0.40}"
+MEM_LIMIT="${MEM_LIMIT:-320m}"
+MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-448m}"   # total memory+swap
+PIDS_LIMIT="${PIDS_LIMIT:-192}"
+NODE_HEAP_MB="${NODE_HEAP_MB:-192}"
+HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
+
 IMAGE="sudtanj/paseo-codex:latest"
 CONTAINER_NAME="paseo-codex"
 CODEX_CONFIG_DIR="/home/paseo/.codex"
@@ -88,6 +99,9 @@ else
   echo "[+] image updated to a newer build"
 fi
 
+# Reclaim disk from superseded image layers (free-tier disk is small).
+docker image prune -f >/dev/null 2>&1 || true
+
 # --- Remove existing container ---
 echo "[>] removing existing container"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -99,7 +113,8 @@ docker volume create paseo-workspace >/dev/null
 
 # --- Wipe stale/corrupt Codex SQLite state ---
 echo "[>] clearing stale Codex state"
-docker run --rm -v paseo-home:/home/paseo alpine:latest sh -c '
+docker run --rm --cpus 0.25 --memory 64m --memory-swap 64m --pids-limit 32 \
+  -v paseo-home:/home/paseo alpine:latest sh -c '
   rm -rf /home/paseo/.codex/state \
          /home/paseo/.codex/*.sqlite \
          /home/paseo/.codex/*.sqlite-shm \
@@ -111,7 +126,8 @@ echo "[+] state cleared"
 # These settings are for Codex CLI. Paseo may override them with its own
 # sandbox preset, but they are still correct to have.
 echo "[>] seeding Codex config"
-docker run --rm -v paseo-home:"$CODEX_CONFIG_DIR" alpine:latest sh -c "
+docker run --rm --cpus 0.25 --memory 64m --memory-swap 64m --pids-limit 32 \
+  -v paseo-home:"$CODEX_CONFIG_DIR" alpine:latest sh -c "
   mkdir -p '$CODEX_CONFIG_DIR'
   cat > '$CODEX_CONFIG_FILE' <<'EOF'
 # Managed by init-paseo-codex.sh — do not edit manually.
@@ -147,16 +163,27 @@ done
 docker run -d --name "$CONTAINER_NAME" --restart always \
   --user 1000:1000 \
   --network=host \
-  --cpus 0.50 \
-  --memory 384m \
-  --memory-swap 768m \
-  --memory-swappiness 60 \
-  --pids-limit 384 \
+  --init \
+  --cpus "$CPU_LIMIT" \
+  --cpu-shares 256 \
+  --memory "$MEM_LIMIT" \
+  --memory-reservation 192m \
+  --memory-swap "$MEM_SWAP_LIMIT" \
+  --memory-swappiness 30 \
+  --pids-limit "$PIDS_LIMIT" \
+  --ulimit nofile=4096:4096 \
+  --ulimit nproc=512:512 \
+  --ulimit core=0 \
+  --oom-score-adj 500 \
+  --log-driver json-file \
+  --log-opt max-size=5m \
+  --log-opt max-file=2 \
+  --tmpfs /tmp:rw,nosuid,size=64m \
   --security-opt apparmor=unconfined \
   --dns 2a00:1098:2b::1 \
   --dns 2a01:4f9:c010:3f02::1 \
   --health-cmd "curl -fsS --max-time 3 http://127.0.0.1:${PASEO_PORT}/api/health || exit 1" \
-  --health-interval=30s \
+  --health-interval=60s \
   --health-retries=3 \
   --health-start-period=45s \
   --health-timeout=5s \
@@ -168,7 +195,16 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e CODEX_MAX_TOKEN="$CODEX_MAX_TOKEN" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e TERM=xterm-256color \
-  -e NODE_OPTIONS="--max-old-space-size=256" \
+  -e NODE_OPTIONS="--max-old-space-size=${NODE_HEAP_MB} --max-semi-space-size=8" \
+  -e UV_THREADPOOL_SIZE=2 \
+  -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  -e DISABLE_TELEMETRY=1 \
+  -e DISABLE_ERROR_REPORTING=1 \
+  -e DISABLE_AUTOUPDATER=1 \
+  -e DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 \
+  -e CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 \
+  -e BASH_DEFAULT_TIMEOUT_MS=120000 \
+  -e BASH_MAX_TIMEOUT_MS=600000 \
   ${claude_env[@]+"${claude_env[@]}"} \
   "$IMAGE" \
   >/dev/null 2>&1
@@ -237,6 +273,7 @@ fi
 
 MEM_USED=$(docker stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || echo "n/a")
 echo "[i] memory: ${MEM_USED}"
+echo "[i] hard caps: cpu=${CPU_LIMIT} mem=${MEM_LIMIT} mem+swap=${MEM_SWAP_LIMIT} pids=${PIDS_LIMIT}"
 
 # --- Heartbeat ---
 echo "[>] checking Paseo heartbeat"
@@ -244,9 +281,9 @@ if docker exec "$CONTAINER_NAME" sh -c 'command -v paseo >/dev/null 2>&1' 2>/dev
   if docker exec "$CONTAINER_NAME" sh -c 'paseo heartbeat ls 2>/dev/null | grep -q heartbeat' 2>/dev/null; then
     echo "[+] heartbeat exists"
   else
-    docker exec "$CONTAINER_NAME" sh -c '
+    docker exec -e HEARTBEAT_CRON="$HEARTBEAT_CRON" "$CONTAINER_NAME" sh -c '
       paseo heartbeat create \
-        --cron "*/20 * * * *" \
+        --cron "$HEARTBEAT_CRON" \
         --name heartbeat \
         "Check the current task state and continue with the next useful step."
     ' 2>/dev/null && echo "[+] heartbeat created" \
