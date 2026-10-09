@@ -25,15 +25,20 @@ ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-}"
 CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 PASEO_PORT="${PASEO_PORT:-6767}"
+# Daemon listens on 0.0.0.0 (host network) - set a password so it isn't open.
+PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 
 # --- Resource caps (kernel-enforced via cgroups) ----------------------
 # Memory has a hard floor of 256 MB: anything lower gets bumped up.
 MIN_MEM_MB=256
 CPU_LIMIT="${CPU_LIMIT:-0.40}"
-MEM_LIMIT="${MEM_LIMIT:-320m}"
-MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-448m}"   # total memory+swap
+# 448m: supervisor + worker are two Node processes and the startup plugin burst
+# (codex/copilot/cursor/grok/kimi/minimax...) spikes memory. 320m got SIGKILLed.
+MEM_LIMIT="${MEM_LIMIT:-448m}"
+MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-640m}"   # total memory+swap (small: swap burns CPU/IO)
 PIDS_LIMIT="${PIDS_LIMIT:-192}"
-NODE_HEAP_MB="${NODE_HEAP_MB:-192}"
+# --max-old-space-size applies PER Node process, so keep it modest.
+NODE_HEAP_MB="${NODE_HEAP_MB:-160}"
 HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
 
 IMAGE="sudtanj/paseo-codex:latest"
@@ -58,6 +63,9 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 echo "[+] env ok"
+if [ -z "$PASEO_PASSWORD" ]; then
+  echo "[!] PASEO_PASSWORD not set - daemon accepts unauthenticated connections on :${PASEO_PORT}" >&2
+fi
 
 # --- Normalise memory settings (enforce 256 MB floor) ---
 MEM_MB=$(to_mb "$MEM_LIMIT")
@@ -93,7 +101,7 @@ fi
 # Same hash + running container = no recreate (saves CPU, avoids downtime).
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
-  "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" "$PASEO_PORT" \
+  "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" "$PASEO_PORT" "$PASEO_PASSWORD" \
   "$CPU_LIMIT" "$MEM_MB" "$SWAP_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
@@ -114,7 +122,7 @@ docker volume create paseo-workspace >/dev/null
 # Forward only the Claude Code vars that are actually set.
 claude_env=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN; do
+         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD; do
   if [ -n "${!v:-}" ]; then
     claude_env+=(-e "$v=${!v}")
   fi
@@ -128,7 +136,6 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --label "init.hash=${CONFIG_HASH}" \
   --user 1000:1000 \
   --network=host \
-  --init \
   --cpus "$CPU_LIMIT" \
   --cpu-shares 256 \
   --memory "${MEM_MB}m" \
@@ -150,7 +157,7 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --health-cmd "curl -fsS --max-time 3 http://127.0.0.1:${PASEO_PORT}/api/health || exit 1" \
   --health-interval=120s \
   --health-retries=3 \
-  --health-start-period=60s \
+  --health-start-period=90s \
   --health-timeout=5s \
   -v paseo-home:/home/paseo \
   -v paseo-workspace:/workspace:rw \
@@ -276,6 +283,11 @@ EOF
 # --- Host-side status (cheap inspects only) ---
 echo "[i] health: $(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown)"
 echo "[i] network mode: $(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")"
+OOM_INFO=$(docker inspect -f '{{.State.OOMKilled}} restarts={{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+echo "[i] oom-killed: ${OOM_INFO}"
+case "$OOM_INFO" in
+  true*) echo "[!] container was OOM-killed - raise MEM_LIMIT (e.g. 512m)" >&2 ;;
+esac
 if ip link show tailscale0 >/dev/null 2>&1; then
   echo "[+] tailscale0 visible"
 else
