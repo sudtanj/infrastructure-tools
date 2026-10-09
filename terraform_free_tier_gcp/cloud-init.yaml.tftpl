@@ -163,7 +163,13 @@ runcmd:
   - chmod 755 /run/tailscale
 
   - mkdir -p /var/lib/docker/tailscale-bin
-  - TMPDIR=/var/tmp bash /tmp/install-tailscale.sh 1.90.6 /var/lib/docker/tailscale-bin
+  - |
+    TS_VERSION=$(curl -fsSL https://pkgs.tailscale.com/stable/ \
+      | grep -oE 'tailscale_[0-9]+\.[0-9]+\.[0-9]+_amd64\.tgz' \
+      | sort -V | tail -1 \
+      | sed -E 's/tailscale_([0-9]+\.[0-9]+\.[0-9]+)_amd64\.tgz/\1/')
+    [ -n "$TS_VERSION" ] || { echo "cannot determine latest Tailscale version" >&2; exit 1; }
+    TMPDIR=/var/tmp bash /tmp/install-tailscale.sh "$TS_VERSION" /var/lib/docker/tailscale-bin
 
   - systemctl daemon-reload
   - systemctl enable tailscaled.service
