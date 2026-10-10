@@ -1177,6 +1177,8 @@ jobs:
           . /tmp/redact.sh
 
           export TSWORKER_ROOT="$PWD"
+          # Trace every Playwright call so a silent failure shows where it stopped.
+          export DEBUG="${DEBUG:-pw:api}"
 
           : > /tmp/ts-results.txt
           failures=0
@@ -1201,6 +1203,13 @@ jobs:
                 ;;
             esac
 
+            # Always show what the script printed. It used to appear only on
+            # failure or with verbose=true, so a script that swallowed its own
+            # error and exited 0 looked like it did nothing.
+            echo "::group::output of ${name} (exit ${rc}, $(wc -l < "$log") lines)"
+            redact < "$log"
+            echo "::endgroup::"
+
             if [ "$rc" -eq 0 ]; then
               echo "[ok] ${name}"
               printf 'ok\t%s\n' "$name" >> /tmp/ts-results.txt
@@ -1220,11 +1229,6 @@ jobs:
               printf 'fail\t%s\t%s\n' "$name" "$rc" >> /tmp/ts-results.txt
               # No `set -e` here: the failure has to be recorded before this
               # step exits non-zero, or the summary loses the row.
-              if [ "$VERBOSE" = "true" ]; then
-                redact < "$log"
-              else
-                redact < "$log" | tail -n 60
-              fi
               if [ "$KEEP_GOING" != "true" ]; then
                 echo "::error::${name} failed and keep_going is off; skipping the remaining scripts."
                 rest=("${scripts[@]:$((i + 1))}")
@@ -1234,9 +1238,6 @@ jobs:
                 rm -f "$log"
                 break
               fi
-            fi
-            if [ "$VERBOSE" = "true" ]; then
-              redact < "$log"
             fi
             rm -f "$log"
           done
@@ -1254,6 +1255,12 @@ jobs:
           # process and ~600 MB, and a node left joined keeps burning auth key
           # uses and holds an exit-node route.
           if docker inspect cloakbrowser >/dev/null 2>&1; then
+            # Browser-side errors (crashes, blocked navigations) never reach
+            # the script's own output, so show them here, redacted.
+            echo "::group::CloakBrowser container logs (last 200 lines)"
+            # shellcheck disable=SC1091
+            . /tmp/redact.sh 2>/dev/null && docker logs --tail 200 cloakbrowser 2>&1 | redact || true
+            echo "::endgroup::"
             docker rm -f cloakbrowser >/dev/null 2>&1 || true
             echo "CloakBrowser container removed."
           fi
