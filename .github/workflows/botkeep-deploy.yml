@@ -149,25 +149,23 @@ jobs:
           idem() { printf 'gh%sx%sx%s%s' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$1" "$(openssl rand -hex 6)"; }
 
           wait_op() { # operation-id
-            local op="$1" st status last="" unknown=0 deadline=$((SECONDS + TIMEOUT))
+            local op="$1" st status last="" deadline=$((SECONDS + TIMEOUT))
             while :; do
               st=$(call GET "/operations/${op}")
-              status=$(jq -r '(.status // .state // .phase // .operation.status // .operation.state // .data.status // .data.state // .result.status
-                  // (if (.done // .completed // .finished // .data.done) == true then "done" else empty end)
-                  // "unknown") | tostring | ascii_downcase' <<<"$st" 2>/dev/null || echo unknown)
+              # Response shape: {operation:{phase}, queueState, confirmed, runtimeState}
+              status=$(jq -r '[(.operation.phase // .phase // .status // .state // "unknown"), (.queueState // "-")]
+                  | map(tostring | ascii_downcase) | join("/")' <<<"$st" 2>/dev/null || echo unknown)
               if [ "$status" != "$last" ]; then
-                echo "    ${op}: ${status}"
-                [ "$status" != "unknown" ] || echo "    response: $(printf '%s' "$st" | head -c 600)"
+                echo "    ${op}: ${status} (runtime: $(jq -r '.runtimeState // "?"' <<<"$st" 2>/dev/null))"
                 last="$status"
               fi
+              if [ "$(jq -r '.confirmed // false' <<<"$st" 2>/dev/null)" = "true" ]; then return 0; fi
               case "$status" in
-                succeeded|success|successful|completed|complete|done|ready|finished|ok) return 0 ;;
-                failed|failure|error|errored|cancelled|canceled|timeout|timed_out) echo "::error::operation ${op} ${status}: $(printf '%s' "$st" | head -c 600)"; return 1 ;;
-                unknown) unknown=$((unknown + 1)) ;;
-                *) unknown=0 ;;
+                succeeded*|success*|completed*|complete*|done*|finished*|confirmed*|ready*|*/completed|*/done|*/succeeded|*/finished) return 0 ;;
+                failed*|failure*|error*|cancelled*|canceled*|timeout*|timed_out*|*/failed|*/error|*/cancelled|*/canceled)
+                  echo "::error::operation ${op} ${status}: $(printf '%s' "$st" | head -c 600)"; return 1 ;;
               esac
-              [ "$unknown" -lt 6 ] || { echo "::error::cannot read status of ${op}; response: $(printf '%s' "$st" | head -c 600)"; return 1; }
-              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op} (last status: ${status})"; return 1; }
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op} (last: ${status}); response: $(printf '%s' "$st" | head -c 600)"; return 1; }
               sleep 5
             done
           }
