@@ -107,7 +107,9 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   passed that way; a plain `docker run` reproduces the compose service exactly
 #   and, unlike `services:`, lets a failure print the container's own logs.
 #
-#   THE COMMAND IS JUST `cloakserve --no-sandbox`. Do NOT add
+#   THE COMMAND MATCHES A KNOWN-WORKING SETUP: `cloakserve --no-sandbox
+#   --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0`, published
+#   as 9222:9222, probed on /json/version. (Older note, now superseded: do NOT add
 #   --remote-debugging-port here. cloakserve IS the CDP endpoint: it opens its
 #   own multiplexer on 9222 and hands out browser endpoints from it. Passing a
 #   Chromium --remote-debugging-port makes Chrome open a SECOND CDP listener
@@ -880,12 +882,12 @@ jobs:
           # the next step detects it and restarts on the host network.
           docker run -d \
             --name cloakbrowser \
-            -p 127.0.0.1:9222:9222 \
+            -p 9222:9222 \
             --cap-add=SYS_ADMIN \
             --shm-size=2gb \
             --init \
             "$CLOAK_IMAGE" \
-            cloakserve --no-sandbox
+            cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
 
       - name: Wait for CloakBrowser to accept CDP connections
         if: ${{ inputs.browser != 'false' }}
@@ -916,7 +918,7 @@ jobs:
                 docker logs --tail 50 cloakbrowser 2>&1 || true
                 exit 1
               fi
-              if curl -fsS --max-time 5 "$URL/" > /tmp/cloak-status.json 2>/dev/null; then
+              if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-status.json 2>/dev/null; then
                 return 0
               fi
               sleep 1
@@ -946,7 +948,7 @@ jobs:
                 --shm-size=2gb \
                 --init \
                 "$CLOAK_IMAGE" \
-                cloakserve --no-sandbox >/dev/null
+                cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 >/dev/null
               # Failure falls through to the diagnostics below, which say
               # which of the two paths was tried.
               wait_for_published_port 120 || true
@@ -991,6 +993,7 @@ jobs:
           {
             printf 'export CLOAKBROWSER_CDP_URL=%q\n' "$URL"
             printf 'export CDP_URL=%q\n' "$URL"
+            printf 'export BROWSER_WS_ENDPOINT=%q\n' "$URL"
             printf 'export CLOAKBROWSER_WS=%q\n' "$ws"
           } > /tmp/cloak-cdp.env
           chmod 600 /tmp/cloak-cdp.env
