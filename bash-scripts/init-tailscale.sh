@@ -4,7 +4,17 @@
 
 set -euo pipefail
 
-TS_BIN_DIR="/var/lib/cloud/tailscale-bin"
+TS_BIN_DIR="${TS_BIN_DIR:-}"
+TS_DEFAULT_BIN_DIR="/var/lib/cloud/tailscale-bin"
+
+# Reuse an existing install (systemd unit, cloud-init, or previous init) before falling back to the default
+if [ -z "$TS_BIN_DIR" ]; then
+  UNIT_BIN=$(systemctl show tailscaled.service -p ExecStart 2>/dev/null | grep -oE "path=[^ ;]+tailscaled" | head -1 | cut -d= -f2 || true)
+  for d in "${UNIT_BIN:+$(dirname "$UNIT_BIN")}" /var/lib/docker/tailscale-bin "$TS_DEFAULT_BIN_DIR"; do
+    if [ -n "$d" ] && [ -x "$d/tailscaled" ]; then TS_BIN_DIR="$d"; break; fi
+  done
+  TS_BIN_DIR="${TS_BIN_DIR:-$TS_DEFAULT_BIN_DIR}"
+fi
 TS_STATE_DIR="/var/lib/tailscale"
 TS_SOCKET="/run/tailscale/tailscaled.sock"
 TS_UNIT="/etc/systemd/system/tailscaled.service"
@@ -14,11 +24,12 @@ TS_HOSTNAME="${TS_HOSTNAME:-gcp-free-tier-vm}"
 TS_AUTHKEY="${TS_AUTHKEY:-}"
 
 echo "[*] upsert-tailscale start"
+echo "[+] using ${TS_BIN_DIR}"
 
 # --- Executable bin directory ---
 echo "[>] ensuring executable bin directory"
 sudo mkdir -p "$TS_BIN_DIR"
-if ! sudo mountpoint -q "$TS_BIN_DIR"; then
+if [ "$TS_BIN_DIR" = "$TS_DEFAULT_BIN_DIR" ] && ! sudo mountpoint -q "$TS_BIN_DIR"; then
   echo "[>] mounting tmpfs (exec) on ${TS_BIN_DIR}"
   sudo mount -t tmpfs -o exec,mode=0755 tmpfs "$TS_BIN_DIR"
 fi
