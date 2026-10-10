@@ -189,7 +189,12 @@ jobs:
                 '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
                   sourceType:"blank", startCommand:$sc,
                   resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}')
-              resp=$(call POST "/workloads" "$body" "$(idem create)")
+              resp=$(call POST "/workloads" "$body" "$(idem create)") || {
+                echo "[!] create failed (runtime=${RUNTIME} version=${RUNTIME_VERSION}); server capabilities:" >&2
+                call GET "/capabilities" 2>&1 | head -c 3000 >&2 || true
+                echo >&2
+                exit 1
+              }
               WID=$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' <<<"$resp")
               op=$(jq -r '.operationId // .operation_id // .operation.id // empty' <<<"$resp")
               [ -z "$op" ] || wait_op "$op"
