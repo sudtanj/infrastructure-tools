@@ -34,7 +34,7 @@ HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="4"
+CONFIG_REV="5"
 DNS1="2a00:1098:2b::1"
 DNS2="2a01:4f9:c010:3f02::1"
 
@@ -171,6 +171,11 @@ fi
 echo "[+] container running"
 
 # --- Seed Codex config + clear stale SQLite state ---
+# Only top-level keys go here. The image's configure-codex-provider owns the
+# [model_providers.custom] table (between its markers) and rewrites it on every
+# container start; defining that table here too makes the TOML invalid
+# (duplicate key) and Codex lists no models. Retry settings are added inside
+# the managed block; a later container restart drops them back to defaults.
 docker exec -i -u 0 "$CONTAINER_NAME" sh -s >/dev/null 2>&1 <<'EOF' || echo "[!] codex config seeding failed" >&2
 set -e
 D=/home/paseo/.codex
@@ -181,12 +186,12 @@ cat > "$D/config.toml" <<'TOML'
 
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
-
-[model_providers.custom]
-stream_max_retries = 100
-request_max_retries = 100
-stream_idle_timeout_ms = 300000
 TOML
+CODEX_HOME="$D" /usr/local/bin/configure-codex-provider
+sed -i '/^# <<< claude-code-claudish-happy: managed custom provider <<<$/i\
+stream_max_retries = 100\
+request_max_retries = 100\
+stream_idle_timeout_ms = 300000' "$D/config.toml"
 chown -R 1000:1000 "$D"
 EOF
 
