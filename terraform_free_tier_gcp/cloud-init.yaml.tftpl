@@ -1,6 +1,16 @@
 #cloud-config
-# COS + kernel-mode Tailscale (host) + Portainer
-# Binary on boot disk — persists across reboots, no extra disk, no extra cost.
+# COS: CPU/RAM optimizations + Docker initialization (e2-micro, 1 GB RAM).
+
+write_files:
+  # Cap journald so logs don't eat RAM/disk
+  - path: /etc/systemd/journald.conf.d/size.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Journal]
+      SystemMaxUse=50M
+      RuntimeMaxUse=20M
+      MaxRetentionSec=3day
 
 bootcmd:
   # --- DNS64 ---
@@ -17,21 +27,26 @@ bootcmd:
     {
       "dns": ["2001:4860:4860::6464", "2001:4860:4860::64"],
       "dns-opts": ["timeout:2", "attempts:3"],
-      "log-driver": "json-file",
+      "log-driver": "local",
       "log-opts": {
         "max-size": "5m",
         "max-file": "2"
       },
+      "userland-proxy": false,
+      "max-concurrent-downloads": 2,
+      "max-concurrent-uploads": 2,
       "live-restore": true
     }
     EOF
   - systemctl restart docker || true
 
-  # --- /dev/net/tun ---
-  - mkdir -p /dev/net
-  - mknod /dev/net/tun c 10 200 || true
-  - chmod 666 /dev/net/tun || true
-  - modprobe tun 2>/dev/null || true
+  # --- Stop non-essential background agents (best effort) ---
+  # Proper fix: set instance metadata google-logging-enabled=false and
+  # google-monitoring-enabled=false (see Terraform snippet).
+  - systemctl stop fluent-bit.service 2>/dev/null || true
+  - systemctl mask fluent-bit.service 2>/dev/null || true
+  - systemctl stop node-problem-detector.service 2>/dev/null || true
+  - systemctl mask node-problem-detector.service 2>/dev/null || true
 
   # --- BBR + TCP tuning ---
   - modprobe tcp_bbr 2>/dev/null || true
@@ -52,147 +67,35 @@ bootcmd:
   - sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
   - sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
 
-  # --- CPU scheduler ---
-  - sysctl -w kernel.sched_autogroup_enabled=1 2>/dev/null || true
-  - sysctl -w kernel.sched_migration_cost_ns=5000000 2>/dev/null || true
-  - sysctl -w kernel.sched_min_granularity_ns=10000000 2>/dev/null || true
-  - sysctl -w kernel.sched_wakeup_granularity_ns=15000000 2>/dev/null || true
-  - sysctl -w kernel.sched_cfs_bandwidth_slice_us=5000 2>/dev/null || true
-
   # --- VM memory ---
+  # (vm.overcommit_memory left at default so the kernel can refuse bad allocations)
   - sysctl -w vm.dirty_ratio=5 2>/dev/null || true
   - sysctl -w vm.dirty_background_ratio=1 2>/dev/null || true
   - sysctl -w vm.min_free_kbytes=16384 2>/dev/null || true
-  - sysctl -w vm.overcommit_memory=1 2>/dev/null || true
-
-  # --- ZRAM ---
-  - modprobe zram 2>/dev/null || true
-  - echo 536870912 > /sys/block/zram0/disksize 2>/dev/null || true
-  - mkswap /dev/zram0 2>/dev/null || true
-  - swapon /dev/zram0 2>/dev/null || true
-  - sysctl -w vm.swappiness=10 2>/dev/null || true
   - sysctl -w vm.vfs_cache_pressure=50 2>/dev/null || true
 
-write_files:
-  - path: /tmp/install-tailscale.sh
-    permissions: "0755"
-    owner: root:root
-    content: |
-      #!/bin/bash
-      set -euo pipefail
-      VERSION="$1"
-      DEST="$2"
-      TMPDIR="$${TMPDIR:-/var/tmp}"
-      dirname="tailscale_$${VERSION}_amd64"
-      tarname="$${dirname}.tgz"
-      if [[ ! -e "$TMPDIR/$tarname" ]]; then
-        mkdir -p "$TMPDIR"
-        curl -fsSLo "$TMPDIR/$tarname" \
-          "https://pkgs.tailscale.com/stable/$tarname"
-      fi
-      mkdir -p "$DEST"
-      tar -xzf "$TMPDIR/$tarname" -C "$DEST" --strip-components=1 \
-        "$${dirname}/tailscale" "$${dirname}/tailscaled"
-      chmod +x "$DEST/tailscale" "$DEST/tailscaled"
+  # --- Transparent hugepages: only when apps ask (avoids bloat on 1 GB) ---
+  - echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+  - echo madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
 
-  - path: /etc/systemd/system/tailscaled.service
-    permissions: "0644"
-    owner: root:root
-    content: |
-      [Unit]
-      Description=Tailscale node agent
-      Wants=network-pre.target
-      After=network-pre.target
-      Before=network.target
-
-      [Service]
-      Type=notify
-      ExecStartPre=/var/lib/docker/tailscale-bin/tailscaled --cleanup
-      ExecStart=/var/lib/docker/tailscale-bin/tailscaled \
-        --state=/var/lib/tailscale/tailscaled.state \
-        --socket=/run/tailscale/tailscaled.sock \
-        --port=41641
-      ExecStopPost=/var/lib/docker/tailscale-bin/tailscaled --cleanup
-      Restart=on-failure
-      RestartSec=5
-      RuntimeDirectory=tailscale
-      RuntimeDirectoryMode=0755
-      StateDirectory=tailscale
-      StateDirectoryMode=0750
-      CacheDirectory=tailscale
-      CacheDirectoryMode=0750
-      # free-tier e2-micro: keep tailscaled from starving the VM (esp. on restart/update)
-      Nice=10
-      CPUWeight=50
-      CPUQuota=20%
-      IOWeight=10
-      CPUSchedulingPolicy=batch
-      MemoryHigh=48M
-      MemoryMax=80M
-      Environment=GOGC=40
-      Environment=TS_NO_LOGS_NO_SUPPORT=true
-      Environment=GOMEMLIMIT=40MiB
-
-      [Install]
-      WantedBy=multi-user.target
-
-  - path: /etc/systemd/system/containers.service
-    permissions: "0644"
-    owner: root:root
-    content: |
-      [Unit]
-      Description=Portainer
-      After=docker.service network-online.target
-      Requires=docker.service
-      Wants=network-online.target
-
-      [Service]
-      Type=oneshot
-      RemainAfterExit=yes
-      ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/run/docker.sock ] && exit 0; sleep 1; done; exit 1'
-      ExecStart=/usr/bin/docker run -d --name portainer --restart always \
-        --network=host \
-        --cpus 0.11 --cpu-shares 288 \
-        --memory 192m --memory-swap 192m \
-        -v /var/run/docker.sock:/var/run/docker.sock \
-        -v portainer_data:/data \
-        --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
-        portainer/portainer-ce:latest \
-        --snapshot-interval=15m
-      ExecStop=/bin/sh -c 'docker rm -f portainer || true'
-
-      [Install]
-      WantedBy=multi-user.target
+  # --- ZRAM (zstd, ~1 GB virtual; only uses RAM as it fills) ---
+  - modprobe zram 2>/dev/null || true
+  - swapoff /dev/zram0 2>/dev/null || true
+  - echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+  - echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+  - echo 1073741824 > /sys/block/zram0/disksize 2>/dev/null || true
+  - mkswap /dev/zram0 2>/dev/null || true
+  - swapon -p 100 /dev/zram0 2>/dev/null || true
+  - sysctl -w vm.swappiness=100 2>/dev/null || true
+  - sysctl -w vm.page-cluster=0 2>/dev/null || true
 
 runcmd:
   - sed -i -e '/^AddressFamily/d' /etc/ssh/sshd_config
   - systemctl reload sshd.service || true
 
-  - mkdir -p /var/lib/tailscale
-  - chmod 700 /var/lib/tailscale
-  - mkdir -p /run/tailscale
-  - chmod 755 /run/tailscale
+  # --- Apply journald size limits ---
+  - systemctl restart systemd-journald || true
 
-  - mkdir -p /var/lib/docker/tailscale-bin
-  - |
-    TS_VERSION=$(curl -fsSL https://pkgs.tailscale.com/stable/ \
-      | grep -oE 'tailscale_[0-9]+\.[0-9]+\.[0-9]+_amd64\.tgz' \
-      | sort -V | tail -1 \
-      | sed -E 's/tailscale_([0-9]+\.[0-9]+\.[0-9]+)_amd64\.tgz/\1/')
-    [ -n "$TS_VERSION" ] || { echo "cannot determine latest Tailscale version" >&2; exit 1; }
-    TMPDIR=/var/tmp nice -n 19 $(command -v ionice >/dev/null && echo "ionice -c3") bash /tmp/install-tailscale.sh "$TS_VERSION" /var/lib/docker/tailscale-bin
-
-  - systemctl daemon-reload
-  - systemctl enable tailscaled.service
-  - systemctl start tailscaled.service
-  - sleep 5
-
-  - /var/lib/docker/tailscale-bin/tailscale up \
-      --authkey=${tailscale_auth_key} \
-      --hostname=gcp-free-tier-vm \
-      --advertise-tags=tag:home \
-      --accept-dns=true \
-      --accept-routes=false
-
-  - systemctl enable containers.service
-  - systemctl start containers.service
+  # --- Docker ---
+  - systemctl enable docker.service
+  - systemctl start docker.service
