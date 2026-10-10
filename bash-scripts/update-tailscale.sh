@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-TS_BIN_DIR="/var/lib/docker/tailscale-bin"
+TS_BIN_DIR="${TS_BIN_DIR:-}"
 TS_SOCKET="/run/tailscale/tailscaled.sock"
 TS_CACHE_DIR="/var/tmp"
 TS_VERSION="${TS_VERSION:-}"
@@ -17,7 +17,15 @@ command -v ionice >/dev/null 2>&1 && ionice -c3 -p $$ 2>/dev/null || true
 
 echo "[*] update-tailscale start"
 
-[ -x "${TS_BIN_DIR}/tailscaled" ] || { echo "[x] ${TS_BIN_DIR}/tailscaled not found; run cloud-init first" >&2; exit 1; }
+# Locate the install: cloud-init uses /var/lib/docker/tailscale-bin, init-tailscale.sh uses /var/lib/cloud/tailscale-bin
+if [ -z "$TS_BIN_DIR" ]; then
+  UNIT_BIN=$(systemctl show tailscaled.service -p ExecStart 2>/dev/null | grep -oE "path=[^ ;]+tailscaled" | head -1 | cut -d= -f2 || true)
+  for d in "${UNIT_BIN:+$(dirname "$UNIT_BIN")}" /var/lib/docker/tailscale-bin /var/lib/cloud/tailscale-bin; do
+    if [ -n "$d" ] && [ -x "$d/tailscaled" ]; then TS_BIN_DIR="$d"; break; fi
+  done
+fi
+[ -n "$TS_BIN_DIR" ] && [ -x "${TS_BIN_DIR}/tailscaled" ] || { echo "[x] tailscaled binary not found; run cloud-init or init-tailscale first" >&2; exit 1; }
+echo "[+] using ${TS_BIN_DIR}"
 
 # --- Target version ---
 if [ -z "$TS_VERSION" ]; then
