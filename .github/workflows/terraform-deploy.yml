@@ -262,7 +262,11 @@ jobs:
   terraform-apply:
     name: "Apply (${{ matrix.dir }})"
     needs: [plan-results]
+    # !cancelled() is required: without a status function GitHub adds an
+    # implicit success(), which checks every ancestor job (including the
+    # failed terraform-plan leg) and would skip this job.
     if: |
+      !cancelled() &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.plan-results.result == 'success' &&
