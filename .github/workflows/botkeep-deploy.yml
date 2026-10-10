@@ -1,16 +1,51 @@
 name: Botkeep Deploy (reusable)
 
-# Reusable workflow: sync a GitHub repo/branch into a Botkeep workload (botkeep.cloud)
-# and wait for the operation to finish.
+# Reusable workflow: upsert a Botkeep workload (botkeep.cloud) and sync a GitHub repo/folder into it.
+# The workload is identified by name (default: the synced folder name, else the repo name).
+# If no workload with that name exists it is created, then the sync runs.
 # Usage from another repo: see github-action-templates/botkeep-deploy-caller.yml
 
 on:
   workflow_call:
     inputs:
-      workload_id:
-        description: Botkeep workload (bot) ID
+      name:
+        description: Workload name used as identity. Defaults to the basename of `directory`, else the repo name
         type: string
-        required: true
+        default: ""
+      workload_id:
+        description: Explicit workload ID (skips the lookup by name and never creates)
+        type: string
+        default: ""
+      create_if_missing:
+        description: Create the workload when no workload with `name` exists
+        type: boolean
+        default: true
+      platform:
+        description: discord, telegram or general (create only)
+        type: string
+        default: general
+      runtime:
+        description: Runtime for a new workload, e.g. node (create only)
+        type: string
+        default: node
+      runtime_version:
+        description: Runtime version for a new workload (create only)
+        type: string
+        default: "22"
+      start_command:
+        description: Start command for a new workload (create only)
+        type: string
+        default: npm install --no-audit --no-fund && npm start
+      memory_mb:
+        type: number
+        default: 1024
+      cpu_percent:
+        description: Multiple of 5
+        type: number
+        default: 50
+      storage_mb:
+        type: number
+        default: 1024
       repository:
         description: Repository to sync (owner/name). Defaults to the calling repo
         type: string
@@ -28,7 +63,7 @@ on:
         type: string
         default: merge
       directory:
-        description: Target directory (only for mode=folder)
+        description: Repo folder to sync (only for mode=folder)
         type: string
         default: ""
       restart:
@@ -36,19 +71,19 @@ on:
         type: boolean
         default: true
       confirmation:
-        description: Confirmation string required by the sync endpoint (usually the workload name)
+        description: Confirmation string for the sync endpoint. Defaults to the workload name
         type: string
-        required: true
+        default: ""
       base_url:
         type: string
         default: https://botkeep.cloud
       timeout_seconds:
-        description: Max time to wait for the operation
+        description: Max time to wait for each operation
         type: number
         default: 600
     secrets:
       BOTKEEP_API_KEY:
-        description: Botkeep developer API key (scopes deploy:write, workloads:read, settings:read)
+        description: Botkeep API key (scopes workloads:read, workloads:create, deploy:write, settings:read)
         required: true
 
 permissions:
@@ -57,32 +92,43 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     concurrency:
-      group: botkeep-deploy-${{ inputs.workload_id }}
+      group: botkeep-deploy-${{ inputs.workload_id || inputs.name || inputs.directory || github.repository }}
       cancel-in-progress: false
     env:
       API: ${{ inputs.base_url }}/api/v1/developer
       WID: ${{ inputs.workload_id }}
+      NAME_IN: ${{ inputs.name }}
+      CREATE: ${{ inputs.create_if_missing }}
+      PLATFORM: ${{ inputs.platform }}
+      RUNTIME: ${{ inputs.runtime }}
+      RUNTIME_VERSION: ${{ inputs.runtime_version }}
+      START_COMMAND: ${{ inputs.start_command }}
+      MEMORY_MB: ${{ inputs.memory_mb }}
+      CPU_PERCENT: ${{ inputs.cpu_percent }}
+      STORAGE_MB: ${{ inputs.storage_mb }}
       REPO: ${{ inputs.repository || github.repository }}
       BRANCH: ${{ inputs.branch || github.ref_name }}
       ACCESS: ${{ inputs.access }}
       MODE: ${{ inputs.mode }}
       DIRECTORY: ${{ inputs.directory }}
       RESTART: ${{ inputs.restart }}
-      CONFIRMATION: ${{ inputs.confirmation }}
+      CONFIRMATION_IN: ${{ inputs.confirmation }}
       TIMEOUT: ${{ inputs.timeout_seconds }}
+      REPO_NAME: ${{ github.event.repository.name }}
       BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
     steps:
-      - name: Sync repository into Botkeep workload
+      - name: Upsert workload and sync repository
         shell: bash
         run: |
           set -euo pipefail
           echo "::add-mask::$BOTKEEP_API_KEY"
-
-          [ -n "$WID" ] || { echo "::error::workload_id is empty - set the repo variable (Settings > Secrets and variables > Actions > Variables)"; exit 1; }
-          [ -n "$CONFIRMATION" ] || { echo "::error::confirmation is empty - set the workload name variable"; exit 1; }
           [ -n "$BOTKEEP_API_KEY" ] || { echo "::error::BOTKEEP_API_KEY secret is not set"; exit 1; }
+
+          NAME="${NAME_IN:-${DIRECTORY:+$(basename "$DIRECTORY")}}"
+          NAME="${NAME:-$REPO_NAME}"
+          CONFIRMATION="${CONFIRMATION_IN:-$NAME}"
 
           call() { # method path [json-body] [idempotency-key]
             local m="$1" p="$2" body="${3:-}" key="${4:-}" args=()
@@ -99,14 +145,69 @@ jobs:
             printf '%s' "$out"
           }
 
+          idem() { printf 'gh%sx%sx%s%s' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$1" "$(openssl rand -hex 6)"; }
+
+          wait_op() { # operation-id
+            local op="$1" st status deadline=$((SECONDS + TIMEOUT))
+            while :; do
+              st=$(call GET "/operations/${op}")
+              status=$(jq -r '(.status // .state // "unknown") | ascii_downcase' <<<"$st")
+              echo "    ${op}: ${status}"
+              case "$status" in
+                succeeded|success|completed|complete|done|ready) return 0 ;;
+                failed|failure|error|cancelled|canceled) echo "::error::operation ${op} ${status}: $st"; return 1 ;;
+              esac
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op}"; return 1; }
+              sleep 5
+            done
+          }
+
+          find_id() { # echoes the workload id whose name == $NAME (empty if none)
+            local cursor="" page items next id
+            while :; do
+              page=$(call GET "/workloads?limit=100${cursor:+&cursor=${cursor}}")
+              items=$(jq -c '(if type=="array" then . else (.items // .workloads // .data // .results // []) end)' <<<"$page")
+              id=$(jq -r --arg n "$NAME" 'map(select((.name // "") == $n)) | .[0] | (.id // .workloadId // empty)' <<<"$items")
+              [ -z "$id" ] || { echo "$id"; return 0; }
+              next=$(jq -r '(.nextCursor // .next_cursor // .cursor // empty) | tostring' <<<"$page" 2>/dev/null || true)
+              { [ -n "$next" ] && [ "$next" != "$cursor" ]; } || return 0
+              cursor="$next"
+            done
+          }
+
+          # --- Upsert: lookup by name, create when missing ---
+          if [ -z "$WID" ]; then
+            echo "[>] looking up workload '${NAME}'"
+            WID=$(find_id)
+            if [ -z "$WID" ]; then
+              [ "$CREATE" = "true" ] || { echo "::error::workload '${NAME}' not found and create_if_missing=false"; exit 1; }
+              echo "[>] workload '${NAME}' not found, creating"
+              body=$(jq -n --arg name "$NAME" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
+                --arg rv "$RUNTIME_VERSION" --arg sc "$START_COMMAND" \
+                --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
+                '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
+                  sourceType:"blank", startCommand:$sc,
+                  resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}')
+              resp=$(call POST "/workloads" "$body" "$(idem create)")
+              WID=$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' <<<"$resp")
+              op=$(jq -r '.operationId // .operation_id // .operation.id // empty' <<<"$resp")
+              [ -z "$op" ] || wait_op "$op"
+              [ -n "$WID" ] || WID=$(find_id)
+              [ -n "$WID" ] || { echo "::error::created workload but could not resolve its id: $resp"; exit 1; }
+              echo "[+] created workload ${WID}"
+            else
+              echo "[+] found workload ${WID}"
+            fi
+          fi
+          echo "workload: ${NAME} (${WID})"
+
+          # --- Sync ---
           echo "[>] reading current revision"
           cur=$(call GET "/workloads/${WID}/github")
           revision=$(jq -r '.revision // .data.revision // .source.revision // empty' <<<"$cur")
-          [ -n "$revision" ] || { echo "::error::no revision in GET /github response: $cur"; exit 1; }
+          [ -n "$revision" ] || { echo "::error::no revision in GET /github response: $(printf '%s' "$cur" | head -c 300)"; exit 1; }
 
-          # Idempotency-Key / requestId must match ^[A-Za-z0-9_-]{16,64}$
-          req="gh${GITHUB_RUN_ID}x${GITHUB_RUN_ATTEMPT}x$(openssl rand -hex 6)"
-
+          req=$(idem sync)
           body=$(jq -n \
             --arg repository "$REPO" --arg branch "$BRANCH" --arg access "$ACCESS" \
             --arg mode "$MODE" --arg directory "$DIRECTORY" \
@@ -116,25 +217,12 @@ jobs:
               directory:$directory, autoPull:false, revision:$revision,
               confirmation:$confirmation, requestId:$requestId, restart:$restart}')
 
-          echo "[>] syncing ${REPO}@${BRANCH} -> workload ${WID}"
+          echo "[>] syncing ${REPO}@${BRANCH} (${DIRECTORY:-/}) -> ${NAME}"
           resp=$(call POST "/workloads/${WID}/github/sync" "$body" "$req")
           op=$(jq -r '.operationId // .operation_id // .operation.id // .id // empty' <<<"$resp")
           if [ -z "$op" ]; then
-            echo "[!] no operation id returned; response: $resp"
+            echo "[!] no operation id returned; response: $(printf '%s' "$resp" | head -c 300)"
             exit 0
           fi
-
-          echo "[>] waiting for operation ${op}"
-          deadline=$((SECONDS + TIMEOUT))
-          while :; do
-            st=$(call GET "/operations/${op}")
-            status=$(jq -r '(.status // .state // "unknown") | ascii_downcase' <<<"$st")
-            echo "    status: ${status}"
-            case "$status" in
-              succeeded|success|completed|complete|done|ready) echo "[+] deploy done"; break ;;
-              failed|failure|error|cancelled|canceled)
-                echo "::error::operation ${op} ${status}: $st"; exit 1 ;;
-            esac
-            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out after ${TIMEOUT}s"; exit 1; }
-            sleep 5
-          done
+          wait_op "$op"
+          echo "[+] deploy done"

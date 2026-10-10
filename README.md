@@ -84,12 +84,12 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 
 #### Auto-deploy to Botkeep
 
-Use the reusable workflow from any project to sync a branch into a Botkeep workload on every push.
+Use the reusable workflow from any project to upsert a Botkeep workload and sync a branch (or a repo folder) into it on every push. The workload is identified by **name**: the basename of `directory` when set, else the repo name (override with `name`). If no workload with that name exists it is created first.
 
-1. In the Botkeep panel, create an API key with scopes `deploy:write`, `workloads:read` and `settings:read`, and note your workload ID and name.
+1. In the Botkeep panel, create an API key with scopes `workloads:read`, `workloads:create`, `deploy:write` and `settings:read`.
 2. In the target repo, add the API key as a secret named `BOTKEEP_API_KEY` (Settings → Secrets and variables → Actions).
-3. Copy [`github-action-templates/botkeep-deploy-caller.yml`](github-action-templates/botkeep-deploy-caller.yml) to `.github/workflows/deploy.yml` in that repo and set `workload_id` and `confirmation` (the workload name).
-4. Push to `main` (or run the workflow manually). The job reads the workload's current revision, triggers `POST /github/sync`, and polls the operation until it succeeds or fails.
+3. Copy [`github-action-templates/botkeep-deploy-caller.yml`](github-action-templates/botkeep-deploy-caller.yml) to `.github/workflows/deploy.yml` in that repo.
+4. Push to `main` (or run the workflow manually). The job looks up the workload by name, creates it if missing, triggers `POST /github/sync`, and polls the operation until it succeeds or fails.
 
 Minimal caller:
 
@@ -98,24 +98,29 @@ jobs:
   deploy:
     uses: sudtanj/infrastructure-tools/.github/workflows/botkeep-deploy.yml@main
     with:
-      workload_id: "YOUR_WORKLOAD_ID"
-      confirmation: "YOUR_WORKLOAD_NAME"
+      directory: botkeep-my-app   # workload name = botkeep-my-app
+      mode: folder
     secrets:
       BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
 ```
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `workload_id` (required) | | Botkeep workload ID |
-| `confirmation` (required) | | Confirmation string for the sync endpoint (workload name) |
+| `name` | folder / repo name | Workload name used as identity |
+| `workload_id` | | Explicit ID: skips lookup by name and never creates |
+| `create_if_missing` | `true` | Create the workload when the name isn't found |
+| `platform` / `runtime` / `runtime_version` | `general` / `node` / `22` | Used only on create |
+| `start_command` | `npm install --no-audit --no-fund && npm start` | Used only on create |
+| `memory_mb` / `cpu_percent` / `storage_mb` | `1024` / `50` / `1024` | Used only on create |
 | `repository` | calling repo | `owner/name` to sync |
 | `branch` | triggering ref | Branch to deploy |
 | `access` | `public` | `public`, or `connection` for private repos (needs a GitHub connection linked in Botkeep) |
 | `mode` | `merge` | `merge`, `replace` or `folder` |
-| `directory` | | Target directory (only for `mode: folder`) |
+| `directory` | | Repo folder to sync (only for `mode: folder`) |
 | `restart` | `true` | Restart the workload after sync |
+| `confirmation` | workload name | Confirmation string for the sync endpoint |
 | `base_url` | `https://botkeep.cloud` | API host |
-| `timeout_seconds` | `600` | Max wait for the operation |
+| `timeout_seconds` | `600` | Max wait per operation |
 
 Notes: if the repo calling this workflow is private, the calling repo must be allowed to use workflows from this one (Settings → Actions → Access on `infrastructure-tools`). Pin `@main` to a tag or SHA for stability.
 

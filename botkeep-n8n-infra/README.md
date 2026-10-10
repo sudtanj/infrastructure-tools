@@ -13,20 +13,17 @@ Minimal [n8n](https://n8n.io) deployment on [botkeep.cloud](https://botkeep.clou
 
 ## Setup
 
-1. **Create the workload** in the Botkeep panel: platform `general`, runtime Node.js 20+ (or 22), source `blank` or this repo.
-   Start command: `npm install --no-audit --no-fund && npm start`.
-   Resources: at least 512 MB RAM (1 GB recommended), 50% CPU, 1 GB storage. SQLite is used, so no database is needed.
-2. **Set environment variables**:
+1. **GitHub**: add the secret `BOTKEEP_API_KEY` (scopes `workloads:read`, `workloads:create`, `deploy:write`, `settings:read`, `environment:write`) in Settings → Secrets and variables → Actions.
+2. **Deploy**: push a change under `botkeep-n8n-infra/` to `main`, or run *Deploy n8n to Botkeep* manually.
+   The workload is identified by the folder name (`botkeep-n8n-infra`). If it doesn't exist it is created
+   (Node 22, 1 GB RAM, 50% CPU, 1 GB storage, start command `npm install --no-audit --no-fund && npm start`),
+   then only this folder is synced (`mode: folder`) and the workload restarts. Edit the `with:` block in the workflow to change the sizing.
+3. **Set environment variables** (after the workload exists; use the workload ID from the panel):
    ```bash
    cp botkeep-n8n-infra/.env.example .env   # fill in WEBHOOK_URL and N8N_ENCRYPTION_KEY
    BOTKEEP_API_KEY=... WORKLOAD_ID=... botkeep-n8n-infra/scripts/set-env.sh .env
    ```
-   Keep `N8N_ENCRYPTION_KEY` backed up: losing it makes stored credentials unreadable.
-3. **Configure GitHub** (Settings → Secrets and variables → Actions):
-   - Secret `BOTKEEP_API_KEY` (scopes `deploy:write`, `workloads:read`, `settings:read`, `environment:write`)
-   - Variables `BOTKEEP_N8N_WORKLOAD_ID` and `BOTKEEP_N8N_WORKLOAD_NAME`
-4. **Deploy**: push a change under `botkeep-n8n-infra/` to `main`, or run *Deploy n8n to Botkeep* manually.
-   The workflow syncs only this folder (`mode: folder`) and restarts the workload.
+   Keep `N8N_ENCRYPTION_KEY` backed up: losing it makes stored credentials unreadable. Restart the workload after changing variables.
 
 ## Notes
 
