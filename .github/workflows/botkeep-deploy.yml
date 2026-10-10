@@ -149,7 +149,7 @@ jobs:
           idem() { printf 'gh%sx%sx%s%s' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$1" "$(openssl rand -hex 6)"; }
 
           wait_op() { # operation-id
-            local op="$1" st status last="" deadline=$((SECONDS + TIMEOUT))
+            local op="$1" watch="${2:-}" st status last="" wlast="" wst deadline=$((SECONDS + TIMEOUT))
             while :; do
               st=$(call GET "/operations/${op}")
               # Response shape: {operation:{phase}, queueState, confirmed, runtimeState}
@@ -171,6 +171,10 @@ jobs:
                   echo "::error::operation ${op} ${status}: $(printf '%s' "$st" | head -c 600)"; return 1 ;;
               esac
               [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op} (last: ${status}); response: $(printf '%s' "$st" | head -c 600)"; return 1; }
+              if [ -n "$watch" ]; then
+                wst=$(call GET "/workloads/${watch}/github" 2>/dev/null | jq -c . 2>/dev/null | head -c 500 || true)
+                if [ -n "$wst" ] && [ "$wst" != "$wlast" ]; then echo "    source: ${wst}"; wlast="$wst"; fi
+              fi
               sleep 5
             done
           }
@@ -249,5 +253,5 @@ jobs:
             echo "[!] no operation id returned; response: $(printf '%s' "$resp" | head -c 300)"
             exit 0
           fi
-          wait_op "$op"
+          wait_op "$op" "$WID"
           echo "[+] deploy done"
