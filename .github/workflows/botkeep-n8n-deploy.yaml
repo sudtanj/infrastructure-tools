@@ -1,5 +1,9 @@
 name: Deploy n8n to Botkeep
 
+# Botkeep runs on Pterodactyl, so we use the community upload action:
+# https://github.com/rexlManu/pterodactyl-upload-action
+# Needs the secret PTERODACTYL_API_KEY (a Pterodactyl *client* API key, ptlc_...).
+
 on:
   push:
     branches: [main]
@@ -7,18 +11,29 @@ on:
       - "botkeep-*/**"
   workflow_dispatch:
 
+env:
+  APP_DIR: botkeep-n8n-infra
+
 jobs:
   deploy:
-    # Workload name = folder name (botkeep-n8n-infra); created on first run if missing.
-    uses: ./.github/workflows/botkeep-deploy.yml
-    with:
-      directory: botkeep-n8n-infra
-      method: upload   # push only the files inside this folder
-      runtime: nodejs
-      runtime_version: "22"
-      start_command: npm install --no-audit --no-fund && npm start
-      memory_mb: 1024
-      cpu_percent: 50
-      storage_mb: 1024
-    secrets:
-      BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ${{ env.APP_DIR }}
+
+      - name: Package only the app folder
+        run: |
+          cd "$APP_DIR"
+          zip -qr "$GITHUB_WORKSPACE/app.zip" . -x 'node_modules/*' '.env' '.n8n/*' '.git/*'
+
+      - name: Upload, extract and restart
+        uses: rexlmanu/pterodactyl-upload-action@v2.1
+        with:
+          panel-host: ${{ vars.PTERO_PANEL_HOST || 'https://panel.botkeep.cloud' }}
+          api-key: ${{ secrets.PTERODACTYL_API_KEY }}
+          server-id: ${{ vars.PTERO_SERVER_ID || 'dc848c77' }}
+          source: app.zip
+          target: ./
+          decompress-target: true
+          restart: true
