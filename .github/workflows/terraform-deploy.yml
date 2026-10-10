@@ -133,6 +133,8 @@ jobs:
 
   # -------------------------------------------------------------
   # Job 2: Format, Init & Plan
+  # Each successful leg uploads a marker so apply can proceed for
+  # healthy folders even if other folders failed to plan.
   # -------------------------------------------------------------
   terraform-plan:
     name: "Plan (${{ matrix.dir }})"
@@ -199,26 +201,80 @@ jobs:
         run: terraform plan -input=false -no-color
         working-directory: ${{ matrix.dir }}
 
+      # Only reached if every step above succeeded.
+      - name: Mark Plan Success
+        run: |
+          mkdir -p plan-ok
+          echo "${{ matrix.dir }}" > plan-ok/marker.txt
+
+      - name: Upload Plan Marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-ok-${{ steps.workspace.outputs.workspace_name }}
+          path: plan-ok/marker.txt
+          retention-days: 1
+
+  # -------------------------------------------------------------
+  # Job 2b: Collect folders whose plan succeeded
+  # -------------------------------------------------------------
+  plan-results:
+    name: "Collect Successful Plans"
+    needs: [detect-directories, terraform-plan]
+    # always() lets this run even if some plan legs failed.
+    if: |
+      always() &&
+      needs.detect-directories.result == 'success' &&
+      needs.detect-directories.outputs.matrix != '' &&
+      needs.detect-directories.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.collect.outputs.matrix }}
+    steps:
+      - name: Download Plan Markers
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: plan-ok-*
+          path: markers
+
+      - name: Build Apply Matrix
+        id: collect
+        run: |
+          shopt -s nullglob
+          DIRS=()
+          for f in markers/*/marker.txt; do
+            DIRS+=("$(cat "$f")")
+          done
+          if [ ${#DIRS[@]} -eq 0 ]; then
+            echo "No successful plans; nothing to apply."
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+          else
+            MATRIX=$(printf '%s\n' "${DIRS[@]}" | sort -u | jq -R . | jq -s -c .)
+            echo "Applying: $MATRIX"
+            echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          fi
+
   # -------------------------------------------------------------
   # Job 3: Protected Apply (manual approval via "production" env)
+  # Runs only for folders whose plan succeeded.
   # -------------------------------------------------------------
   terraform-apply:
     name: "Apply (${{ matrix.dir }})"
-    needs: [detect-directories, terraform-plan]
+    needs: [plan-results]
     if: |
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      needs.detect-directories.outputs.matrix != '' &&
-      needs.detect-directories.outputs.matrix != '[]'
+      needs.plan-results.result == 'success' &&
+      needs.plan-results.outputs.matrix != '' &&
+      needs.plan-results.outputs.matrix != '[]'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # See terraform-plan: fromJson('') on a failed detect-directories
-        # reports "empty input" instead of the failure that caused it.
-        dir: ${{ fromJson(needs.detect-directories.outputs.matrix || '[]') }}
+        dir: ${{ fromJson(needs.plan-results.outputs.matrix || '[]') }}
 
     steps:
       - name: Checkout Code
