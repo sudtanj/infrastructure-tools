@@ -1,0 +1,22 @@
+# Copy to <your-project>/.github/workflows/deploy.yml
+# Requires repo secret BOTKEEP_API_KEY (Botkeep API key with scopes:
+# deploy:write, workloads:read, settings:read) and the workload ID from the Botkeep panel.
+name: Deploy to Botkeep
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    # Pin a tag or SHA instead of @main for stability.
+    uses: sudtanj/infrastructure-tools/.github/workflows/botkeep-deploy.yml@main
+    with:
+      workload_id: "YOUR_WORKLOAD_ID"
+      confirmation: "YOUR_WORKLOAD_NAME"
+      # access: connection     # private repos (needs GitHub connection linked in Botkeep)
+      # mode: replace          # merge (default) | replace | folder
+      # restart: true
+    secrets:
+      BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}

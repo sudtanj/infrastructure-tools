@@ -1,0 +1,136 @@
+name: Botkeep Deploy (reusable)
+
+# Reusable workflow: sync a GitHub repo/branch into a Botkeep workload (botkeep.cloud)
+# and wait for the operation to finish.
+# Usage from another repo: see github-action-templates/botkeep-deploy-caller.yml
+
+on:
+  workflow_call:
+    inputs:
+      workload_id:
+        description: Botkeep workload (bot) ID
+        type: string
+        required: true
+      repository:
+        description: Repository to sync (owner/name). Defaults to the calling repo
+        type: string
+        default: ""
+      branch:
+        description: Branch to deploy. Defaults to the triggering ref
+        type: string
+        default: ""
+      access:
+        description: public or connection (linked GitHub connection for private repos)
+        type: string
+        default: public
+      mode:
+        description: merge, replace or folder
+        type: string
+        default: merge
+      directory:
+        description: Target directory (only for mode=folder)
+        type: string
+        default: ""
+      restart:
+        description: Restart the workload after sync
+        type: boolean
+        default: true
+      confirmation:
+        description: Confirmation string required by the sync endpoint (usually the workload name)
+        type: string
+        required: true
+      base_url:
+        type: string
+        default: https://botkeep.cloud
+      timeout_seconds:
+        description: Max time to wait for the operation
+        type: number
+        default: 600
+    secrets:
+      BOTKEEP_API_KEY:
+        description: Botkeep developer API key (scopes deploy:write, workloads:read, settings:read)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: botkeep-deploy-${{ inputs.workload_id }}
+      cancel-in-progress: false
+    env:
+      API: ${{ inputs.base_url }}/api/v1/developer
+      WID: ${{ inputs.workload_id }}
+      REPO: ${{ inputs.repository || github.repository }}
+      BRANCH: ${{ inputs.branch || github.ref_name }}
+      ACCESS: ${{ inputs.access }}
+      MODE: ${{ inputs.mode }}
+      DIRECTORY: ${{ inputs.directory }}
+      RESTART: ${{ inputs.restart }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      TIMEOUT: ${{ inputs.timeout_seconds }}
+      BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
+    steps:
+      - name: Sync repository into Botkeep workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$BOTKEEP_API_KEY"
+
+          call() { # method path [json-body] [idempotency-key]
+            local m="$1" p="$2" body="${3:-}" key="${4:-}" args=()
+            args+=(-sS -X "$m" -H "Authorization: Bearer ${BOTKEEP_API_KEY}" -w '\n%{http_code}')
+            [ -n "$key" ]  && args+=(-H "Idempotency-Key: ${key}")
+            [ -n "$body" ] && args+=(-H 'Content-Type: application/json' -d "$body")
+            local out code
+            out=$(curl "${args[@]}" "${API}${p}")
+            code=${out##*$'\n'}; out=${out%$'\n'*}
+            if [[ ! "$code" =~ ^2 ]]; then
+              echo "::error::${m} ${p} -> HTTP ${code}: ${out}" >&2
+              return 1
+            fi
+            printf '%s' "$out"
+          }
+
+          echo "[>] reading current revision"
+          cur=$(call GET "/workloads/${WID}/github")
+          revision=$(jq -r '.revision // .data.revision // .source.revision // empty' <<<"$cur")
+          [ -n "$revision" ] || { echo "::error::no revision in GET /github response: $cur"; exit 1; }
+
+          # Idempotency-Key / requestId must match ^[A-Za-z0-9_-]{16,64}$
+          req="gh${GITHUB_RUN_ID}x${GITHUB_RUN_ATTEMPT}x$(openssl rand -hex 6)"
+
+          body=$(jq -n \
+            --arg repository "$REPO" --arg branch "$BRANCH" --arg access "$ACCESS" \
+            --arg mode "$MODE" --arg directory "$DIRECTORY" \
+            --arg revision "$revision" --arg confirmation "$CONFIRMATION" \
+            --arg requestId "$req" --argjson restart "$RESTART" \
+            '{repository:$repository, branch:$branch, access:$access, mode:$mode,
+              directory:$directory, autoPull:false, revision:$revision,
+              confirmation:$confirmation, requestId:$requestId, restart:$restart}')
+
+          echo "[>] syncing ${REPO}@${BRANCH} -> workload ${WID}"
+          resp=$(call POST "/workloads/${WID}/github/sync" "$body" "$req")
+          op=$(jq -r '.operationId // .operation_id // .operation.id // .id // empty' <<<"$resp")
+          if [ -z "$op" ]; then
+            echo "[!] no operation id returned; response: $resp"
+            exit 0
+          fi
+
+          echo "[>] waiting for operation ${op}"
+          deadline=$((SECONDS + TIMEOUT))
+          while :; do
+            st=$(call GET "/operations/${op}")
+            status=$(jq -r '(.status // .state // "unknown") | ascii_downcase' <<<"$st")
+            echo "    status: ${status}"
+            case "$status" in
+              succeeded|success|completed|complete|done|ready) echo "[+] deploy done"; break ;;
+              failed|failure|error|cancelled|canceled)
+                echo "::error::operation ${op} ${status}: $st"; exit 1 ;;
+            esac
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out after ${TIMEOUT}s"; exit 1; }
+            sleep 5
+          done
