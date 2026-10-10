@@ -80,6 +80,10 @@ jobs:
           set -euo pipefail
           echo "::add-mask::$BOTKEEP_API_KEY"
 
+          [ -n "$WID" ] || { echo "::error::workload_id is empty - set the repo variable (Settings > Secrets and variables > Actions > Variables)"; exit 1; }
+          [ -n "$CONFIRMATION" ] || { echo "::error::confirmation is empty - set the workload name variable"; exit 1; }
+          [ -n "$BOTKEEP_API_KEY" ] || { echo "::error::BOTKEEP_API_KEY secret is not set"; exit 1; }
+
           call() { # method path [json-body] [idempotency-key]
             local m="$1" p="$2" body="${3:-}" key="${4:-}" args=()
             args+=(-sS -X "$m" -H "Authorization: Bearer ${BOTKEEP_API_KEY}" -w '\n%{http_code}')
@@ -89,7 +93,7 @@ jobs:
             out=$(curl "${args[@]}" "${API}${p}")
             code=${out##*$'\n'}; out=${out%$'\n'*}
             if [[ ! "$code" =~ ^2 ]]; then
-              echo "::error::${m} ${p} -> HTTP ${code}: ${out}" >&2
+              echo "::error::${m} ${p} -> HTTP ${code}: $(printf '%s' "$out" | head -c 300)" >&2
               return 1
             fi
             printf '%s' "$out"
