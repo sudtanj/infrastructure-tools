@@ -22,6 +22,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── gcp-bash-script-runner.yaml   # Remote script execution via GCP IAP SSH
 │   ├── terraform-deploy.yml          # Format, plan, and protected apply for all HCP Terraform directories
 │   ├── terraform-free-tier-oci.yaml  # Scheduled OCI A1.Flex capacity-grab workflow
+│   ├── android-private-build.yaml    # Build/publish a private Capacitor Android app to Google Play
 │   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
@@ -79,6 +80,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`terraform-deploy.yml`**: Detects directories containing a Terraform `cloud {}` block, then runs formatting checks, initialization, plans, and protected applies for each detected workspace on pushes to `main` or manual dispatches.
 - **`terraform-free-tier-oci.yaml`**: Attempts one OCI instance `terraform apply` every 15 minutes, or manually on demand. It skips an instance already present in state and treats known capacity or throttling errors as a retryable miss.
 - **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (for example, `init-paseo-codex.sh` and `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
+- **`android-private-build.yaml`**: Polls a private repo, builds its Capacitor Android app on free public runners with redacted logs, uploads to Google Play and/or publishes a gpg-encrypted artifact. Setup in the file header.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
 - **`botkeep-n8n-deploy.yaml`**: Deploys `botkeep-n8n-infra/` to a [botkeep.cloud](https://botkeep.cloud) server (a Pterodactyl panel) using the community [`pterodactyl-upload-action`](https://github.com/rexlManu/pterodactyl-upload-action). Runs only when files under a `botkeep-*/` folder change. See [`botkeep-n8n-infra/README.md`](botkeep-n8n-infra/README.md).
 
