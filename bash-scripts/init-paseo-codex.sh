@@ -1,8 +1,7 @@
 #!/bin/bash
 # bash-scripts/init-paseo-codex.sh
 # Runs ON the VM via IAP SSH. Idempotent.
-# Target: GCP free-tier e2-micro (0.5 vCPU shared, 1 GB RAM)
-# Only ONE container is ever used: paseo-codex (no helper/alpine containers).
+# Target: GCP free-tier e2-micro (1 GB RAM). One container: paseo-codex.
 
 set -euo pipefail
 
@@ -12,12 +11,7 @@ CODEX_MODEL="${CODEX_MODEL:-}"
 CODEX_MAX_TOKEN="${CODEX_MAX_TOKEN:-8192}"
 GH_TOKEN="${GH_TOKEN:-}"
 
-# --- Claude Code (all optional; see original notes) -------------------
-# Auth option 1: subscription -> CLAUDE_CODE_OAUTH_TOKEN, or `claude /login`
-#                inside the container (persists in the paseo-home volume).
-# Auth option 2: API key (ANTHROPIC_API_KEY) or BYOK gateway
-#                (ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN).
-# Unset values are not forwarded, so they never appear as empty strings.
+# Claude Code auth (optional): OAuth token, API key, or BYOK gateway.
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
 ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}"
@@ -25,34 +19,21 @@ ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-}"
 CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 PASEO_PORT="${PASEO_PORT:-6767}"
-# Daemon listens on 0.0.0.0 (host network) - set a password so it isn't open.
 PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 
-# --- Resource caps (kernel-enforced via cgroups) ----------------------
-# Memory has a hard floor of 256 MB: anything lower gets bumped up.
-MIN_MEM_MB=256
-# 0.60 CPU: a higher cap lets session spawns burst and finish sooner; the low
-# --cpu-shares below still makes other services win when the CPU is contended.
-CPU_LIMIT="${CPU_LIMIT:-0.60}"
-# 640m: supervisor + worker + several Claude/Codex sessions are separate Node
-# processes, and the startup plugin burst spikes memory. 320m/448m were unstable.
-MEM_LIMIT="${MEM_LIMIT:-640m}"
-MEM_SWAP_LIMIT="${MEM_SWAP_LIMIT:-896m}"   # total memory+swap (small: swap burns CPU/IO)
+# --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
+# e2-micro = 1 GB RAM, shared core (0.25 vCPU sustained, bursts to 2).
+# CPU cap leaves headroom for the host; low --cpu-shares makes others win.
+# Container swap disabled (memory-swap == memory): a clean OOM-kill of the
+# container + auto-restart beats thrashing. Host gets its own swap below.
+CPU_LIMIT="${CPU_LIMIT:-0.75}"
+MEM_MB="${MEM_MB:-640}"
 PIDS_LIMIT="${PIDS_LIMIT:-256}"
-# --max-old-space-size applies PER Node process, so keep it modest.
 NODE_HEAP_MB="${NODE_HEAP_MB:-224}"
 HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
 
 IMAGE="sudtanj/paseo-codex:latest"
 CONTAINER_NAME="paseo-codex"
-
-to_mb() {
-  case "$1" in
-    *[gG]) echo $(( ${1%[gG]} * 1024 )) ;;
-    *[mM]) echo "${1%[mM]}" ;;
-    *)     echo "$1" ;;
-  esac
-}
 
 echo "[*] init start"
 
@@ -64,103 +45,86 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "[x] missing required env: ${missing[*]}" >&2
   exit 1
 fi
-echo "[+] env ok"
-if [ -z "$PASEO_PASSWORD" ]; then
-  echo "[!] PASEO_PASSWORD not set - daemon accepts unauthenticated connections on :${PASEO_PORT}" >&2
-fi
+[ -z "$PASEO_PASSWORD" ] && echo "[!] PASEO_PASSWORD not set - daemon is unauthenticated on :${PASEO_PORT}" >&2
 
-# --- Normalise memory settings (enforce 256 MB floor) ---
-MEM_MB=$(to_mb "$MEM_LIMIT")
-SWAP_MB=$(to_mb "$MEM_SWAP_LIMIT")
-if [ "$MEM_MB" -lt "$MIN_MEM_MB" ]; then
-  echo "[!] MEM_LIMIT ${MEM_LIMIT} below ${MIN_MEM_MB}m floor - using ${MIN_MEM_MB}m" >&2
-  MEM_MB=$MIN_MEM_MB
+# --- Host protection (idempotent, best-effort, never restarts sshd) ---
+# 1) Host swapfile so a memory spike doesn't hang the VM.
+if [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then
+  echo "[>] creating 1G host swapfile"
+  if sudo -n sh -c 'fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile' 2>/dev/null; then
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo -n tee -a /etc/fstab >/dev/null
+  else
+    echo "[!] swapfile creation failed (no sudo or no disk space)" >&2
+  fi
 fi
-[ "$SWAP_MB" -lt "$MEM_MB" ] && SWAP_MB=$MEM_MB       # memory+swap can't be < memory
-MEM_RES_MB=$(( MEM_MB * 80 / 100 ))                   # soft limit, always < hard limit
-HEAP_CAP=$(( MEM_MB * 60 / 100 ))                     # leave room for native/off-heap
-[ "$NODE_HEAP_MB" -gt "$HEAP_CAP" ] && NODE_HEAP_MB=$HEAP_CAP
+sudo -n sysctl -q vm.swappiness=10 2>/dev/null || true
+# 2) Make the kernel OOM-killer avoid sshd/tailscaled/docker (applies on their next restart).
+for svc in ssh sshd tailscaled docker; do
+  if systemctl cat "$svc" >/dev/null 2>&1; then
+    f="/etc/systemd/system/${svc}.service.d/oom.conf"
+    if [ ! -f "$f" ]; then
+      sudo -n mkdir -p "$(dirname "$f")" 2>/dev/null \
+        && printf '[Service]\nOOMScoreAdjust=-900\n' | sudo -n tee "$f" >/dev/null 2>&1 || true
+    fi
+  fi
+done
+sudo -n systemctl daemon-reload 2>/dev/null || true
+sudo -n systemctl enable docker >/dev/null 2>&1 || true
 
-# --- Always pull the latest image (before touching the running container) ---
-echo "[>] pulling latest ${IMAGE}"
+# --- Pull latest image before touching the running container ---
 PREV_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "none")
 if ! docker pull -q "$IMAGE" >/dev/null; then
-  echo "[x] docker pull ${IMAGE} failed - current container left untouched" >&2
+  echo "[x] docker pull failed - current container left untouched" >&2
   exit 1
 fi
 NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown")
-if [ "$PREV_ID" = "none" ]; then
-  echo "[+] image pulled (first pull on this VM)"
-elif [ "$PREV_ID" = "$NEW_ID" ]; then
-  echo "[+] image already up to date"
-else
-  echo "[+] image updated to a newer build"
-  docker image prune -f >/dev/null 2>&1 || true      # reclaim old layers only when changed
-fi
+[ "$PREV_ID" != "none" ] && [ "$PREV_ID" != "$NEW_ID" ] && docker image prune -f >/dev/null 2>&1 || true
 
-# --- Skip the restart if nothing changed ---
-# A hash of image digest + every setting is stored as a container label.
-# Same hash + running container = no recreate (saves CPU, avoids downtime).
+# --- Skip restart if nothing changed ---
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
-  "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" "$PASEO_PORT" "$PASEO_PASSWORD" \
-  "$CPU_LIMIT" "$MEM_MB" "$SWAP_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" \
+  "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
 RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
 
 if [ "$CUR_HASH" = "$CONFIG_HASH" ] && [ "$RUNNING" = "true" ]; then
-  echo "[+] config and image unchanged - container left running"
-  echo "[+] init done"
+  echo "[+] unchanged - container left running"
   exit 0
 fi
 
-# --- Recreate the single container ---
+# --- Recreate the container ---
 echo "[>] replacing $CONTAINER_NAME"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker volume create paseo-home      >/dev/null
 docker volume create paseo-workspace >/dev/null
 
-# Forward only the Claude Code vars that are actually set.
 claude_env=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
          ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD; do
-  if [ -n "${!v:-}" ]; then
-    claude_env+=(-e "$v=${!v}")
-  fi
+  [ -n "${!v:-}" ] && claude_env+=(-e "$v=${!v}")
 done
 
 # apparmor=unconfined is required for bwrap to create user namespaces.
-# CPU notes:
-#  - UV_THREADPOOL_SIZE=2 and a small semi-space keep GC/thread churn low.
-#  - Health check every 120s (each check spawns curl).
+# --restart always: restarts on crash, OOM kill, and Docker/VM reboot.
 docker run -d --name "$CONTAINER_NAME" --restart always \
   --label "init.hash=${CONFIG_HASH}" \
   --user 1000:1000 \
   --network=host \
   --cpus "$CPU_LIMIT" \
-  --cpu-shares 256 \
+  --cpu-shares 128 \
   --memory "${MEM_MB}m" \
-  --memory-reservation "${MEM_RES_MB}m" \
-  --memory-swap "${SWAP_MB}m" \
-  --memory-swappiness 30 \
+  --memory-reservation "$(( MEM_MB * 80 / 100 ))m" \
+  --memory-swap "${MEM_MB}m" \
   --pids-limit "$PIDS_LIMIT" \
-  --ulimit nofile=4096:4096 \
   --ulimit nproc=512:512 \
   --ulimit core=0 \
   --oom-score-adj 500 \
   --log-driver json-file \
   --log-opt max-size=5m \
   --log-opt max-file=2 \
-  --tmpfs /tmp:rw,nosuid,size=64m \
   --security-opt apparmor=unconfined \
-  --dns 2a00:1098:2b::1 \
-  --dns 2a01:4f9:c010:3f02::1 \
-  --health-cmd "curl -fsS --max-time 3 http://127.0.0.1:${PASEO_PORT}/api/health || exit 1" \
-  --health-interval=120s \
-  --health-retries=3 \
-  --health-start-period=90s \
-  --health-timeout=5s \
   -v paseo-home:/home/paseo \
   -v paseo-workspace:/workspace:rw \
   -e CODEX_BASE_URL="$CODEX_BASE_URL" \
@@ -180,11 +144,9 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e BASH_DEFAULT_TIMEOUT_MS=120000 \
   -e BASH_MAX_TIMEOUT_MS=600000 \
   ${claude_env[@]+"${claude_env[@]}"} \
-  "$IMAGE" \
-  >/dev/null 2>&1
+  "$IMAGE" >/dev/null 2>&1
 
-# --- Wait for the container to be up (poll instead of a fixed sleep) ---
-echo "[>] verifying container"
+# --- Wait until running ---
 STATE="missing"
 for _ in 1 2 3 4 5 6 7 8; do
   STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
@@ -198,10 +160,7 @@ if [ "$STATE" != "running" ]; then
 fi
 echo "[+] container running"
 
-# --- Seed Codex config INSIDE paseo-codex (no helper container) ---
-# Runs as root only to fix ownership; Codex reads config per session, so no
-# restart is needed. Stale SQLite state is wiped here too.
-echo "[>] seeding Codex config"
+# --- Seed Codex config + clear stale SQLite state ---
 docker exec -i -u 0 "$CONTAINER_NAME" sh -s >/dev/null 2>&1 <<'EOF' || echo "[!] codex config seeding failed" >&2
 set -e
 D=/home/paseo/.codex
@@ -220,82 +179,14 @@ stream_idle_timeout_ms = 300000
 TOML
 chown -R 1000:1000 "$D"
 EOF
-echo "[+] Codex config seeded, stale state cleared"
 
-# --- AppArmor check (host-side inspect, no exec) ---
-if docker inspect -f '{{.HostConfig.SecurityOpt}}' "$CONTAINER_NAME" 2>/dev/null | grep -q "apparmor=unconfined"; then
-  echo "[+] AppArmor is unconfined (bwrap can create namespaces)"
-else
-  echo "[!] AppArmor is NOT unconfined - bwrap may still fail" >&2
-fi
-
-# --- Claude Code auth: env-based paths need no exec at all ---
-if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-  echo "[+] Claude Code auth: subscription token (CLAUDE_CODE_OAUTH_TOKEN)"
-  CLAUDE_AUTH_DONE=1
-elif [ -n "$ANTHROPIC_API_KEY" ]; then
-  echo "[+] Claude Code auth: API-key billing (ANTHROPIC_API_KEY)"
-  CLAUDE_AUTH_DONE=1
-elif [ -n "$ANTHROPIC_AUTH_TOKEN" ] && [ -n "$ANTHROPIC_BASE_URL" ]; then
-  echo "[+] Claude Code auth: BYOK gateway (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL)"
-  CLAUDE_AUTH_DONE=1
-else
-  CLAUDE_AUTH_DONE=0
-fi
-
-# --- ONE exec for all in-container checks + heartbeat ---
-# (Each `docker exec` + `paseo` call starts a Node process, which is costly on
-# 0.5 vCPU, so everything is batched and paseo is invoked at most twice.)
-docker exec -e HEARTBEAT_CRON="$HEARTBEAT_CRON" -e CLAUDE_AUTH_DONE="$CLAUDE_AUTH_DONE" \
-  "$CONTAINER_NAME" sh -s 2>/dev/null <<'EOF' || true
-if touch /home/paseo/.codex/.writetest 2>/dev/null; then
-  rm -f /home/paseo/.codex/.writetest
-  echo "[+] .codex writable"
-else
-  echo "[x] .codex NOT writable"
-fi
-
-if [ "$CLAUDE_AUTH_DONE" != "1" ]; then
-  if [ -f /home/paseo/.claude/.credentials.json ]; then
-    echo "[+] Claude Code auth: stored claude /login credentials in paseo-home"
-  else
-    echo "[!] no Claude Code auth configured - set CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) as a repo secret, or run claude /login inside the container"
-  fi
-fi
-
-# Memory straight from cgroup (cgroup v2, then v1) - avoids `docker stats`.
-if [ -r /sys/fs/cgroup/memory.current ]; then
-  echo "[i] memory: $(( $(cat /sys/fs/cgroup/memory.current) / 1048576 )) MiB"
-elif [ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]; then
-  echo "[i] memory: $(( $(cat /sys/fs/cgroup/memory/memory.usage_in_bytes) / 1048576 )) MiB"
-fi
-
-if command -v paseo >/dev/null 2>&1; then
-  if paseo heartbeat ls 2>/dev/null | grep -q heartbeat; then
-    echo "[+] heartbeat exists"
-  elif paseo heartbeat create --cron "$HEARTBEAT_CRON" --name heartbeat \
-         "Check the current task state and continue with the next useful step." >/dev/null 2>&1; then
-    echo "[+] heartbeat created"
-  else
-    echo "[!] heartbeat creation failed - set it up manually inside an agent session"
-  fi
-fi
+# --- Heartbeat (single exec) ---
+docker exec -e HEARTBEAT_CRON="$HEARTBEAT_CRON" "$CONTAINER_NAME" sh -s >/dev/null 2>&1 <<'EOF' || true
+command -v paseo >/dev/null 2>&1 || exit 0
+paseo heartbeat ls 2>/dev/null | grep -q heartbeat && exit 0
+paseo heartbeat create --cron "$HEARTBEAT_CRON" --name heartbeat \
+  "Check the current task state and continue with the next useful step."
 EOF
-
-# --- Host-side status (cheap inspects only) ---
-echo "[i] health: $(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown)"
-echo "[i] network mode: $(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")"
-OOM_INFO=$(docker inspect -f '{{.State.OOMKilled}} restarts={{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
-echo "[i] oom-killed: ${OOM_INFO}"
-case "$OOM_INFO" in
-  true*) echo "[!] container was OOM-killed - host RAM is only 1 GB, so close idle sessions or stop other services rather than raising MEM_LIMIT much past 700m" >&2 ;;
-esac
-if ip link show tailscale0 >/dev/null 2>&1; then
-  echo "[+] tailscale0 visible"
-else
-  echo "[!] tailscale0 not present - tailnet access will not work" >&2
-fi
-echo "[i] hard caps: cpu=${CPU_LIMIT} mem=${MEM_MB}m mem+swap=${SWAP_MB}m heap=${NODE_HEAP_MB}m pids=${PIDS_LIMIT}"
 
 echo "[+] init done"
 exit 0
