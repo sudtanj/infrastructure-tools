@@ -80,7 +80,6 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`terraform-free-tier-oci.yaml`**: Attempts one OCI instance `terraform apply` every 15 minutes, or manually on demand. It skips an instance already present in state and treats known capacity or throttling errors as a retryable miss.
 - **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (for example, `init-paseo-codex.sh` and `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
-- **`botkeep-n8n-deploy.yaml`**: Uploads `botkeep-n8n-infra/` to a [botkeep.cloud](https://botkeep.cloud) server (a Pterodactyl panel) over SFTP and restarts it. Runs only when files under a `botkeep-*/` folder change. See [`botkeep-n8n-infra/README.md`](botkeep-n8n-infra/README.md).
 
 ---
 

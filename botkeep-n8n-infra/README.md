@@ -1,6 +1,6 @@
 # botkeep-n8n-infra
 
-Minimal [n8n](https://n8n.io) deployment on [botkeep.cloud](https://botkeep.cloud), auto-deployed from GitHub.
+Minimal [n8n](https://n8n.io) deployment on [botkeep.cloud](https://botkeep.cloud). The GitHub deploy workflow was removed; upload and restart from the dashboard.
 
 ## Layout
 
@@ -9,7 +9,6 @@ Minimal [n8n](https://n8n.io) deployment on [botkeep.cloud](https://botkeep.clou
 | `package.json` | Pins n8n; `npm start` runs `n8n start` |
 | `.env.example` | Environment variables to set on the workload |
 | `scripts/set-env.sh` | Pushes an env file to the workload via the Botkeep API |
-| `../.github/workflows/botkeep-n8n-deploy.yaml` | Uploads this folder over SFTP, then restarts the server |
 
 ## Setup
 
