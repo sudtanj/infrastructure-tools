@@ -11,10 +11,24 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 1
-          keep_minimum_runs: 0
+      - name: Delete all workflow runs (any status)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN: ${{ github.run_id }}
+        run: |
+          # Skip this cleanup run itself; it can't be deleted while in progress
+          gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | \"\(.id) \(.status)\"" |
+          while read -r id status; do
+            if [ "$status" != "completed" ]; then
+              # waiting / queued / in_progress runs must be cancelled before deletion
+              gh api -X POST "repos/$REPO/actions/runs/$id/force-cancel" >/dev/null 2>&1 || true
+              for _ in $(seq 1 12); do
+                [ "$(gh api "repos/$REPO/actions/runs/$id" --jq .status)" = "completed" ] && break
+                sleep 5
+              done
+            fi
+            gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null \
+              && echo "Deleted run $id ($status)" || echo "Failed to delete run $id ($status)"
+          done
