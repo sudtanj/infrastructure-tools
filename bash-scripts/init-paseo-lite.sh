@@ -20,8 +20,9 @@ ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-}"
 ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-}"
 CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 
-# 6768 so it can coexist with paseo-codex (6767) on the same host network.
-PASEO_PORT="${PASEO_LITE_PORT:-6768}"
+# Fixed at 6768: 6767 is already taken on the host (paseo-codex). With
+# --network=host the daemon binds this host port directly.
+PASEO_PORT="6768"
 PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
@@ -111,6 +112,10 @@ fi
 # --- Recreate the container ---
 echo "[>] replacing $CONTAINER_NAME"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+if command -v ss >/dev/null 2>&1 && [ -n "$(ss -Hltn "sport = :${PASEO_PORT}" 2>/dev/null)" ]; then
+  echo "[x] port ${PASEO_PORT} is already in use on the host - not starting ${CONTAINER_NAME}" >&2
+  exit 1
+fi
 docker volume create "$HOME_VOLUME"      >/dev/null
 docker volume create "$WORKSPACE_VOLUME" >/dev/null
 
