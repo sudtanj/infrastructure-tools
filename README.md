@@ -80,6 +80,44 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`terraform-free-tier-oci.yaml`**: Attempts one OCI instance `terraform apply` every 15 minutes, or manually on demand. It skips an instance already present in state and treats known capacity or throttling errors as a retryable miss.
 - **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (for example, `init-paseo-codex.sh` and `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
+- **`botkeep-deploy.yml`**: Reusable workflow (`workflow_call`) that auto-deploys a repo to a [botkeep.cloud](https://botkeep.cloud) workload. See [Auto-deploy to Botkeep](#auto-deploy-to-botkeep).
+
+#### Auto-deploy to Botkeep
+
+Use the reusable workflow from any project to sync a branch into a Botkeep workload on every push.
+
+1. In the Botkeep panel, create an API key with scopes `deploy:write`, `workloads:read` and `settings:read`, and note your workload ID and name.
+2. In the target repo, add the API key as a secret named `BOTKEEP_API_KEY` (Settings → Secrets and variables → Actions).
+3. Copy [`github-action-templates/botkeep-deploy-caller.yml`](github-action-templates/botkeep-deploy-caller.yml) to `.github/workflows/deploy.yml` in that repo and set `workload_id` and `confirmation` (the workload name).
+4. Push to `main` (or run the workflow manually). The job reads the workload's current revision, triggers `POST /github/sync`, and polls the operation until it succeeds or fails.
+
+Minimal caller:
+
+```yaml
+jobs:
+  deploy:
+    uses: sudtanj/infrastructure-tools/.github/workflows/botkeep-deploy.yml@main
+    with:
+      workload_id: "YOUR_WORKLOAD_ID"
+      confirmation: "YOUR_WORKLOAD_NAME"
+    secrets:
+      BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
+```
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `workload_id` (required) | | Botkeep workload ID |
+| `confirmation` (required) | | Confirmation string for the sync endpoint (workload name) |
+| `repository` | calling repo | `owner/name` to sync |
+| `branch` | triggering ref | Branch to deploy |
+| `access` | `public` | `public`, or `connection` for private repos (needs a GitHub connection linked in Botkeep) |
+| `mode` | `merge` | `merge`, `replace` or `folder` |
+| `directory` | | Target directory (only for `mode: folder`) |
+| `restart` | `true` | Restart the workload after sync |
+| `base_url` | `https://botkeep.cloud` | API host |
+| `timeout_seconds` | `600` | Max wait for the operation |
+
+Notes: if the repo calling this workflow is private, the calling repo must be allowed to use workflows from this one (Settings → Actions → Access on `infrastructure-tools`). Pin `@main` to a tag or SHA for stability.
 
 ---
 
