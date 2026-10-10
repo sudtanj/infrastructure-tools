@@ -80,7 +80,7 @@ on:
       timeout_seconds:
         description: Max time to wait for each operation
         type: number
-        default: 600
+        default: 1800
     secrets:
       BOTKEEP_API_KEY:
         description: Botkeep API key (scopes workloads:read, workloads:create, deploy:write, settings:read)
@@ -92,7 +92,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       group: botkeep-deploy-${{ inputs.workload_id || inputs.name || inputs.directory || github.repository }}
       cancel-in-progress: false
@@ -155,9 +155,14 @@ jobs:
               # Response shape: {operation:{phase}, queueState, confirmed, runtimeState}
               status=$(jq -r '[(.operation.phase // .phase // .status // .state // "unknown"), (.queueState // "-")]
                   | map(tostring | ascii_downcase) | join("/")' <<<"$st" 2>/dev/null || echo unknown)
-              if [ "$status" != "$last" ]; then
-                echo "    ${op}: ${status} (runtime: $(jq -r '.runtimeState // "?"' <<<"$st" 2>/dev/null))"
-                last="$status"
+              # Extra fields (e.g. file-operation progress) are shown whenever they change
+              extra=$(jq -c '(.operation // {}) as $o
+                  | ((. | del(.id,.workloadId,.observedAt,.action,.operation,.queueState,.runtimeState,.confirmed))
+                     + ($o | del(.id,.action,.phase,.requestedAt,.dispatchedAt,.firstDispatchedAt,.deliveryUnconfirmed)))
+                  | select(length > 0)' <<<"$st" 2>/dev/null || true)
+              if [ "${status}${extra}" != "$last" ]; then
+                echo "    ${op}: ${status} (runtime: $(jq -r '.runtimeState // "?"' <<<"$st" 2>/dev/null))${extra:+ ${extra}}"
+                last="${status}${extra}"
               fi
               if [ "$(jq -r '.confirmed // false' <<<"$st" 2>/dev/null)" = "true" ]; then return 0; fi
               case "$status" in
