@@ -107,6 +107,8 @@ for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
 done
 
 # apparmor=unconfined is required for bwrap to create user namespaces.
+# --dns: DNS64 resolvers (nat64.net) so IPv6-only hosts can reach IPv4-only
+# services like github.com. Docker applies these even with --network=host.
 # --restart always: restarts on crash, OOM kill, and Docker/VM reboot.
 docker run -d --name "$CONTAINER_NAME" --restart always \
   --label "init.hash=${CONFIG_HASH}" \
@@ -125,6 +127,8 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --log-opt max-size=5m \
   --log-opt max-file=2 \
   --security-opt apparmor=unconfined \
+  --dns 2a00:1098:2b::1 \
+  --dns 2a01:4f9:c010:3f02::1 \
   -v paseo-home:/home/paseo \
   -v paseo-workspace:/workspace:rw \
   -e CODEX_BASE_URL="$CODEX_BASE_URL" \
@@ -179,6 +183,16 @@ stream_idle_timeout_ms = 300000
 TOML
 chown -R 1000:1000 "$D"
 EOF
+
+# --- Make gh the default git credential helper (uses GH_TOKEN) ---
+# Written to ~/.gitconfig in the paseo-home volume; safe to repeat.
+docker exec -u 1000:1000 -e HOME=/home/paseo "$CONTAINER_NAME" sh -c '
+  gh auth setup-git --hostname github.com 2>/dev/null \
+  || { git config --global --replace-all credential.https://github.com.helper "" \
+       && git config --global --add credential.https://github.com.helper "!gh auth git-credential" \
+       && git config --global --replace-all credential.https://gist.github.com.helper "" \
+       && git config --global --add credential.https://gist.github.com.helper "!gh auth git-credential"; }
+' >/dev/null 2>&1 && echo "[+] gh set as git credential helper" || echo "[!] gh git credential setup failed" >&2
 
 # --- Heartbeat (single exec) ---
 docker exec -e HEARTBEAT_CRON="$HEARTBEAT_CRON" "$CONTAINER_NAME" sh -s >/dev/null 2>&1 <<'EOF' || true
