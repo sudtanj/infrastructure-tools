@@ -4,7 +4,7 @@
 set -euo pipefail
 
 FILE="${1:-.env}"
-API="${BOTKEEP_BASE_URL:-https://botkeep.cloud}/api/v1/developer"
+API="${BOTKEEP_BASE_URL:-https://api.botkeep.cloud}/api/v1/developer"
 : "${BOTKEEP_API_KEY:?set BOTKEEP_API_KEY}" "${WORKLOAD_ID:?set WORKLOAD_ID}"
 [ -f "$FILE" ] || { echo "[x] $FILE not found" >&2; exit 1; }
 

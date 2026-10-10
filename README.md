@@ -119,7 +119,7 @@ jobs:
 | `directory` | | Repo folder to sync (only for `mode: folder`) |
 | `restart` | `true` | Restart the workload after sync |
 | `confirmation` | workload name | Confirmation string for the sync endpoint |
-| `base_url` | `https://botkeep.cloud` | API host |
+| `base_url` | `https://api.botkeep.cloud` | API host |
 | `timeout_seconds` | `600` | Max wait per operation |
 
 Notes: if the repo calling this workflow is private, the calling repo must be allowed to use workflows from this one (Settings → Actions → Access on `infrastructure-tools`). Pin `@main` to a tag or SHA for stability.

@@ -76,7 +76,7 @@ on:
         default: ""
       base_url:
         type: string
-        default: https://botkeep.cloud
+        default: https://api.botkeep.cloud
       timeout_seconds:
         description: Max time to wait for each operation
         type: number
@@ -123,6 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s inherit_errexit
           echo "::add-mask::$BOTKEEP_API_KEY"
           [ -n "$BOTKEEP_API_KEY" ] || { echo "::error::BOTKEEP_API_KEY secret is not set"; exit 1; }
 
