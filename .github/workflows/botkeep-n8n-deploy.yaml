@@ -1,0 +1,20 @@
+name: Deploy n8n to Botkeep
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "botkeep-*/**"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/botkeep-deploy.yml
+    with:
+      workload_id: ${{ vars.BOTKEEP_N8N_WORKLOAD_ID }}
+      confirmation: ${{ vars.BOTKEEP_N8N_WORKLOAD_NAME }}
+      mode: folder
+      directory: botkeep-n8n-infra
+      restart: true
+    secrets:
+      BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}

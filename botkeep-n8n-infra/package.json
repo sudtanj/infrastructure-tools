@@ -1,0 +1,15 @@
+{
+  "name": "botkeep-n8n-infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal n8n deployment for botkeep.cloud",
+  "scripts": {
+    "start": "n8n start"
+  },
+  "engines": {
+    "node": ">=20.19 <25"
+  },
+  "dependencies": {
+    "n8n": "^1.100.0"
+  }
+}
