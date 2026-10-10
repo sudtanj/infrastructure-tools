@@ -149,16 +149,25 @@ jobs:
           idem() { printf 'gh%sx%sx%s%s' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$1" "$(openssl rand -hex 6)"; }
 
           wait_op() { # operation-id
-            local op="$1" st status deadline=$((SECONDS + TIMEOUT))
+            local op="$1" st status last="" unknown=0 deadline=$((SECONDS + TIMEOUT))
             while :; do
               st=$(call GET "/operations/${op}")
-              status=$(jq -r '(.status // .state // "unknown") | ascii_downcase' <<<"$st")
-              echo "    ${op}: ${status}"
+              status=$(jq -r '(.status // .state // .phase // .operation.status // .operation.state // .data.status // .data.state // .result.status
+                  // (if (.done // .completed // .finished // .data.done) == true then "done" else empty end)
+                  // "unknown") | tostring | ascii_downcase' <<<"$st" 2>/dev/null || echo unknown)
+              if [ "$status" != "$last" ]; then
+                echo "    ${op}: ${status}"
+                [ "$status" != "unknown" ] || echo "    response: $(printf '%s' "$st" | head -c 600)"
+                last="$status"
+              fi
               case "$status" in
-                succeeded|success|completed|complete|done|ready) return 0 ;;
-                failed|failure|error|cancelled|canceled) echo "::error::operation ${op} ${status}: $st"; return 1 ;;
+                succeeded|success|successful|completed|complete|done|ready|finished|ok) return 0 ;;
+                failed|failure|error|errored|cancelled|canceled|timeout|timed_out) echo "::error::operation ${op} ${status}: $(printf '%s' "$st" | head -c 600)"; return 1 ;;
+                unknown) unknown=$((unknown + 1)) ;;
+                *) unknown=0 ;;
               esac
-              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op}"; return 1; }
+              [ "$unknown" -lt 6 ] || { echo "::error::cannot read status of ${op}; response: $(printf '%s' "$st" | head -c 600)"; return 1; }
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for ${op} (last status: ${status})"; return 1; }
               sleep 5
             done
           }
