@@ -99,7 +99,7 @@ jobs:
     uses: sudtanj/infrastructure-tools/.github/workflows/botkeep-deploy.yml@main
     with:
       directory: botkeep-my-app   # workload name = botkeep-my-app
-      mode: folder
+      method: upload
     secrets:
       BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
 ```
@@ -116,7 +116,8 @@ jobs:
 | `branch` | triggering ref | Branch to deploy |
 | `access` | `public` | `public`, or `connection` for private repos (needs a GitHub connection linked in Botkeep) |
 | `mode` | `merge` | `merge`, `replace` or `folder` |
-| `directory` | | Repo folder to sync (only for `mode: folder`) |
+| `method` | `sync` | `sync` (GitHub sync of the whole repo) or `upload` (push only the files under `directory` via the files API, 4 per request, then restart) |
+| `directory` | | Repo folder: workload name source, and the upload source when `method: upload` |
 | `restart` | `true` | Restart the workload after sync |
 | `confirmation` | workload name | Confirmation string for the sync endpoint |
 | `base_url` | `https://api.botkeep.cloud` | API host |

@@ -13,7 +13,7 @@ jobs:
     uses: ./.github/workflows/botkeep-deploy.yml
     with:
       directory: botkeep-n8n-infra
-      mode: folder
+      method: upload   # push only the files inside this folder
       runtime: nodejs
       runtime_version: "22"
       start_command: npm install --no-audit --no-fund && npm start

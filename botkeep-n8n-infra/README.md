@@ -17,7 +17,7 @@ Minimal [n8n](https://n8n.io) deployment on [botkeep.cloud](https://botkeep.clou
 2. **Deploy**: push a change under `botkeep-n8n-infra/` to `main`, or run *Deploy n8n to Botkeep* manually.
    The workload is identified by the folder name (`botkeep-n8n-infra`). If it doesn't exist it is created
    (Node 22, 1 GB RAM, 50% CPU, 1 GB storage, start command `npm install --no-audit --no-fund && npm start`),
-   then only this folder is synced (`mode: folder`) and the workload restarts. Edit the `with:` block in the workflow to change the sizing.
+   then only the files in this folder are uploaded (`method: upload`) and the workload restarts. Edit the `with:` block in the workflow to change the sizing.
 3. **Set environment variables** (after the workload exists; use the workload ID from the panel):
    ```bash
    cp botkeep-n8n-infra/.env.example .env   # fill in WEBHOOK_URL and N8N_ENCRYPTION_KEY

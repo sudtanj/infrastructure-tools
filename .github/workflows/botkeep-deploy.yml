@@ -58,6 +58,10 @@ on:
         description: public or connection (linked GitHub connection for private repos)
         type: string
         default: public
+      method:
+        description: "upload (push only the files under `directory` via the files API) or sync (GitHub sync of the whole repo)"
+        type: string
+        default: sync
       mode:
         description: merge, replace or folder
         type: string
@@ -112,6 +116,7 @@ jobs:
       BRANCH: ${{ inputs.branch || github.ref_name }}
       ACCESS: ${{ inputs.access }}
       MODE: ${{ inputs.mode }}
+      METHOD: ${{ inputs.method }}
       DIRECTORY: ${{ inputs.directory }}
       RESTART: ${{ inputs.restart }}
       CONFIRMATION_IN: ${{ inputs.confirmation }}
@@ -119,6 +124,12 @@ jobs:
       REPO_NAME: ${{ github.event.repository.name }}
       BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
     steps:
+      - name: Checkout (only the deploy folder)
+        if: inputs.method == 'upload'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: ${{ inputs.directory }}
+          sparse-checkout-cone-mode: true
       - name: Upsert workload and sync repository
         shell: bash
         run: |
@@ -229,6 +240,45 @@ jobs:
             fi
           fi
           echo "workload: ${NAME} (${WID})"
+
+          # --- Upload: push only the files under $DIRECTORY (no GitHub sync of the whole repo) ---
+          if [ "$METHOD" = "upload" ]; then
+            [ -d "$DIRECTORY" ] || { echo "::error::directory '${DIRECTORY}' not found in the checkout"; exit 1; }
+            mapfile -t FILES < <(cd "$DIRECTORY" && find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' -not -name '.env' | sed 's|^\./||' | sort)
+            [ "${#FILES[@]}" -gt 0 ] || { echo "::error::no files under ${DIRECTORY}"; exit 1; }
+            echo "[>] uploading ${#FILES[@]} file(s) from ${DIRECTORY}/ -> ${NAME}"
+
+            # Create parent folders first (ignore "already exists")
+            while read -r d; do
+              [ -n "$d" ] || continue
+              call PUT "/workloads/${WID}/file" "$(jq -n --arg p "/$d" '{path:$p,type:"folder",createOnly:true}')" "$(idem dir)" >/dev/null 2>&1 || true
+            done < <(printf '%s\n' "${FILES[@]}" | awk -F/ '{p=""; for(i=1;i<NF;i++){p=p (i>1?"/":"") $i; print p}}' | sort -u)
+
+            tmp=$(mktemp -d)
+            for ((i = 0; i < ${#FILES[@]}; i += 4)); do
+              echo '[]' > "$tmp/files.json"
+              for rel in "${FILES[@]:i:4}"; do
+                base64 -w0 "$DIRECTORY/$rel" > "$tmp/data"
+                jq --arg p "/$rel" --rawfile d "$tmp/data" '. + [{path:$p, data:$d, overwrite:true}]' "$tmp/files.json" > "$tmp/n"
+                mv "$tmp/n" "$tmp/files.json"
+                echo "    + /${rel}"
+              done
+              jq '{files:.}' "$tmp/files.json" > "$tmp/body.json"
+              call POST "/workloads/${WID}/files/upload-batch" "@$tmp/body.json" "$(idem up)" >/dev/null
+            done
+            rm -rf "$tmp"
+            echo "[+] uploaded ${#FILES[@]} file(s)"
+
+            if [ "$RESTART" = "true" ]; then
+              echo "[>] restarting workload"
+              resp=$(call POST "/workloads/${WID}/actions" '{"action":"restart"}' "$(idem restart)" 2>/dev/null \
+                || call POST "/workloads/${WID}/actions" '{"action":"start"}' "$(idem start)")
+              op=$(jq -r '.operationId // .operation_id // .operation.id // .id // empty' <<<"$resp")
+              [ -z "$op" ] || wait_op "$op"
+            fi
+            echo "[+] deploy done"
+            exit 0
+          fi
 
           # --- Sync ---
           echo "[>] reading current revision"

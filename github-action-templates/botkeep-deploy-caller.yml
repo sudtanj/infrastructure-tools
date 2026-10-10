@@ -15,7 +15,7 @@ jobs:
     with:
       # name: my-app           # default: basename of `directory`, else the repo name
       # directory: my-folder   # with mode: folder, sync only this repo folder
-      # mode: folder           # merge (default) | replace | folder
+      # method: upload        # upload only the files in `directory` (default: sync the whole repo)
       # access: connection     # private repos (needs GitHub connection linked in Botkeep)
       # Settings used only when the workload is created:
       runtime: nodejs
