@@ -82,7 +82,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (for example, `init-paseo-codex.sh` and `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
 - **`android-private-build.yaml`**: Polls a private repo, builds its Capacitor Android app on free public runners with redacted logs, uploads to Google Play and/or publishes a gpg-encrypted artifact. Setup in the file header.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
-- **`botkeep-n8n-deploy.yaml`**: Deploys `botkeep-n8n-infra/` to a [botkeep.cloud](https://botkeep.cloud) server (a Pterodactyl panel) using the community [`pterodactyl-upload-action`](https://github.com/rexlManu/pterodactyl-upload-action). Runs only when files under a `botkeep-*/` folder change. See [`botkeep-n8n-infra/README.md`](botkeep-n8n-infra/README.md).
+- **`botkeep-n8n-deploy.yaml`**: Uploads `botkeep-n8n-infra/` to a [botkeep.cloud](https://botkeep.cloud) server (a Pterodactyl panel) over SFTP and restarts it. Runs only when files under a `botkeep-*/` folder change. See [`botkeep-n8n-infra/README.md`](botkeep-n8n-infra/README.md).
 
 ---
 

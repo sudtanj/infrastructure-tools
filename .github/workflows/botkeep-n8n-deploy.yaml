@@ -1,8 +1,9 @@
 name: Deploy n8n to Botkeep
 
-# Botkeep runs on Pterodactyl, so we use the community upload action:
-# https://github.com/rexlManu/pterodactyl-upload-action
-# Needs the secret PTERODACTYL_API_KEY: a panel client API key (ptlc_...). Falls back to BOTKEEP_API_KEY.
+# Botkeep servers run on Pterodactyl. Files are uploaded over SFTP with the panel login,
+# then the server is restarted through the Botkeep developer API.
+# Secrets: SFTP_HOST, SFTP_USERNAME, SFTP_PASSWORD, optional SFTP_PORT (default 2022),
+#          BOTKEEP_API_KEY (restart only; skipped with a warning if missing).
 
 on:
   push:
@@ -13,33 +14,51 @@ on:
 
 env:
   APP_DIR: botkeep-n8n-infra
+  WORKLOAD_ID: ${{ vars.BOTKEEP_WORKLOAD_ID || 'dc848c77-db18-4330-adc0-e04a40245d31' }}
+
+concurrency:
+  group: botkeep-n8n-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Check required secret
-        env:
-          KEY: ${{ secrets.PTERODACTYL_API_KEY || secrets.BOTKEEP_API_KEY }}
-        run: |
-          [ -n "$KEY" ] || { echo "::error::Secret PTERODACTYL_API_KEY (or BOTKEEP_API_KEY) is not set. Create a Pterodactyl client API key (ptlc_...) at panel.botkeep.cloud > Account > API Credentials and add it under Settings > Secrets and variables > Actions."; exit 1; }
-
       - uses: actions/checkout@v4
         with:
           sparse-checkout: ${{ env.APP_DIR }}
 
-      - name: Package only the app folder
+      - name: Upload app folder over SFTP
+        env:
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.SFTP_PORT || '2022' }}
+          SFTP_USERNAME: ${{ secrets.SFTP_USERNAME }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
         run: |
-          cd "$APP_DIR"
-          zip -qr "$GITHUB_WORKSPACE/app.zip" . -x 'node_modules/*' '.env' '.n8n/*' '.git/*'
+          set -euo pipefail
+          for v in SFTP_HOST SFTP_USERNAME SFTP_PASSWORD; do
+            [ -n "${!v}" ] || { echo "::error::Secret $v is not set (copy SFTP details from the server's Settings page on the panel)"; exit 1; }
+          done
+          sudo apt-get install -y -qq lftp >/dev/null
+          # mirror -R uploads only the contents of the app folder; no --delete, so node_modules/.n8n on the server are kept
+          lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" <<LFTP
+          set sftp:auto-confirm yes
+          set net:max-retries 3
+          set net:timeout 30
+          mirror -R --verbose --parallel=2 --exclude-glob node_modules/ --exclude-glob .env --exclude-glob .n8n/ --exclude-glob .git/ "$APP_DIR" ./
+          bye
+          LFTP
 
-      - name: Upload, extract and restart
-        uses: rexlmanu/pterodactyl-upload-action@v2.1
-        with:
-          panel-host: ${{ vars.PTERO_PANEL_HOST || 'https://panel.botkeep.cloud' }}
-          api-key: ${{ secrets.PTERODACTYL_API_KEY || secrets.BOTKEEP_API_KEY }}
-          server-id: ${{ vars.PTERO_SERVER_ID || 'dc848c77' }}
-          source: app.zip
-          target: ./
-          decompress-target: true
-          restart: true
+      - name: Restart server via Botkeep API
+        env:
+          KEY: ${{ secrets.BOTKEEP_API_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$KEY" ] || { echo "::warning::BOTKEEP_API_KEY not set; files uploaded but server not restarted"; exit 0; }
+          code=$(curl -sS -o /tmp/r.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $KEY" \
+            -H "Idempotency-Key: gh${GITHUB_RUN_ID}x${GITHUB_RUN_ATTEMPT}x$(openssl rand -hex 6)" \
+            -H 'Content-Type: application/json' -d '{"action":"restart"}' \
+            "https://api.botkeep.cloud/api/v1/developer/workloads/${WORKLOAD_ID}/actions")
+          echo "restart -> HTTP $code: $(head -c 300 /tmp/r.json)"
+          [[ "$code" =~ ^2 ]] || echo "::warning::restart failed (HTTP $code); restart the server from the dashboard"
