@@ -190,16 +190,23 @@ jobs:
                   sourceType:"blank", startCommand:$sc,
                   resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}')
               resp=$(call POST "/workloads" "$body" "$(idem create)") || {
-                echo "[!] create failed (runtime=${RUNTIME} version=${RUNTIME_VERSION}); server capabilities:" >&2
-                call GET "/capabilities" 2>&1 | head -c 3000 >&2 || true
-                echo >&2
-                exit 1
+                # A gateway timeout (5xx) can still leave the workload created: re-check by name before failing.
+                echo "[!] create call failed; checking whether '${NAME}' exists anyway"
+                resp=""
               }
-              WID=$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' <<<"$resp")
-              op=$(jq -r '.operationId // .operation_id // .operation.id // empty' <<<"$resp")
+              WID=$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' <<<"${resp:-{\}}")
+              op=$(jq -r '.operationId // .operation_id // .operation.id // empty' <<<"${resp:-{\}}")
               [ -z "$op" ] || wait_op "$op"
-              [ -n "$WID" ] || WID=$(find_id)
-              [ -n "$WID" ] || { echo "::error::created workload but could not resolve its id: $resp"; exit 1; }
+              for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                [ -z "$WID" ] || break
+                WID=$(find_id)
+                [ -n "$WID" ] || { echo "    waiting for workload to appear..."; sleep 10; }
+              done
+              if [ -z "$WID" ]; then
+                echo "::error::workload '${NAME}' was not created (runtime=${RUNTIME} version=${RUNTIME_VERSION}); capabilities:" >&2
+                call GET "/capabilities" 2>&1 | head -c 1500 >&2 || true
+                exit 1
+              fi
               echo "[+] created workload ${WID}"
             else
               echo "[+] found workload ${WID}"
