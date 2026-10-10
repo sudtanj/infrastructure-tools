@@ -212,8 +212,8 @@ on:
   # Scheduled runs are DISABLED by default so this does not silently run
   # private code -- and spend runner minutes -- until you ask it to. Uncomment
   # the two lines below to poll on an interval.
-  # schedule:
-  #   - cron: "0 * * * *"
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       script:
