@@ -13,6 +13,7 @@ on:
           - init-n8n
           - init-portainer
           - init-paseo-codex
+          - init-paseo-lite
           - init-tailscale
           - update-tailscale
           - upsert-github-runner
@@ -188,7 +189,7 @@ jobs:
           # N8N_ lets a secret N8N_ENCRYPTION_KEY override the key the script generates
           # and persists in /etc/n8n/n8n.env. The script refuses to start if the supplied
           # key differs from the one already on disk, since that would orphan credentials.
-          # ANTHROPIC_ / CLAUDE_CODE_ forward Claude Code auth to init-paseo-codex.sh
+          # ANTHROPIC_ / CLAUDE_CODE_ forward Claude Code auth to init-paseo-codex.sh and init-paseo-lite.sh
           # (CLAUDE_CODE_OAUTH_TOKEN for subscription, ANTHROPIC_API_KEY for usage billing,
           # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for BYOK).
           SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_"

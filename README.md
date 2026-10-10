@@ -25,6 +25,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
 ├── bash-scripts/
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
+│   ├── init-paseo-lite.sh            # Deploy & maintain paseo-lite (Rust Paseo + native Claude Code/Codex)
 │   ├── upsert-github-runner.sh    # Upsert GitHub Actions self-hosted runner
 │   ├── init-n8n.sh                   # Deploy n8n workflow automation, tuned for free tier
 │   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
@@ -68,6 +69,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 ### 3. Startup & Management Scripts (`bash-scripts/`)
 
 - **`init-paseo-codex.sh`**: Idempotent deployment script for running a custom Codex agent on host networking. Automatically syncs environment secrets (API keys, GitHub tokens) and handles rolling updates. Pulls the latest image from the registry on every run before touching the running container, enforces hard cgroup caps (default 0.40 CPU, 320 MiB RAM, 448 MiB RAM+swap, 192 PIDs, capped logs/tmpfs, Node heap 192 MiB, Claude Code telemetry/autoupdate off; override via `CPU_LIMIT`, `MEM_LIMIT`, etc.), and forwards Claude Code auth (`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN`) straight through to the sessions Paseo launches.
+- **`init-paseo-lite.sh`**: Same deployment pattern and the same secrets as `init-paseo-codex.sh` (`CODEX_*`, `GH_TOKEN`, `ANTHROPIC_*`, `CLAUDE_CODE_*`), for [`sudtanj/paseo-lite`](https://github.com/sudtanj/builder-tools/tree/main/paseo-lite): the Rust Paseo daemon with native Claude Code and Codex CLIs, no Node.js. One shared Codex app-server serves every project, and Claude processes are started per prompt and released when idle (at most `PASEO_CLAUDE_MAX_LIVE`, default 1). Uses its own container (`paseo-lite`), its own home volume (`paseo-lite-home`) and port `6768` (`PASEO_LITE_PORT`), so it can sit next to `init-paseo-codex.sh`. Running both on one `e2-micro` exceeds its RAM, though, so deploy one of them. The relay pairing link is never logged; run `docker exec paseo-lite paseo-lite pair` on the VM to show it.
 - **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
 - **`init-n8n.sh`**: Idempotent n8n deployment sized for the free-tier `e2-micro`. Uses SQLite instead of Postgres/Redis, caps the container at 0.50 CPU / 512 MiB with a matching V8 heap limit, disables telemetry/version/template calls to preserve the free egress allowance, publishes the UI on loopback plus the Tailscale address only, and installs a daily local backup of the data volume. The credential `N8N_ENCRYPTION_KEY` is generated once and persisted in `/etc/n8n/n8n.env` (mode 600) so re-runs never orphan stored credentials.
 - **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
@@ -109,7 +111,7 @@ Settings are read from repository secrets whose names begin with one of the pref
 
 On the first run, open the UI and create the owner account. The setup URL embeds a bearer token, so the script never logs it; read it yourself with `docker logs n8n 2>&1 | grep -m1 '/rest/owner/setup/'`.
 
-Claude Code auth for the Paseo container uses the `ANTHROPIC_` and `CLAUDE_CODE_` prefixes. All are optional — with none set, run `claude /login` once inside the container (credentials persist in the `paseo-home` volume):
+Claude Code auth for the Paseo containers (`init-paseo-codex.sh`, `init-paseo-lite.sh`) uses the `ANTHROPIC_` and `CLAUDE_CODE_` prefixes. All are optional — with none set, run `claude /login` once inside the container (credentials persist in the `paseo-home` volume):
 
 | Secret | Purpose |
 | --- | --- |
