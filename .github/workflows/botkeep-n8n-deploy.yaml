@@ -2,7 +2,7 @@ name: Deploy n8n to Botkeep
 
 # Botkeep runs on Pterodactyl, so we use the community upload action:
 # https://github.com/rexlManu/pterodactyl-upload-action
-# Needs the secret PTERODACTYL_API_KEY (a Pterodactyl *client* API key, ptlc_...).
+# Needs the secret BOTKEEP_API_KEY (falls back to PTERODACTYL_API_KEY); it must be accepted by the panel client API.
 
 on:
   push:
@@ -20,9 +20,9 @@ jobs:
     steps:
       - name: Check required secret
         env:
-          KEY: ${{ secrets.PTERODACTYL_API_KEY }}
+          KEY: ${{ secrets.BOTKEEP_API_KEY || secrets.PTERODACTYL_API_KEY }}
         run: |
-          [ -n "$KEY" ] || { echo "::error::Secret PTERODACTYL_API_KEY is not set. Create a Pterodactyl client API key (ptlc_...) at panel.botkeep.cloud > Account > API Credentials and add it under Settings > Secrets and variables > Actions."; exit 1; }
+          [ -n "$KEY" ] || { echo "::error::Secret BOTKEEP_API_KEY (or PTERODACTYL_API_KEY) is not set. Create a Pterodactyl client API key (ptlc_...) at panel.botkeep.cloud > Account > API Credentials and add it under Settings > Secrets and variables > Actions."; exit 1; }
 
       - uses: actions/checkout@v4
         with:
@@ -37,7 +37,7 @@ jobs:
         uses: rexlmanu/pterodactyl-upload-action@v2.1
         with:
           panel-host: ${{ vars.PTERO_PANEL_HOST || 'https://panel.botkeep.cloud' }}
-          api-key: ${{ secrets.PTERODACTYL_API_KEY }}
+          api-key: ${{ secrets.BOTKEEP_API_KEY || secrets.PTERODACTYL_API_KEY }}
           server-id: ${{ vars.PTERO_SERVER_ID || 'dc848c77' }}
           source: app.zip
           target: ./
