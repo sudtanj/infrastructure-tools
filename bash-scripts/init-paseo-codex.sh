@@ -32,6 +32,12 @@ PIDS_LIMIT="${PIDS_LIMIT:-256}"
 NODE_HEAP_MB="${NODE_HEAP_MB:-224}"
 HEARTBEAT_CRON="${HEARTBEAT_CRON:-0 * * * *}"
 
+# Bump this whenever the docker run flags change (DNS, limits, etc.) so the
+# container is recreated; the hash below only covers values, not the flags.
+CONFIG_REV="4"
+DNS1="2a00:1098:2b::1"
+DNS2="2a01:4f9:c010:3f02::1"
+
 IMAGE="sudtanj/paseo-codex:latest"
 CONTAINER_NAME="paseo-codex"
 
@@ -84,7 +90,7 @@ NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
-  "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" "$CONFIG_REV" "$DNS1" "$DNS2" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
 RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
@@ -127,8 +133,8 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --log-opt max-size=5m \
   --log-opt max-file=2 \
   --security-opt apparmor=unconfined \
-  --dns 2a00:1098:2b::1 \
-  --dns 2a01:4f9:c010:3f02::1 \
+  --dns "$DNS1" \
+  --dns "$DNS2" \
   -v paseo-home:/home/paseo \
   -v paseo-workspace:/workspace:rw \
   -e CODEX_BASE_URL="$CODEX_BASE_URL" \
