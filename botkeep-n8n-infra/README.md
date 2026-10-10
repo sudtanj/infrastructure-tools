@@ -22,7 +22,7 @@ Botkeep runs on Pterodactyl (`https://panel.botkeep.cloud`), so deployment uses 
    ```
 2. **Create a Pterodactyl client API key**: panel → Account → API Credentials. It starts with `ptlc_`. This is not the Botkeep developer API key.
 3. **GitHub** (Settings → Secrets and variables → Actions):
-   - Secret `BOTKEEP_API_KEY` (or `PTERODACTYL_API_KEY`): the panel client API key from step 2.
+   - Secret `PTERODACTYL_API_KEY`: the panel client API key from step 2 (takes precedence over `BOTKEEP_API_KEY`).
    - Optional variables `PTERO_PANEL_HOST` (default `https://panel.botkeep.cloud`) and `PTERO_SERVER_ID` (default `dc848c77`, the first 8 characters of the server UUID).
 4. **Environment variables**: set the values from `.env.example` in the server's Startup tab in the dashboard (or use `scripts/set-env.sh` with a Botkeep developer API key). Keep `N8N_ENCRYPTION_KEY` backed up: losing it makes stored credentials unreadable.
 5. **Deploy**: push a change under `botkeep-n8n-infra/` to `main`, or run *Deploy n8n to Botkeep* manually.
