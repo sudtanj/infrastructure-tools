@@ -572,6 +572,8 @@ jobs:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
       TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
+      HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
+      HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
 
     steps:
       - name: Checkout private repo
@@ -636,7 +638,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for v in TAILSCALE_AUTH_KEY TAILSCALE_EXIT_NODE; do
+          for v in TAILSCALE_AUTH_KEY TAILSCALE_EXIT_NODE HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -657,6 +659,8 @@ jobs:
           # GitHub masks repository secrets on its own; this is belt and
           # braces for the value after it is written into an env file.
           echo "::add-mask::${TAILSCALE_AUTH_KEY}"
+          echo "::add-mask::${HONEYGAIN_EMAIL}"
+          echo "::add-mask::${HONEYGAIN_PASSWORD}"
 
           # The exit node is an IP address or a host name, and this log lives
           # in a PUBLIC repo -- so it is masked like a secret even though it

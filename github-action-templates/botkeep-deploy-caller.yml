@@ -18,7 +18,7 @@ jobs:
       # mode: folder           # merge (default) | replace | folder
       # access: connection     # private repos (needs GitHub connection linked in Botkeep)
       # Settings used only when the workload is created:
-      runtime: node
+      runtime: nodejs
       runtime_version: "22"
       start_command: npm install --no-audit --no-fund && npm start
       memory_mb: 512

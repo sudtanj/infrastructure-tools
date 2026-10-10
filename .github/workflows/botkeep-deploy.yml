@@ -25,9 +25,9 @@ on:
         type: string
         default: general
       runtime:
-        description: Runtime for a new workload, e.g. node (create only)
+        description: Runtime for a new workload, e.g. nodejs (create only)
         type: string
-        default: node
+        default: nodejs
       runtime_version:
         description: Runtime version for a new workload (create only)
         type: string

@@ -109,7 +109,7 @@ jobs:
 | `name` | folder / repo name | Workload name used as identity |
 | `workload_id` | | Explicit ID: skips lookup by name and never creates |
 | `create_if_missing` | `true` | Create the workload when the name isn't found |
-| `platform` / `runtime` / `runtime_version` | `general` / `node` / `22` | Used only on create |
+| `platform` / `runtime` / `runtime_version` | `general` / `nodejs` / `22` | Used only on create |
 | `start_command` | `npm install --no-audit --no-fund && npm start` | Used only on create |
 | `memory_mb` / `cpu_percent` / `storage_mb` | `1024` / `50` / `1024` | Used only on create |
 | `repository` | calling repo | `owner/name` to sync |
