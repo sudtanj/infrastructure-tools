@@ -130,18 +130,19 @@ if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
     log "Workload '$name' not found, creating it"
     # Try the configured runtime version first, then fall back to other versions the API may have enabled
     created=false
-    for rv in "$RUNTIME_VERSION" 20 24 18 21 23 lts; do
-      case " ${tried:-} " in *" $rv "*) continue;; esac
-      tried="${tried:-} $rv"
-      jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
+    for combo in "$RUNTIME $RUNTIME_VERSION" "nodejs $RUNTIME_VERSION" "node 22.x" "node v22" "node 22.0" "node latest" "nodejs 22.x" "nodejs latest" "node 20.x" "node 24.x" "node 18.x"; do
+      RUNTIME_TRY="${combo% *}"; rv="${combo#* }"
+      case " ${tried:-} " in *" $combo "*) continue;; esac
+      tried="${tried:-} $combo"
+      jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME_TRY" \
         --arg rv "$rv" --arg sc "$START_COMMAND" \
         --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
         '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
           sourceType:"blank", startCommand:$sc,
           resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
       code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
-      case "$code" in 2*) created=true; log "Created with $RUNTIME $rv"; break;; esac
-      log "Create with $RUNTIME $rv failed (HTTP $code): $(head -c 300 "$WORK/resp")"
+      case "$code" in 2*) created=true; log "Created with $RUNTIME_TRY $rv"; break;; esac
+      log "Create with $RUNTIME_TRY $rv failed (HTTP $code): $(head -c 300 "$WORK/resp")"
       grep -qi 'runtime version' "$WORK/resp" || break   # only retry on runtime-version rejections
     done
     [ "$created" = true ] || fail_resp "Creating workload failed" "$code"
