@@ -128,21 +128,23 @@ if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
     exit 3
   else
     log "Workload '$name' not found, creating it"
-    jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
-      --arg rv "$RUNTIME_VERSION" --arg sc "$START_COMMAND" \
-      --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
-      '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
-        sourceType:"blank", startCommand:$sc,
-        resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
-    code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
-    case "$code" in 2*) ;; *)
-      err "Creating workload failed (HTTP $code): $(head -c 500 "$WORK/resp")"
-      for ep in runtimes catalog settings; do   # hint: show what the API says is available
-        c="$(api GET "${API_BASE}/${ep}" || true)"
-        log "GET /${ep}: HTTP $c $(head -c 800 "$WORK/resp" | tr '\n' ' ')"
-      done
-      exit 1;;
-    esac
+    # Try the configured runtime version first, then fall back to other versions the API may have enabled
+    created=false
+    for rv in "$RUNTIME_VERSION" 20 24 18 21 23 lts; do
+      case " ${tried:-} " in *" $rv "*) continue;; esac
+      tried="${tried:-} $rv"
+      jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
+        --arg rv "$rv" --arg sc "$START_COMMAND" \
+        --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
+        '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
+          sourceType:"blank", startCommand:$sc,
+          resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
+      code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
+      case "$code" in 2*) created=true; log "Created with $RUNTIME $rv"; break;; esac
+      log "Create with $RUNTIME $rv failed (HTTP $code): $(head -c 300 "$WORK/resp")"
+      grep -qi 'runtime version' "$WORK/resp" || break   # only retry on runtime-version rejections
+    done
+    [ "$created" = true ] || fail_resp "Creating workload failed" "$code"
     BOTKEEP_WORKLOAD_ID="$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' "$WORK/resp")"
     op="$(jq -r '.operationId // .operation_id // .operation.id // empty' "$WORK/resp")"
     [ -z "$op" ] || wait_op "$op"
