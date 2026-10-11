@@ -8,7 +8,11 @@
 #   BOTKEEP_API_KEY        (required) bearer key with files:write (+ power:write when restarting)
 #   BOTKEEP_WORKLOAD_ID    target workload id; when unset, the workload whose name matches the
 #                          folder name (case-insensitive) is looked up through the API
-#   BOTKEEP_API_URL        API base URL, default https://api.botkeep.cloud
+#   BOTKEEP_CREATE_IF_MISSING  create the workload (named after the folder) when none exists, default true
+#   BOTKEEP_PLATFORM, _RUNTIME, _RUNTIME_VERSION, _START_COMMAND, _MEMORY_MB, _CPU_PERCENT,
+#   _STORAGE_MB            settings for a newly created workload
+#                          (general, node, 22, npm install && npm start, 1024, 50, 4096)
+#   BOTKEEP_API_URL       API base URL, default https://api.botkeep.cloud
 #   BOTKEEP_REMOTE_DIR     remote directory to upload into, default /
 #   BOTKEEP_RESTART        restart the workload after upload (true/false), default true
 #   BOTKEEP_EXCLUDE        space-separated find -path globs to skip,
@@ -29,7 +33,17 @@ REMOTE_DIR="${BOTKEEP_REMOTE_DIR:-/}"
 RESTART="${BOTKEEP_RESTART:-true}"
 EXCLUDE="${BOTKEEP_EXCLUDE:-*/.git/* */node_modules/* */.github/* */.env */.env.*}"
 
-MAX_FILE_BYTES=4000000    # server cap is 5333336 base64 chars (~4,000,002 bytes)
+CREATE="${BOTKEEP_CREATE_IF_MISSING:-true}"
+PLATFORM="${BOTKEEP_PLATFORM:-general}"
+RUNTIME="${BOTKEEP_RUNTIME:-node}"
+RUNTIME_VERSION="${BOTKEEP_RUNTIME_VERSION:-22}"
+START_COMMAND="${BOTKEEP_START_COMMAND:-npm install --omit=dev --omit=optional --no-audit --no-fund --cache /tmp/.npm && npm start}"
+MEMORY_MB="${BOTKEEP_MEMORY_MB:-1024}"
+CPU_PERCENT="${BOTKEEP_CPU_PERCENT:-50}"
+STORAGE_MB="${BOTKEEP_STORAGE_MB:-4096}"
+OP_TIMEOUT="${BOTKEEP_OP_TIMEOUT:-600}"
+
+MAX_FILE_BYTES=4000000   # server cap is 5333336 base64 chars (~4,000,002 bytes)
 MAX_BATCH_FILES=4
 MAX_BATCH_BYTES=4000000
 
@@ -68,20 +82,67 @@ fail_resp() {
   exit 1
 }
 
-# ---- resolve workload -------------------------------------------------------
+# ---- resolve workload (upsert: look up by name, create when missing) --------
+name="$(basename "$FOLDER")"
+
+# wait_op OPERATION_ID: poll until the operation finishes
+wait_op() {
+  local op="$1" status code deadline=$((SECONDS + OP_TIMEOUT))
+  while :; do
+    code="$(api GET "${API_BASE}/operations/${op}")" || die "curl failed polling operation $op"
+    case "$code" in 2*) ;; *) fail_resp "Polling operation $op failed" "$code";; esac
+    status="$(jq -r '(.status // .state // "unknown") | ascii_downcase' "$WORK/resp")"
+    log "operation $op: $status"
+    case "$status" in
+      succeeded|success|completed|complete|done|ready) return 0;;
+      failed|failure|error|cancelled|canceled) fail_resp "Operation $op $status" "$code";;
+    esac
+    [ "$SECONDS" -lt "$deadline" ] || die "Timed out waiting for operation $op"
+    sleep 5
+  done
+}
+
+# find_workload: print the id of the workload named $name (empty when none)
+find_workload() {
+  local cursor="" code next found
+  while :; do
+    code="$(api GET "${API_BASE}/workloads?limit=100${cursor:+&cursor=${cursor}}")" || die "curl failed listing workloads"
+    case "$code" in 2*) ;; *) fail_resp "Listing workloads failed" "$code";; esac
+    found="$(jq -r --arg n "$name" '
+      (if type == "array" then . else (.items // .workloads // .data // .results // []) end)
+      | map(select((.name // "") | ascii_downcase == ($n | ascii_downcase)))
+      | .[0] | (.id // .workloadId // empty)' "$WORK/resp")"
+    [ -z "$found" ] || { echo "$found"; return 0; }
+    next="$(jq -r '(.nextCursor // .next_cursor // .cursor // empty) | tostring' "$WORK/resp" 2>/dev/null || true)"
+    { [ -n "$next" ] && [ "$next" != "$cursor" ]; } || return 0
+    cursor="$next"
+  done
+}
+
 if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
-  name="$(basename "$FOLDER")"
-  code="$(api GET "${API_BASE}/workloads?limit=100")" || die "curl failed listing workloads"
-  case "$code" in 2*) ;; *) fail_resp "Listing workloads failed" "$code";; esac
-  BOTKEEP_WORKLOAD_ID="$(jq -r --arg n "$name" '
-    (if type == "array" then . else (.items // .workloads // .data // []) end)
-    | map(select((.name // "") | ascii_downcase == ($n | ascii_downcase)))
-    | .[0].id // empty' "$WORK/resp")"
-  if [ -z "$BOTKEEP_WORKLOAD_ID" ]; then
-    err "No Botkeep workload named '$name' found; set BOTKEEP_WORKLOAD_ID"
+  BOTKEEP_WORKLOAD_ID="$(find_workload)"
+  if [ -n "$BOTKEEP_WORKLOAD_ID" ]; then
+    log "Found existing workload '$name'"
+  elif [ "$CREATE" != "true" ]; then
+    err "No Botkeep workload named '$name' found (BOTKEEP_CREATE_IF_MISSING=false); set BOTKEEP_WORKLOAD_ID"
     exit 3
+  else
+    log "Workload '$name' not found, creating it"
+    jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
+      --arg rv "$RUNTIME_VERSION" --arg sc "$START_COMMAND" \
+      --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
+      '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
+        sourceType:"blank", startCommand:$sc,
+        resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
+    code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
+    case "$code" in 2*) ;; *) fail_resp "Creating workload failed" "$code";; esac
+    BOTKEEP_WORKLOAD_ID="$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' "$WORK/resp")"
+    op="$(jq -r '.operationId // .operation_id // .operation.id // empty' "$WORK/resp")"
+    [ -z "$op" ] || wait_op "$op"
+    [ -n "$BOTKEEP_WORKLOAD_ID" ] || BOTKEEP_WORKLOAD_ID="$(find_workload)"
+    [ -n "$BOTKEEP_WORKLOAD_ID" ] || die "Created workload but could not resolve its id: $(head -c 300 "$WORK/resp")"
+    ok "Created workload '$name'"
   fi
-  log "Resolved workload '$name'"
 fi
 WORKLOAD_URL="${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}"
 
