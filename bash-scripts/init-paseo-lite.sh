@@ -3,7 +3,8 @@
 # Runs ON the VM via IAP SSH. Idempotent.
 # Target: GCP free-tier e2-micro (1 GB RAM). One container: paseo-lite
 # (Rust Paseo daemon + native Claude Code + native Codex, no Node.js).
-# Same secrets as init-paseo-codex.sh: CODEX_*, GH_TOKEN, ANTHROPIC_*, CLAUDE_CODE_*.
+# Same secrets as init-paseo-codex.sh: CODEX_*, GH_TOKEN, ANTHROPIC_*, CLAUDE_CODE_*,
+# plus optional GH_USERNAME / GH_EMAIL (global git identity).
 
 set -euo pipefail
 
@@ -12,6 +13,9 @@ CODEX_API_KEY="${CODEX_API_KEY:-}"
 CODEX_MODEL="${CODEX_MODEL:-}"
 CODEX_MAX_TOKEN="${CODEX_MAX_TOKEN:-8192}"
 GH_TOKEN="${GH_TOKEN:-}"
+# Optional global git identity for agent commits (GitHub Actions secrets).
+GH_USERNAME="${GH_USERNAME:-}"
+GH_EMAIL="${GH_EMAIL:-}"
 
 # Claude Code auth (optional): OAuth token, API key, or BYOK gateway.
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
@@ -96,7 +100,7 @@ NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown
 
 # --- Skip restart if nothing changed ---
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
-  "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
+  "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
   "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS1" "$DNS2" \
@@ -165,6 +169,8 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e CODEX_API_KEY="$CODEX_API_KEY" \
   -e CODEX_MAX_TOKEN="$CODEX_MAX_TOKEN" \
   -e GH_TOKEN="$GH_TOKEN" \
+  -e GH_USERNAME="$GH_USERNAME" \
+  -e GH_EMAIL="$GH_EMAIL" \
   -e TERM=xterm-256color \
   -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   -e DISABLE_TELEMETRY=1 \

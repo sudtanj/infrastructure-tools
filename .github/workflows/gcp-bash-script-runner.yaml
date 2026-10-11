@@ -192,7 +192,8 @@ jobs:
           # ANTHROPIC_ / CLAUDE_CODE_ forward Claude Code auth to init-paseo-codex.sh and init-paseo-lite.sh
           # (CLAUDE_CODE_OAUTH_TOKEN for subscription, ANTHROPIC_API_KEY for usage billing,
           # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for BYOK).
-          SECRET_FILTER: "CODEX_,GH_TOKEN,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_"
+          # GH_USERNAME / GH_EMAIL set the global git identity inside the paseo-lite container.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_"
         run: |
           set +e
           LOG=$(mktemp)
