@@ -4,7 +4,7 @@
   "private": true,
   "description": "Minimal n8n deployment for botkeep.cloud",
   "scripts": {
-    "start": "n8n start"
+    "start": "N8N_PORT=${SERVER_PORT:-${PORT:-${N8N_PORT:-5678}}} N8N_LISTEN_ADDRESS=0.0.0.0 n8n start"
   },
   "engines": {
     "node": ">=20.19 <25"
