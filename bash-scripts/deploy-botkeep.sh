@@ -8,7 +8,7 @@
 #   BOTKEEP_API_KEY        (required) bearer key with files:write (+ power:write when restarting)
 #   BOTKEEP_WORKLOAD_ID    target workload id; when unset, the workload whose name matches the
 #                          folder name (case-insensitive) is looked up through the API
-#   BOTKEEP_API_URL        API base URL, default https://botkeep.cloud
+#   BOTKEEP_API_URL        API base URL, default https://api.botkeep.cloud
 #   BOTKEEP_REMOTE_DIR     remote directory to upload into, default /
 #   BOTKEEP_RESTART        restart the workload after upload (true/false), default true
 #   BOTKEEP_EXCLUDE        space-separated find -path globs to skip,
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 FOLDER="${1:-}"
-API_URL="${BOTKEEP_API_URL:-https://botkeep.cloud}"
+API_URL="${BOTKEEP_API_URL:-https://api.botkeep.cloud}"
 API_URL="${API_URL%/}"
 REMOTE_DIR="${BOTKEEP_REMOTE_DIR:-/}"
 RESTART="${BOTKEEP_RESTART:-true}"
