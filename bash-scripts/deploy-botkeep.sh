@@ -133,6 +133,19 @@ find_workload() {
   done
 }
 
+
+# ---- diagnose mode: print workload state/console/files, change nothing -----------
+if [ "${BOTKEEP_DIAGNOSE:-false}" = "true" ]; then
+  [ -n "${BOTKEEP_WORKLOAD_ID:-}" ] || BOTKEEP_WORKLOAD_ID="$(find_workload)"
+  [ -n "$BOTKEEP_WORKLOAD_ID" ] || die "No workload named '$name' to diagnose"
+  for ep in "" /console /logs /files /files/list /power /resources /stats /operations; do
+    c="$(api GET "${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}${ep}" || true)"
+    log "GET workloads/<id>${ep}: HTTP $c"
+    [[ "$c" == 2* ]] && head -c 2500 "$WORK/resp" | tr '\n' ' ' && echo
+  done
+  exit 0
+fi
+
 if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
   BOTKEEP_WORKLOAD_ID="$(find_workload)"
   if [ -n "$BOTKEEP_WORKLOAD_ID" ]; then
