@@ -1,0 +1,66 @@
+name: Deploy botkeep folders
+
+# Every root folder prefixed "botkeep" is deployed to the Botkeep workload with the same name.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'botkeep*/**'
+  workflow_dispatch:
+    inputs:
+      folder:
+        description: 'Single botkeep* folder to deploy (empty = all)'
+        required: false
+        default: ''
+      restart:
+        description: 'Restart the workload after upload'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: botkeep-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Deploy botkeep* folders
+        env:
+          BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
+          BOTKEEP_API_URL: ${{ vars.BOTKEEP_API_URL }}
+          BOTKEEP_RESTART: ${{ github.event_name == 'push' || inputs.restart }}
+          EVENT: ${{ github.event_name }}
+          ONLY_FOLDER: ${{ inputs.folder }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            # only folders touched by this push
+            folders=$(git diff --name-only HEAD^ HEAD | grep -E '^botkeep[^/]*/' | cut -d/ -f1 | sort -u || true)
+          elif [ -n "$ONLY_FOLDER" ]; then
+            folders="$ONLY_FOLDER"
+          else
+            folders=$(find . -maxdepth 1 -type d -name 'botkeep*' -printf '%f\n' | sort)
+          fi
+
+          failed=0
+          for f in $folders; do
+            [ -d "$f" ] || continue
+            echo "::group::$f"
+            rc=0
+            bash bash-scripts/deploy-botkeep.sh "$f" || rc=$?
+            if [ "$rc" -eq 3 ]; then
+              echo "::warning::No Botkeep workload named '$f'; skipped"
+            elif [ "$rc" -ne 0 ]; then
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"

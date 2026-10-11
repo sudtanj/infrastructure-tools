@@ -19,11 +19,13 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 ```
 .
 ├── .github/workflows/
+│   ├── botkeep-deploy.yaml          # Auto-deploy every botkeep* root folder to its Botkeep workload
 │   ├── gcp-bash-script-runner.yaml   # Remote script execution via GCP IAP SSH
 │   ├── terraform-deploy.yml          # Format, plan, and protected apply for all HCP Terraform directories
 │   ├── terraform-free-tier-oci.yaml  # Scheduled OCI A1.Flex capacity-grab workflow
 │   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
 ├── bash-scripts/
+│   ├── deploy-botkeep.sh             # Upload a folder to Botkeep via the Developer API
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container
 │   ├── init-paseo-lite.sh            # Deploy & maintain paseo-lite (Rust Paseo + native Claude Code/Codex)
 │   ├── upsert-github-runner.sh    # Upsert GitHub Actions self-hosted runner
