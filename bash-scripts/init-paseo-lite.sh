@@ -44,7 +44,7 @@ CODEX_IDLE_SECS="${PASEO_CODEX_IDLE_SECS:-300}"
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="1"
+CONFIG_REV="2"
 DNS1="2a00:1098:2b::1"
 DNS2="2a01:4f9:c010:3f02::1"
 
@@ -115,6 +115,9 @@ fi
 
 # --- Recreate the container ---
 echo "[>] replacing $CONTAINER_NAME"
+# Graceful stop first: SIGTERM lets paseo-lite save agent state and the running
+# turn so it resumes after the restart (rm -f alone is SIGKILL with no flush).
+docker stop -t 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 if command -v ss >/dev/null 2>&1 && [ -n "$(ss -Hltn "sport = :${PASEO_PORT}" 2>/dev/null)" ]; then
   echo "[x] port ${PASEO_PORT} is already in use on the host - not starting ${CONTAINER_NAME}" >&2
@@ -141,6 +144,7 @@ done
 # Docker/VM reboot.
 docker run -d --name "$CONTAINER_NAME" --restart always \
   --label "init.hash=${CONFIG_HASH}" \
+  --stop-timeout 30 \
   --user 1000:1000 \
   --network=host \
   --cpus "$CPU_LIMIT" \
