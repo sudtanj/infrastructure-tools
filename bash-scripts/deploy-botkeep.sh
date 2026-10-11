@@ -135,7 +135,14 @@ if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
         sourceType:"blank", startCommand:$sc,
         resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
     code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
-    case "$code" in 2*) ;; *) fail_resp "Creating workload failed" "$code";; esac
+    case "$code" in 2*) ;; *)
+      err "Creating workload failed (HTTP $code): $(head -c 500 "$WORK/resp")"
+      for ep in runtimes catalog settings; do   # hint: show what the API says is available
+        c="$(api GET "${API_BASE}/${ep}" || true)"
+        log "GET /${ep}: HTTP $c $(head -c 800 "$WORK/resp" | tr '\n' ' ')"
+      done
+      exit 1;;
+    esac
     BOTKEEP_WORKLOAD_ID="$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' "$WORK/resp")"
     op="$(jq -r '.operationId // .operation_id // .operation.id // empty' "$WORK/resp")"
     [ -z "$op" ] || wait_op "$op"
