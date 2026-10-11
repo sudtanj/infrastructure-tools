@@ -11,7 +11,7 @@
 #   BOTKEEP_CREATE_IF_MISSING  create the workload (named after the folder) when none exists, default true
 #   BOTKEEP_PLATFORM, _RUNTIME, _RUNTIME_VERSION, _START_COMMAND, _MEMORY_MB, _CPU_PERCENT,
 #   _STORAGE_MB            settings for a newly created workload
-#                          (general, node, 22, npm install && npm start, 1024, 50, 4096)
+#                          (general, nodejs, 22, npm install && npm start, 1024, 50, 4096)
 #   BOTKEEP_API_URL       API base URL, default https://api.botkeep.cloud
 #   BOTKEEP_REMOTE_DIR     remote directory to upload into, default /
 #   BOTKEEP_RESTART        restart the workload after upload (true/false), default true
@@ -35,7 +35,7 @@ EXCLUDE="${BOTKEEP_EXCLUDE:-*/.git/* */node_modules/* */.github/* */.env */.env.
 
 CREATE="${BOTKEEP_CREATE_IF_MISSING:-true}"
 PLATFORM="${BOTKEEP_PLATFORM:-general}"
-RUNTIME="${BOTKEEP_RUNTIME:-node}"
+RUNTIME="${BOTKEEP_RUNTIME:-nodejs}"
 RUNTIME_VERSION="${BOTKEEP_RUNTIME_VERSION:-22}"
 START_COMMAND="${BOTKEEP_START_COMMAND:-npm install --omit=dev --omit=optional --no-audit --no-fund --cache /tmp/.npm && npm start}"
 MEMORY_MB="${BOTKEEP_MEMORY_MB:-1024}"
@@ -128,22 +128,20 @@ if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
     exit 3
   else
     log "Workload '$name' not found, creating it"
-    # Try the configured runtime version first, then fall back to other versions the API may have enabled
+    # If the plan's disk quota is exceeded, retry with smaller storage limits
     created=false
-    for combo in "$RUNTIME $RUNTIME_VERSION" "nodejs $RUNTIME_VERSION" "node 22.x" "node v22" "node 22.0" "node latest" "nodejs 22.x" "nodejs latest" "node 20.x" "node 24.x" "node 18.x"; do
-      RUNTIME_TRY="${combo% *}"; rv="${combo#* }"
-      case " ${tried:-} " in *" $combo "*) continue;; esac
-      tried="${tried:-} $combo"
-      jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME_TRY" \
-        --arg rv "$rv" --arg sc "$START_COMMAND" \
-        --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$STORAGE_MB" \
+    for sto in "$STORAGE_MB" 3072 2048 1536 1024 512; do
+      [ "$sto" -le "$STORAGE_MB" ] || continue
+      jq -n --arg name "$name" --arg platform "$PLATFORM" --arg runtime "$RUNTIME" \
+        --arg rv "$RUNTIME_VERSION" --arg sc "$START_COMMAND" \
+        --argjson mem "$MEMORY_MB" --argjson cpu "$CPU_PERCENT" --argjson sto "$sto" \
         '{name:$name, platform:$platform, runtime:$runtime, runtimeVersion:$rv,
           sourceType:"blank", startCommand:$sc,
           resources:{memoryLimitMb:$mem, cpuLimitPercent:$cpu, storageLimitMb:$sto}}' > "$WORK/create.json"
       code="$(api POST "${API_BASE}/workloads" "$WORK/create.json")" || die "curl failed creating workload"
-      case "$code" in 2*) created=true; log "Created with $RUNTIME_TRY $rv"; break;; esac
-      log "Create with $RUNTIME_TRY $rv failed (HTTP $code): $(head -c 300 "$WORK/resp")"
-      grep -qi 'runtime version' "$WORK/resp" || break   # only retry on runtime-version rejections
+      case "$code" in 2*) created=true; log "Created with ${sto} MB storage"; break;; esac
+      log "Create with ${sto} MB storage failed (HTTP $code): $(head -c 300 "$WORK/resp")"
+      grep -qi 'disk allocation' "$WORK/resp" || break   # only retry on disk quota rejections
     done
     [ "$created" = true ] || fail_resp "Creating workload failed" "$code"
     BOTKEEP_WORKLOAD_ID="$(jq -r '.id // .workloadId // .workload.id // .data.id // empty' "$WORK/resp")"
