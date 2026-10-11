@@ -4,7 +4,7 @@
   "private": true,
   "description": "Minimal n8n deployment for botkeep.cloud",
   "scripts": {
-    "start": "N8N_PORT=${SERVER_PORT:-${PORT:-${N8N_PORT:-5678}}} N8N_LISTEN_ADDRESS=0.0.0.0 n8n start"
+    "start": "NODE_OPTIONS=\"--max-old-space-size=${N8N_HEAP_MB:-512}\" N8N_PORT=${SERVER_PORT:-${PORT:-${N8N_PORT:-5678}}} N8N_LISTEN_ADDRESS=0.0.0.0 EXECUTIONS_DATA_PRUNE=true N8N_DIAGNOSTICS_ENABLED=false N8N_VERSION_NOTIFICATIONS_ENABLED=false n8n start"
   },
   "engines": {
     "node": ">=20.19 <25"
