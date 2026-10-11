@@ -12,11 +12,12 @@
 #   BOTKEEP_PLATFORM, _RUNTIME, _RUNTIME_VERSION, _START_COMMAND, _MEMORY_MB, _CPU_PERCENT,
 #   _STORAGE_MB            settings for a newly created workload
 #                          (general, nodejs, 22, npm install && npm start, 1024, 50, 4096)
+#   <folder>/.botkeep      optional BOTKEEP_* defaults for that folder (e.g. BOTKEEP_START_COMMAND), not uploaded
 #   BOTKEEP_API_URL       API base URL, default https://api.botkeep.cloud
 #   BOTKEEP_REMOTE_DIR     remote directory to upload into, default /
 #   BOTKEEP_RESTART        restart the workload after upload (true/false), default true
 #   BOTKEEP_EXCLUDE        space-separated find -path globs to skip,
-#                          default: "*/.git/* */node_modules/* */.github/* */.env */.env.*"
+#                          default: "*/.git/* */node_modules/* */.github/* */.env */.env.* */.botkeep"
 #
 # Notes:
 #   - Files are uploaded with overwrite=true; files that only exist remotely are left untouched.
@@ -27,11 +28,18 @@
 set -euo pipefail
 
 FOLDER="${1:-}"
+# Per-folder settings: BOTKEEP_* lines in <folder>/.botkeep apply unless already set in the environment
+if [ -f "$FOLDER/.botkeep" ]; then
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    [[ "$k" =~ ^BOTKEEP_[A-Z_]+$ ]] || continue
+    [ -n "${!k+x}" ] || export "$k=$v"
+  done < "$FOLDER/.botkeep"
+fi
 API_URL="${BOTKEEP_API_URL:-https://api.botkeep.cloud}"
 API_URL="${API_URL%/}"
 REMOTE_DIR="${BOTKEEP_REMOTE_DIR:-/}"
 RESTART="${BOTKEEP_RESTART:-true}"
-EXCLUDE="${BOTKEEP_EXCLUDE:-*/.git/* */node_modules/* */.github/* */.env */.env.*}"
+EXCLUDE="${BOTKEEP_EXCLUDE:-*/.git/* */node_modules/* */.github/* */.env */.env.* */.botkeep}"
 
 CREATE="${BOTKEEP_CREATE_IF_MISSING:-true}"
 PLATFORM="${BOTKEEP_PLATFORM:-general}"

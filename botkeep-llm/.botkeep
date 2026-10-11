@@ -1,0 +1,4 @@
+# Settings used by bash-scripts/deploy-botkeep.sh when it creates this workload (not uploaded)
+BOTKEEP_START_COMMAND=bash start.sh
+BOTKEEP_MEMORY_MB=512
+BOTKEEP_STORAGE_MB=1024

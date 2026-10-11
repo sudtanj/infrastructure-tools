@@ -1,26 +1,27 @@
 # botkeep-llm
 
-Small LLM served by a Rust runtime ([mistral.rs](https://github.com/EricLBuehler/mistral.rs)) on [botkeep.cloud](https://botkeep.cloud). It is set up by hand from the dashboard, with no GitHub Action.
+Small LLM served by [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) on [botkeep.cloud](https://botkeep.cloud). Deployed by the `Deploy botkeep folders` workflow like the other `botkeep*` folders: the workload is created from `.botkeep` if it does not exist, `start.sh` is uploaded and the workload restarted.
 
-## Setup (dashboard)
+## How it works
 
-1. Create a server (any egg that gives you a shell and `curl`). RAM must hold the model plus about 1 GB; storage must hold the binary plus the model. A 1-2 GB RAM server fits a ~0.5-1.5B parameter model quantized to Q4.
-2. Upload `start.sh` (file manager or SFTP).
-3. In the Startup tab set the variables:
+`start.sh` downloads a prebuilt `llama-server` (~18 MB) and `qwen2.5-0.5b-instruct-q4_k_m.gguf` (~400 MB) on the first start, then serves an OpenAI-compatible API on the port Botkeep assigns (`SERVER_PORT`). Later starts reuse the files. Startup command: `bash start.sh`.
 
-   | Variable | Value |
-   | --- | --- |
-   | `MISTRALRS_URL` | URL of a prebuilt Linux `mistralrs-server` binary from the project's GitHub releases (check it matches the server's CPU architecture) |
-   | `MODEL_URL` | Direct URL of a small `.gguf` file on Hugging Face (`.../resolve/main/<file>.gguf`) |
-   | `MODEL_FILE` | optional, defaults to the file name in `MODEL_URL` |
+Sized for 512 MB RAM: the model uses about 400 MB and the context is limited to 1024 tokens. It is slow but works; give it 1 GB for more headroom (`LLAMA_CTX=2048`).
 
-4. Startup command: `bash start.sh`
-5. Start the server. The first start downloads the binary and model; later starts reuse them.
+## Optional variables (workload environment)
 
-The API is OpenAI compatible, e.g. `POST http://<host>:<port>/v1/chat/completions`.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LLAMA_API_KEY` | unset | Require `Authorization: Bearer <key>` (set this, the port is public) |
+| `MODEL_URL` | Qwen2.5-0.5B-Instruct Q4_K_M | Any direct `.gguf` URL (Hugging Face `.../resolve/main/<file>.gguf`) |
+| `LLAMA_CTX` | `1024` | Context size |
+| `LLAMA_THREADS` | `2` | CPU threads |
+| `LLAMA_TAG` | `b11552` | llama.cpp release tag |
 
-## Notes
+## Use
 
-- Verify the exact `mistralrs-server` CLI flags against `--help` for the release you download; `start.sh` has one line to adjust.
-- The server is open to anyone who reaches the port. Put it behind auth or a private network before exposing it.
-- If prebuilt binaries are not offered for your platform, `llama-server` from llama.cpp is a drop-in alternative (C++, not Rust).
+```bash
+curl http://<host>:<port>/v1/chat/completions -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $LLAMA_API_KEY" \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
