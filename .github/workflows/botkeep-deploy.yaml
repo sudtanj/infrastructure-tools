@@ -12,6 +12,10 @@ on:
         description: 'Single botkeep* folder to deploy (empty = all)'
         required: false
         default: ''
+      diagnose:
+        description: 'Only print workload state/console/files, deploy nothing'
+        type: boolean
+        default: false
       restart:
         description: 'Restart the workload after upload'
         type: boolean
@@ -38,6 +42,7 @@ jobs:
           BOTKEEP_API_KEY: ${{ secrets.BOTKEEP_API_KEY }}
           BOTKEEP_API_URL: ${{ vars.BOTKEEP_API_URL }}
           BOTKEEP_RESTART: ${{ github.event_name == 'push' || inputs.restart }}
+          BOTKEEP_DIAGNOSE: ${{ inputs.diagnose }}
           EVENT: ${{ github.event_name }}
           ONLY_FOLDER: ${{ inputs.folder }}
         run: |
