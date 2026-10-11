@@ -143,15 +143,6 @@ if [ "${BOTKEEP_DIAGNOSE:-false}" = "true" ]; then
     log "GET workloads/<id>${ep}: HTTP $c"
     [[ "$c" == 2* ]] && head -c 2500 "$WORK/resp" | tr '\n' ' ' && echo
   done
-  for body in '{"action":"retry"}' '{"action":"retry_installation"}' '{"action":"retry-installation"}'; do
-    echo "$body" > "$WORK/p.json"
-    c="$(api POST "${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}/actions" "$WORK/p.json" || true)"
-    log "POST actions $body: HTTP $c $(head -c 600 "$WORK/resp" | tr '\n' ' ')"
-  done
-  for ep in installation/retry retry-installation install/retry installation; do
-    c="$(api POST "${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}/${ep}" || true)"
-    log "POST ${ep}: HTTP $c $(head -c 600 "$WORK/resp" | tr '\n' ' ')"
-  done
   exit 0
 fi
 
@@ -189,6 +180,38 @@ if [ -z "${BOTKEEP_WORKLOAD_ID:-}" ]; then
   fi
 fi
 WORKLOAD_URL="${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}"
+
+
+# wait_ready: block until the workload finished installing; retry a failed installation (max 2x)
+wait_ready() {
+  local deadline=$((SECONDS + OP_TIMEOUT)) retries=0 code state ready can err_msg
+  while :; do
+    code="$(api GET "$WORKLOAD_URL")" || die "curl failed reading workload"
+    case "$code" in 2*) ;; *) fail_resp "Reading workload failed" "$code";; esac
+    ready="$(jq -r '.installationReady // false' "$WORK/resp")"
+    [ "$ready" = true ] && return 0
+    state="$(jq -r '(.lifecycleState // .status // "unknown") | ascii_downcase' "$WORK/resp")"
+    can="$(jq -r '.canRetryInstallation // false' "$WORK/resp")"
+    err_msg="$(jq -r '.provisioningError // empty' "$WORK/resp")"
+    if [ "$state" = failed ] || [ "$state" = error ]; then
+      if [ "$can" = true ] && [ "$retries" -lt 2 ]; then
+        retries=$((retries + 1)); log "Installation failed (${err_msg:-unknown}); retry $retries/2"
+        echo '{"action":"retry"}' > "$WORK/retry.json"
+        code="$(api POST "${WORKLOAD_URL}/actions" "$WORK/retry.json")" || die "curl failed on retry"
+        case "$code" in 2*) ;; *) fail_resp "Retry installation failed" "$code";; esac
+      else
+        die "Workload installation failed: ${err_msg:-state $state}"
+      fi
+    else
+      log "Waiting for installation (state: $state)"
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || die "Timed out waiting for the workload to finish installing"
+    sleep 10
+  done
+}
+
+log "Waiting for the workload to be ready"
+wait_ready
 
 # ---- collect files ----------------------------------------------------------
 find_args=(-type f)
