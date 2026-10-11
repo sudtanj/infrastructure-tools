@@ -77,6 +77,20 @@ api() {
   printf 'header = "Authorization: Bearer %s"\n' "$BOTKEEP_API_KEY" | curl -K - "${args[@]}"
 }
 
+# api_wait METHOD URL [JSON_BODY_FILE]: like api, but while a new workload is still installing
+# (409 "Files are unavailable until installation is complete") wait and retry
+api_wait() {
+  local code deadline=$((SECONDS + OP_TIMEOUT))
+  while :; do
+    code="$(api "$@")" || return 1
+    if [ "$code" = 409 ] && grep -qi 'installation' "$WORK/resp" && [ "$SECONDS" -lt "$deadline" ]; then
+      log "Workload is still installing, waiting..." >&2; sleep 10; continue
+    fi
+    echo "$code"; return 0
+  done
+}
+
+
 fail_resp() {
   err "$1 (HTTP $2): $(head -c 500 "$WORK/resp" 2>/dev/null)"
   exit 1
@@ -178,7 +192,7 @@ for d in "${!seen_dirs[@]}"; do [ "$d" = "." ] || dirs+=("${REMOTE_DIR}/$d"); do
 if [ "${#dirs[@]}" -gt 0 ]; then
   while IFS= read -r d; do
     jq -n --arg p "$d" '{path:$p,type:"folder",createOnly:true}' > "$WORK/dir.json"
-    code="$(api PUT "${WORKLOAD_URL}/file" "$WORK/dir.json" || true)"
+    code="$(api_wait PUT "${WORKLOAD_URL}/file" "$WORK/dir.json" || true)"
     case "$code" in 2*) ;; *) log "folder $d: HTTP $code (assuming it exists)";; esac
   done < <(printf '%s\n' "${dirs[@]}" | LC_ALL=C sort)
 fi
@@ -190,7 +204,7 @@ flush() {
   [ "$batch_n" -gt 0 ] || return 0
   batch_no=$((batch_no + 1))
   jq -s '{files: .}' "$WORK"/obj_*.json > "$WORK/batch.json"
-  local code; code="$(api POST "${WORKLOAD_URL}/files/upload-batch" "$WORK/batch.json")" || die "curl failed on batch $batch_no"
+  local code; code="$(api_wait POST "${WORKLOAD_URL}/files/upload-batch" "$WORK/batch.json")" || die "curl failed on batch $batch_no"
   case "$code" in 2*) ;; *) fail_resp "Batch $batch_no upload failed" "$code";; esac
   sent=$((sent + batch_n)); ok "Uploaded $sent/$total"
   rm -f "$WORK"/obj_*.json "$WORK/batch.json"
