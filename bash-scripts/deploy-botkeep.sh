@@ -143,6 +143,15 @@ if [ "${BOTKEEP_DIAGNOSE:-false}" = "true" ]; then
     log "GET workloads/<id>${ep}: HTTP $c"
     [[ "$c" == 2* ]] && head -c 2500 "$WORK/resp" | tr '\n' ' ' && echo
   done
+  for body in '{"action":"retry"}' '{"action":"retry_installation"}' '{"action":"retry-installation"}'; do
+    echo "$body" > "$WORK/p.json"
+    c="$(api POST "${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}/actions" "$WORK/p.json" || true)"
+    log "POST actions $body: HTTP $c $(head -c 600 "$WORK/resp" | tr '\n' ' ')"
+  done
+  for ep in installation/retry retry-installation install/retry installation; do
+    c="$(api POST "${API_BASE}/workloads/${BOTKEEP_WORKLOAD_ID}/${ep}" || true)"
+    log "POST ${ep}: HTTP $c $(head -c 600 "$WORK/resp" | tr '\n' ' ')"
+  done
   exit 0
 fi
 
