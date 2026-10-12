@@ -805,12 +805,14 @@ bootcmd:
       printf "nameserver 2001:4860:4860::6464\nnameserver 2001:4860:4860::64\noptions timeout:2 attempts:3\n" > /etc/resolv.conf
       chmod 644 /etc/resolv.conf
     else
+      # Normal VM (external IPv4): leave DNS completely alone. Only undo OUR OWN earlier DNS64 setup.
+      # (Starting systemd-resolved unconditionally here switched COS to a resolver with no upstream DNS.)
       if [ ! -L /etc/resolv.conf ] && grep -q '2001:4860:4860::64' /etc/resolv.conf 2>/dev/null; then
         rm -f /etc/resolv.conf
         ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        systemctl unmask systemd-resolved || true
+        systemctl start systemd-resolved || true
       fi
-      systemctl unmask systemd-resolved || true
-      systemctl start systemd-resolved || true
     fi
 
 runcmd:
