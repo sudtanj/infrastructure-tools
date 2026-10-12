@@ -147,12 +147,29 @@ ensure_dns64() {
 ensure_dns64
 
 # ---------- helpers ----------
-exec_ok() {  # can binaries run from this directory?
+# Can root execute binaries from this directory? (tailscaled runs as root under systemd.)
+# Returns 0 = ok, 1 = cannot exec (noexec), 2 = cannot write (disk/RAM full, read-only, ...).
+# The exec test MUST run as root: /var/lib/docker is mode 0710 root, so an unprivileged user can't
+# traverse into it and the test would wrongly report "noexec" even on a perfectly executable dir.
+exec_ok() {
   local t="$1/.exec-test" rc=1
-  $SUDO sh -c "printf '#!/bin/sh\nexit 0\n' > '$t' && chmod 755 '$t'" || return 1
-  if "$t" >/dev/null 2>&1; then rc=0; fi
+  if ! $SUDO sh -c "printf '#!/bin/sh\nexit 0\n' > '$t' && chmod 755 '$t'"; then
+    $SUDO rm -f "$t" 2>/dev/null || true
+    return 2
+  fi
+  if $SUDO "$t" >/dev/null 2>&1; then rc=0; fi
   $SUDO rm -f "$t"
   return $rc
+}
+
+bindir_diag() {
+  echo "---- bin dir diagnostics ----" >&2
+  echo "dir: $1   fstype: $(stat -f -c %T "$1" 2>/dev/null || echo ?)   mode: $(stat -c '%a %U' "$1" 2>/dev/null || echo ?)" >&2
+  df -h "$1" /var /tmp 2>&1 | sed 's/^/  /' >&2 || true
+  df -i "$1" 2>&1 | sed 's/^/  /' >&2 || true
+  free -m 2>&1 | sed 's/^/  /' >&2 || true
+  mount | grep -E "$1|/var " 2>&1 | sed 's/^/  /' >&2 || true
+  echo "-----------------------------" >&2
 }
 
 installed_version() {
@@ -199,9 +216,26 @@ restore_backup() {
 echo "[>] ensuring executable bin directory"
 $SUDO mkdir -p "$TS_BIN_DIR" "$TS_CACHE_DIR"
 $SUDO chmod 755 "$TS_BIN_DIR"
-# COS mounts /var (and /home) noexec. Preferred fix: bind-mount the directory onto itself and
-# remount that bind mount with exec. Binaries stay on disk, so it costs no RAM. (Root only.)
-if ! exec_ok "$TS_BIN_DIR"; then
+
+# Earlier failed runs may have stacked tmpfs mounts on this directory. Each one hides the real dir and
+# holds RAM. Drop tmpfs layers that don't contain an installed tailscaled.
+while mountpoint -q "$TS_BIN_DIR" \
+      && [ "$(stat -f -c %T "$TS_BIN_DIR" 2>/dev/null)" = "tmpfs" ] \
+      && [ ! -x "$TS_BIN_DIR/tailscaled" ]; do
+  echo "[>] removing stale tmpfs mount on ${TS_BIN_DIR}"
+  $SUDO umount "$TS_BIN_DIR" || break
+done
+
+EX=0; exec_ok "$TS_BIN_DIR" && EX=0 || EX=$?
+if [ "$EX" = "2" ]; then
+  echo "[x] cannot write to ${TS_BIN_DIR} (no space left, read-only, or memory exhausted)" >&2
+  bindir_diag "$TS_BIN_DIR"
+  exit 1
+fi
+
+if [ "$EX" = "1" ]; then
+  # Genuinely noexec (COS mounts /var and /home noexec). Preferred fix: bind-mount the directory onto
+  # itself and remount that bind mount with exec. Binaries stay on disk, so it costs no RAM.
   echo "[!] ${TS_BIN_DIR} is on a noexec filesystem; trying a disk-backed bind mount with exec"
   if mountpoint -q "$TS_BIN_DIR"; then
     $SUDO mount -o remount,exec "$TS_BIN_DIR" 2>/dev/null || true
@@ -209,17 +243,20 @@ if ! exec_ok "$TS_BIN_DIR"; then
     $SUDO mount --bind "$TS_BIN_DIR" "$TS_BIN_DIR" 2>/dev/null \
       && $SUDO mount -o remount,bind,exec "$TS_BIN_DIR" 2>/dev/null || true
   fi
+  exec_ok "$TS_BIN_DIR" && EX=0 || EX=$?
 fi
-# Last resort: RAM-backed tmpfs. Both binaries together are ~80 MB+, so it must be large enough,
-# and it is lost on reboot (this script reinstalls on the next run).
-if ! exec_ok "$TS_BIN_DIR"; then
+
+if [ "$EX" = "1" ]; then
+  # Last resort: RAM-backed tmpfs (~100 MB for both binaries; lost on reboot, reinstalled on next run).
   if mountpoint -q "$TS_BIN_DIR"; then $SUDO umount "$TS_BIN_DIR" 2>/dev/null || true; fi
   echo "[!] bind mount did not allow exec; falling back to tmpfs (uses ~100 MB of RAM)"
   $SUDO mount -t tmpfs -o exec,mode=0755,size=160m tmpfs "$TS_BIN_DIR"
+  exec_ok "$TS_BIN_DIR" && EX=0 || EX=$?
 fi
-if ! exec_ok "$TS_BIN_DIR"; then
-  echo "[x] cannot make ${TS_BIN_DIR} executable (bind mount and tmpfs both failed)" >&2
-  mount | grep "$TS_BIN_DIR" >&2 || true
+
+if [ "$EX" != "0" ]; then
+  echo "[x] cannot make ${TS_BIN_DIR} usable for binaries (exec_ok code ${EX})" >&2
+  bindir_diag "$TS_BIN_DIR"
   exit 1
 fi
 echo "[+] bin dir ready"
