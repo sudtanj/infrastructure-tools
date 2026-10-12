@@ -18,6 +18,7 @@ on:
           - update-tailscale
           - upsert-github-runner
           - optimize-vm
+          - debug-cloud-init
           # add new script names here as you create them
       debug:
         description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
