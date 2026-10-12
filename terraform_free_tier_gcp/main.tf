@@ -46,7 +46,7 @@ resource "terraform_data" "cloud_init_trigger" {
 # --- Compute Instance (Container-Optimized OS) ---
 resource "google_compute_instance" "free_tier_vm" {
   name                = "gcp-free-tier-vm-${random_id.hex.hex}"
-  machine_type        = "e2-micro" # Always Free Tier eligible
+  machine_type        = "e2-micro" # Always Free Tier eligible (us-west1 / us-central1 / us-east1 only)
   zone                = var.zone
   deletion_protection = false
 
@@ -69,14 +69,14 @@ resource "google_compute_instance" "free_tier_vm" {
     network    = "default"
     subnetwork = "default"
 
-    stack_type = "IPV4_IPV6"
+    # IPv4-only: external IPv6 is Premium-tier only, so dropping it forces
+    # all internet egress through the Standard tier IP (200 GB/month free).
+    stack_type = "IPV4_ONLY"
 
-    # Assign public IPv6 address (Strictly IPv6-only external access)
-    ipv6_access_config {
-      network_tier = "PREMIUM"
+    # Ephemeral external IPv4 (no nat_ip = ephemeral) on Standard tier
+    access_config {
+      network_tier = "STANDARD"
     }
-
-    # IPv4 public access_config block completely removed.
   }
 
   scheduling {
@@ -116,18 +116,19 @@ resource "google_compute_firewall" "allow_iap_ssh" {
   target_tags   = ["free-tier-instance"]
 }
 
-# --- Firewall: Allow Portainer Web UI (IPv6) ---
-resource "google_compute_firewall" "allow_portainer_ipv6" {
-  name        = "allow-portainer-ipv6-${random_id.hex.hex}"
+# --- Firewall: Allow Portainer Web UI (IPv4) ---
+# Consider deleting this and reaching Portainer over Tailscale instead.
+resource "google_compute_firewall" "allow_portainer_ipv4" {
+  name        = "allow-portainer-ipv4-${random_id.hex.hex}"
   network     = "default"
-  description = "Allow inbound Portainer Web UI access over IPv6"
+  description = "Allow inbound Portainer Web UI access over IPv4"
 
   allow {
     protocol = "tcp"
-    ports    = ["9000", "9443"]
+    ports    = ["9443"] # HTTPS only; 9000 is plain HTTP
   }
 
-  source_ranges = ["::/0"]
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["free-tier-instance"]
 }
 
@@ -137,7 +138,7 @@ output "vm_name" {
   description = "The name of the deployed compute instance."
 }
 
-output "instance_ipv6" {
-  value       = google_compute_instance.free_tier_vm.network_interface[0].ipv6_access_config[0].external_ipv6
-  description = "Public IPv6 address of the instance."
+output "instance_ipv4" {
+  value       = google_compute_instance.free_tier_vm.network_interface[0].access_config[0].nat_ip
+  description = "Ephemeral public IPv4 address of the instance (Standard tier)."
 }
