@@ -23,7 +23,9 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── gcp-bash-script-runner.yaml   # Remote script execution via GCP IAP SSH
 │   ├── terraform-deploy.yml          # Format, plan, and protected apply for all HCP Terraform directories
 │   ├── terraform-free-tier-oci.yaml  # Scheduled OCI A1.Flex capacity-grab workflow
-│   └── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
+│   ├── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
+│   └── builder-tools-*.yml           # Docker image publish, PR check, dependabot merge and Mi 3 firmware build for builder-tools/
+├── builder-tools/                    # Docker images (Docker Hub) + Padavan firmware builder, migrated from sudtanj/builder-tools
 ├── bash-scripts/
 │   ├── deploy-botkeep.sh             # Upload a folder to Botkeep via the Developer API
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container

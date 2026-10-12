@@ -1,0 +1,37 @@
+services:
+  oci-freetier-creator:
+    build: .
+    image: oci-freetier-creator
+    # "no" by default: main.py already retries internally (every
+    # REQUEST_WAIT_TIME_SECS) until it succeeds or hits a fatal error, so a
+    # Docker-level restart mostly just re-sends the "starting up" Discord/
+    # email notification on top of that. Switch to "unless-stopped" if you
+    # want the container itself to keep retrying after a crash/OOM too.
+    restart: "no"
+    volumes:
+      # Generated oci_config + private key (from the env vars below),
+      # auto-generated SSH keypair, and main.py's own output (INSTANCE_CREATED,
+      # launch_instance.log, ERROR_IN_CONFIG.log, ...) - all persisted here
+      # so a restart doesn't regenerate the SSH key (which would invalidate
+      # access to an already-created instance) or lose the logs.
+      - oci-data:/app
+    env_file:
+      # Copy .env.example to .env and fill in your OCI credentials + at
+      # least OCT_FREE_AD.
+      - .env
+    environment:
+      # Uncomment/override any of these here instead of (or on top of) .env:
+      # OCT_FREE_AD: AD-1
+      # DISPLAY_NAME: my-arm-instance
+      # OCI_COMPUTE_SHAPE: VM.Standard.A1.Flex
+      # OCI_SUBNET_ID: ocid1.subnet.oc1...
+      # OCI_USER_OCID: ocid1.user.oc1...
+      # OCI_FINGERPRINT: aa:bb:cc:...
+      # OCI_TENANCY_OCID: ocid1.tenancy.oc1...
+      # OCI_REGION: ap-hyderabad-1
+      # OCI_PRIVATE_KEY_BASE64: <base64 -w0 oci_api_private_key.pem>
+      # DISCORD_WEBHOOK: https://discord.com/api/webhooks/...
+      TZ: UTC
+
+volumes:
+  oci-data:

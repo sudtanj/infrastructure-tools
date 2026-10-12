@@ -1,0 +1,137 @@
+name: Builder Tools - Build Mi 3 Padavan firmware
+
+# Monitors the stable branch of padavan-ng; when it has new commits, updates
+# PADAVAN_COMMIT in builder-tools/mi3-padavan-firmware-builder/variables, commits it and
+# builds a fresh Xiaomi Mi 3 firmware image. Independent of docker-publish.yml.
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags:
+      - 'mi3-padavan-firmware-builder-v*'
+    paths:
+      - 'builder-tools/mi3-padavan-firmware-builder/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mi3-padavan-firmware-builder
+  cancel-in-progress: false
+
+env:
+  DIR: builder-tools/mi3-padavan-firmware-builder
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare upstream stable branch with pinned commit
+        id: decide
+        run: |
+          set -euo pipefail
+          . <(sed 's|\r$||' "$DIR/variables")
+          latest="$(git ls-remote "$PADAVAN_REPO" "refs/heads/$PADAVAN_BRANCH" | cut -f1)"
+          [ -n "$latest" ] || { echo "::error::cannot resolve $PADAVAN_BRANCH"; exit 1; }
+          echo "pinned=$PADAVAN_COMMIT latest=$latest"
+          build=false
+          if [ "$latest" != "$PADAVAN_COMMIT" ] && [ "${{ github.ref_type }}" = "branch" ]; then
+            sed -i "s|^PADAVAN_COMMIT=.*|PADAVAN_COMMIT=\"$latest\"|" "$DIR/variables"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$DIR/variables"
+            git commit -m "mi3-padavan-firmware-builder: update padavan-ng to ${latest:0:8}"
+            git push
+            build=true
+          elif [ "${{ github.event_name }}" != "schedule" ]; then
+            build=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    container: registry.gitlab.com/hadzhioglu/padavan-ng
+    defaults:
+      run:
+        shell: bash
+        working-directory: builder-tools/mi3-padavan-firmware-builder
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}  # pick up the commit bump pushed by `check`
+
+      - name: Get variables
+        run: |
+          sed -i 's|\r$||g' variables build.config
+          . <(cat variables build.config)
+          PADAVAN_THEMES="${PADAVAN_THEMES[*]}"
+          for v in "${!PADAVAN_@}" "${!CONFIG_@}"; do
+            echo "$v=${!v}" >> $GITHUB_ENV
+          done
+
+      - name: Download sources and toolchain
+        run: |
+          git config --global --add safe.directory '*'
+          git clone -b "$PADAVAN_BRANCH" "$PADAVAN_REPO"
+          git -C padavan-ng checkout "$PADAVAN_COMMIT"
+          wget -qO- "$PADAVAN_TOOLCHAIN_URL" | tar -C padavan-ng --zstd -xf -
+
+      - name: Install themes
+        run: |
+          if [[ -n $PADAVAN_THEMES ]]; then
+            git clone --depth 1 -b "$PADAVAN_THEMES_BRANCH" "$PADAVAN_THEMES_REPO" themes
+            cp -r themes/common-theme themes/jquery.js padavan-ng/trunk/user/www/n56u_ribbon_fixed
+            for theme in $PADAVAN_THEMES; do
+              echo "Installing $theme theme"
+              cp -r "themes/$theme-theme" padavan-ng/trunk/user/www/n56u_ribbon_fixed
+            done
+          fi
+
+      - name: Run custom pre-build script
+        run: '[[ -f pre-build.sh ]] && . pre-build.sh || :'
+
+      - name: Build firmware
+        run: |
+          cp build.config padavan-ng/trunk/.config
+          pushd padavan-ng/trunk
+          ./clear_tree.sh
+          ./build_firmware.sh
+          popd
+
+      - name: Run custom post-build script
+        run: '[[ -f post-build.sh ]] && . post-build.sh || :'
+
+      - name: Prepare artifacts
+        run: |
+          FW_FILE_NAME="$(find padavan-ng/trunk/images -type f -regextype posix-extended -iregex ".*\.(trx|bin)$" \
+                          -printf "%T@\t%f\n" | sort -V | tail -1 | cut -f2)"
+          cp "padavan-ng/trunk/images/$FW_FILE_NAME" .
+          echo "FW_FILE_NAME=$FW_FILE_NAME" >> $GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$(date '+%Y.%m.%d_%H.%M.%S')" >> $GITHUB_ENV
+
+      - name: Check firmware size
+        run: |
+          partitions=padavan-ng/trunk/configs/boards/$CONFIG_VENDOR/$CONFIG_FIRMWARE_PRODUCT_ID/partitions.config
+          max_fw_size="$(awk '/Firmware/ { getline; getline; sub(",", ""); print strtonum($2); }' "$partitions")"
+          fw_size="$(stat -c %s "$FW_FILE_NAME")"
+          if ((fw_size > max_fw_size)); then
+            echo "Firmware size ($fw_size) exceeds max size ($max_fw_size) for your target device"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: padavan-ng_${{ env.CONFIG_VENDOR }}_${{ env.CONFIG_FIRMWARE_PRODUCT_ID }}_${{ env.BUILD_TIMESTAMP }}
+          retention-days: 7
+          path: |
+            ${{ env.DIR }}/${{ env.FW_FILE_NAME }}
+            ${{ env.DIR }}/build.config

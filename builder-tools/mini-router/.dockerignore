@@ -1,0 +1,4 @@
+# The build fetches mini-router's source itself (see the Dockerfile), so
+# nothing from this folder needs to reach the build context.
+*
+!Dockerfile

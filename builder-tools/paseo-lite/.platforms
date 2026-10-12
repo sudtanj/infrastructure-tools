@@ -1,0 +1,4 @@
+# Platforms published to Docker Hub for this image (read by
+# .github/workflows/docker-publish.yml). amd64 only: the Rust daemon build
+# under arm64 QEMU emulation is too slow.
+linux/amd64

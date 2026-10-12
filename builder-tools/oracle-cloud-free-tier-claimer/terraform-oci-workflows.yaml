@@ -1,0 +1,88 @@
+name: "Terraform OCI"
+
+on:
+  #schedule:
+    #- cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+env:
+  OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+  OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+  OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+  OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+  OCI_COMPARTMENT_OCID: ${{ secrets.OCI_COMPARTMENT_OCID }}
+  WORKING_DIR: oracle-cloud-free-tier
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  terraform:
+    name: "Terraform OCI"
+    runs-on: self-hosted
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      # Step 1: Ensure directory exists & configure Terraform CLI on runner host
+      - name: Configure Persistent Plugin Cache
+        run: |
+          mkdir -p $HOME/.terraform.d/plugin-cache
+          cat <<'EOF' > $HOME/.terraformrc
+          plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"
+          disable_checkpoint = true
+          EOF
+
+      # Step 2: Init downloads provider into $HOME/.terraform.d/plugin-cache
+      - name: Terraform Init
+        run: terraform init
+
+      # Step 3: Run apply (Failure here won't touch previously cached provider files)
+      - name: Terraform Apply
+        run: |
+          terraform apply -auto-approve \
+            -var="tenancy_ocid=${{ env.OCI_TENANCY_OCID }}" \
+            -var="user_ocid=${{ env.OCI_USER_OCID }}" \
+            -var="api_key_fingerprint=${{ env.OCI_FINGERPRINT }}" \
+            -var="api_key_private_key=${{ env.OCI_PRIVATE_KEY }}" \
+            -var="compartment_ocid=${{ env.OCI_COMPARTMENT_OCID }}"
+
+      # Step 4: Ensure cache folder permissions/sync run ALWAYS, even if apply failed
+      - name: Ensure Cache Persistence
+        if: always()
+        run: |
+          echo "Verifying local plugin cache contents..."
+          ls -lh $HOME/.terraform.d/plugin-cache || true
+
+      # Step 5: Commit state ONLY if apply succeeded
+      - name: Commit Terraform State
+        if: success()
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${{ env.WORKING_DIR }}/terraform.tfstate"
+
+          if git diff --cached --quiet; then
+            echo "No state changes."
+            exit 0
+          fi
+
+          git commit -m "chore(terraform-oci): update state"
+          git push origin HEAD:${{ github.ref_name }}

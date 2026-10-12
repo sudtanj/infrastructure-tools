@@ -1,0 +1,20 @@
+services:
+  oracle-cloud-free-tier-claimer:
+    image: sudtanj/oracle-cloud-free-tier-claimer:latest
+    environment:
+      OCI_TENANCY_OCID: ocid1.tenancy.oc1..xxxx
+      OCI_USER_OCID: ocid1.user.oc1..xxxx
+      OCI_FINGERPRINT: xx:xx:xx
+      OCI_PRIVATE_KEY_BASE64: BASE64_OF_YOUR_PEM
+      OCI_COMPARTMENT_OCID: ocid1.compartment.oc1..xxxx
+      OCI_REGION: ap-singapore-1
+      OCI_AVAILABILITY_DOMAIN: AD-1
+      OCI_SSH_PUBLIC_KEY: ""
+      RUN_INTERVAL: 300
+      RUN_ONCE: 0
+    volumes:
+      - oci-terraform-state:/workspace
+    restart: unless-stopped
+
+volumes:
+  oci-terraform-state:

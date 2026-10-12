@@ -1,0 +1,114 @@
+services:
+  paseo-codex:
+    # Pulls the published image from Docker Hub instead of building
+    # locally. Pin an exact version instead of :latest if you want
+    # reproducible pulls (see the auto-bumped tags at
+    # https://hub.docker.com/r/sudtanj/paseo-codex/tags).
+    image: sudtanj/paseo-codex:latest
+    pull_policy: always
+    restart: unless-stopped
+    # Sized for a GCP free-tier e2-micro (1 GB RAM, shared 0.25 vCPU).
+    # Hard cap below host RAM so the kernel OOM-kills this container, not sshd.
+    # Pair with the host swapfile from scripts/gcp-free-tier-setup.sh.
+    mem_limit: 800m
+    memswap_limit: 2g
+    cpus: 1.0
+    init: false  # Paseo's entrypoint already runs under tini
+    # Keep Docker's json logs from filling the 30 GB free-tier disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    # Host networking instead of a published port: the container shares the
+    # host's network namespace directly (interfaces, routes, DNS) rather
+    # than going through Docker's NATed bridge network. Needed if your host
+    # is IPv6-only/IPv6-preferred - Docker's default bridge only NATs
+    # IPv4 unless you separately configure IPv6 on the Docker daemon and
+    # the compose network, so outbound IPv6 (and dual-stack sites like
+    # api.github.com) can silently stall under bridge networking. Under
+    # host mode there's no separate container stack to configure - it's
+    # just the host's own, so this is unneeded, but note `ports:` is not
+    # compatible with `network_mode: host` and is dropped in favor of it;
+    # the daemon binds directly to the host's PASEO_LISTEN port instead.
+    network_mode: host
+    # If your host has working IPv6 but a broken/unavailable IPv4 path (a
+    # dead default route, ISP that only actually passes v6, etc): GitHub's
+    # own hosts (github.com, api.github.com) don't publish AAAA records, so
+    # normal dual-stack does nothing for them - `gh`/git/Codex just dial
+    # the IPv4 address directly and hang on your broken route. Point DNS at
+    # Cloudflare's public DNS64 resolvers instead: they synthesize an IPv6
+    # address for IPv4-only hosts and transparently NAT64 the traffic back
+    # to the real IPv4 destination over Cloudflare's own network, so the
+    # whole path from your container out stays IPv6. Uncomment if you hit
+    # this (harmless to leave commented on a normal dual-stack/IPv4 host -
+    # this is specifically an IPv6-only-egress workaround):
+    # dns:
+    #   - 2606:4700:4700::64
+    #   - 2606:4700:4700::6400
+    volumes:
+      # Persistent daemon state and agent credentials/config (~/.claude,
+      # ~/.codex, Paseo's own ~/.paseo state, etc).
+      - paseo-home:/home/paseo
+      # Code visible to Paseo and the Claude Code/Codex sessions it launches - mounts
+      # the current directory (wherever you run `docker compose` from).
+      - .:/workspace
+    # ALL configuration lives directly in this file - no .env / env_file is
+    # used. Uncomment and fill in what you need below, then
+    # `docker compose -f docker-compose.hub.yml up -d` to apply (no image
+    # rebuild needed for config).
+    environment:
+      # --- Low-resource defaults (free-tier VM) ---
+      PASEO_RELAY_ENABLED: "true"           # keep relay on (set false if using Tailscale)
+      PASEO_LOG_CONSOLE_LEVEL: warn
+      PASEO_LOG_FILE_LEVEL: info            # default is trace (lots of disk I/O)
+      PASEO_LOG_FILE_ROTATE_SIZE: 5m
+      PASEO_LOG_FILE_ROTATE_COUNT: "2"
+      # --- Paseo itself ----------------------------------------------------
+      # Strongly recommended for anything network-reachable - without it,
+      # the daemon accepts unauthenticated control connections from anyone
+      # who can reach it.
+      # PASEO_PASSWORD: change-me
+      # PASEO_LISTEN: 0.0.0.0:6767
+      # PASEO_HOSTNAMES: paseo.example.com,.lan
+
+      # --- Claude Code -----------------------------------------------------
+      # Read natively by Claude Code from the environment on every launch -
+      # no config file is generated, and Paseo passes them straight through
+      # to the sessions it launches (like OPENAI_API_KEY does for Codex).
+      #
+      # AUTH OPTION 1 - subscription (Pro/Max), the default here: leave
+      # ANTHROPIC_API_KEY unset and instead either run `claude /login` once
+      # inside the container (OAuth credentials persist in the paseo-home
+      # volume) ...
+      # ANTHROPIC_API_KEY: sk-ant-...   <- API-key billing only; leave unset for subscription
+      # ... or generate a token with `claude setup-token` on your own
+      # machine and set it here - charges your subscription, not usage:
+      # CLAUDE_CODE_OAUTH_TOKEN: ...
+      #
+      # AUTH OPTION 2 - Claude Code BYOK: point at your own
+      # Anthropic-API-compatible endpoint instead of api.anthropic.com.
+      # ANTHROPIC_AUTH_TOKEN is sent as an Authorization: Bearer header
+      # instead of x-api-key - for gateways that want a bearer token.
+      # ANTHROPIC_BASE_URL: https://my-gateway.internal
+      # ANTHROPIC_AUTH_TOKEN: ...
+      # Optional default model, e.g. claude-sonnet-4-5 (unset = Claude
+      # Code's own built-in default).
+      # ANTHROPIC_MODEL: claude-sonnet-4-5
+
+      # --- Codex -----------------------------------------------------------
+      # OPENAI_API_KEY: sk-...
+      # Codex BYOK (note: Codex CLI only speaks the Responses API
+      # /v1/responses, not Chat Completions - the endpoint has to support it):
+      # CODEX_BASE_URL: https://my-gateway.internal/v1
+      # CODEX_API_KEY: sk-...
+      # CODEX_MODEL: gpt-5
+
+      # --- GitHub CLI (gh) --------------------------------------------------
+      # Clones/pulls private repos into /workspace - wired up for both `gh`
+      # and plain `git` automatically at container start.
+      # GH_TOKEN: ghp_...
+      TERM: xterm-256color
+
+volumes:
+  paseo-home:

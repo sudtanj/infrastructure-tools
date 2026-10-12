@@ -1,0 +1,16 @@
+name: Builder Tools - Auto-merge Docker base image updates
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  merge:
+    if: github.actor == 'dependabot[bot]' && startsWith(github.event.pull_request.head.ref, 'dependabot/docker/builder-tools/')
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR" --auto --squash --repo "$GITHUB_REPOSITORY"

@@ -1,0 +1,17 @@
+PADAVAN_REPO="http://gitlab.com/hadzhioglu/padavan-ng.git"
+PADAVAN_BRANCH="stable_master"
+PADAVAN_COMMIT="5b69602f184b86597e4596d882cdd6efaa3ac290"
+PADAVAN_TOOLCHAIN_URL="https://gitlab.com/api/v4/projects/hadzhioglu%2Fpadavan-ng/packages/generic/toolchain/latest/toolchain.tzst"
+
+PADAVAN_THEMES_REPO="https://gitlab.com/hadzhioglu/padavan-themes.git"
+#PADAVAN_THEMES_REPO="https://gitlab.com/hadzhioglu/padavan-themes-lite.git"
+PADAVAN_THEMES_BRANCH="main"
+
+PADAVAN_THEMES=(
+#  blue
+#  blue2
+#  grey
+#  grey2
+#  white
+#  yellow
+)
