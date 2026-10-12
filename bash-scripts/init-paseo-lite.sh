@@ -5,6 +5,11 @@
 # (Rust Paseo daemon + native Claude Code + native Codex, no Node.js).
 # Same secrets as init-paseo-codex.sh: CODEX_*, GH_TOKEN, ANTHROPIC_*, CLAUDE_CODE_*,
 # plus optional GH_USERNAME / GH_EMAIL (global git identity).
+#
+# DNS64_MODE = auto (default) | on | off
+#   auto: pass the DNS64 resolvers to the container only when the VM has NO external IPv4
+#         (IPv6-only). With an external IPv4, the container uses the host's normal DNS.
+#   on:   always pass DNS64 resolvers      off: never pass them
 
 set -euo pipefail
 
@@ -44,9 +49,10 @@ CODEX_IDLE_SECS="${PASEO_CODEX_IDLE_SECS:-300}"
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="2"
-DNS1="2a00:1098:2b::1"
-DNS2="2a01:4f9:c010:3f02::1"
+CONFIG_REV="3"
+DNS64_MODE="${DNS64_MODE:-auto}"
+DNS1="${DNS1:-2a00:1098:2b::1}"
+DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
 
 IMAGE="sudtanj/paseo-lite:latest"
 CONTAINER_NAME="paseo-lite"
@@ -54,6 +60,51 @@ HOME_VOLUME="paseo-lite-home"
 WORKSPACE_VOLUME="paseo-workspace"
 
 echo "[*] init start"
+
+# --- DNS64: only on IPv6-only VMs ---
+# DNS64 resolvers (nat64.net) let an IPv6-only host reach IPv4-only services like github.com.
+# With an external IPv4 address they are unnecessary and can break resolution, so in "auto"
+# mode they are skipped whenever an external IPv4 exists.
+MDS="http://169.254.169.254/computeMetadata/v1"   # by IP: works even when DNS is broken
+
+metadata_reachable() {
+  curl -sf -m 3 -H 'Metadata-Flavor: Google' "${MDS}/instance/id" >/dev/null 2>&1
+}
+has_external_ipv4() {
+  local v
+  v=$(curl -sf -m 3 -H 'Metadata-Flavor: Google' \
+        "${MDS}/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+has_global_ipv6() {
+  local v
+  v=$(ip -6 addr show scope global 2>/dev/null || true)
+  [[ "$v" == *inet6* ]]
+}
+
+USE_DNS64=0
+case "$DNS64_MODE" in
+  off) echo "[+] DNS64: disabled (DNS64_MODE=off)" ;;
+  on)  USE_DNS64=1; echo "[+] DNS64: forced on (DNS64_MODE=on)" ;;
+  auto)
+    if ! metadata_reachable; then
+      echo "[!] DNS64: cannot read GCE metadata, so IPv6-only can't be detected; not using DNS64 (set DNS64_MODE=on to force)" >&2
+    elif has_external_ipv4; then
+      echo "[+] DNS64: skipped, VM has an external IPv4 address"
+    elif ! has_global_ipv6; then
+      echo "[!] DNS64: no external IPv4 and no global IPv6; not using DNS64" >&2
+    else
+      USE_DNS64=1; echo "[+] DNS64: IPv6-only VM detected, using DNS64 resolvers"
+    fi ;;
+  *) echo "[x] DNS64_MODE must be auto, on or off (got '${DNS64_MODE}')" >&2; exit 1 ;;
+esac
+
+DNS_ARGS=()
+DNS_HASH="dns:default"
+if [ "$USE_DNS64" = "1" ]; then
+  DNS_ARGS=(--dns "$DNS1" --dns "$DNS2")
+  DNS_HASH="dns64:${DNS1},${DNS2}"
+fi
 
 # --- Validate env ---
 missing=()
@@ -103,7 +154,7 @@ CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX
   "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
   "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
-  "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS1" "$DNS2" \
+  "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
 RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
@@ -138,8 +189,9 @@ done
 # start-time generator must not append a second [model_providers.custom].
 #
 # apparmor=unconfined is required for bwrap to create user namespaces
-# (Codex sandbox). --dns: DNS64 resolvers (nat64.net) so IPv6-only hosts
-# can reach IPv4-only services like github.com. Docker applies these even
+# (Codex sandbox). DNS_ARGS: DNS64 resolvers (nat64.net), added ONLY on IPv6-only
+# hosts (see the DNS64 block above) so they can reach IPv4-only services like
+# github.com; empty when the VM has an external IPv4. Docker applies --dns even
 # with --network=host. --restart always: restarts on crash, OOM kill, and
 # Docker/VM reboot.
 docker run -d --name "$CONTAINER_NAME" --restart always \
@@ -160,8 +212,7 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   --log-opt max-size=5m \
   --log-opt max-file=2 \
   --security-opt apparmor=unconfined \
-  --dns "$DNS1" \
-  --dns "$DNS2" \
+  ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
   -v "$HOME_VOLUME":/home/paseo \
   -v "$WORKSPACE_VOLUME":/workspace:rw \
   -e PASEO_LISTEN="0.0.0.0:${PASEO_PORT}" \
