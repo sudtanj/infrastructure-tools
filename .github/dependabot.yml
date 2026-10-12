@@ -1,7 +1,6 @@
 version: 2
 updates:
   - package-ecosystem: docker
-  - package-ecosystem: docker
     directory: /builder-tools/mini-router
     schedule: { interval: weekly }
   - package-ecosystem: docker
