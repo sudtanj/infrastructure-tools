@@ -37,11 +37,9 @@ resource "google_service_account" "vm_sa" {
   display_name = "Free Tier VM Service Account"
 }
 
-# --- Render Cloud-Init Template with Secrets ---
+# --- Render Cloud-Init Template ---
 locals {
-  rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    tailscale_auth_key            = var.tailscale_auth_key
-  })
+  rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {})
 }
 
 # --- Trigger to force VM recreation when rendered cloud-init changes ---
@@ -97,7 +95,7 @@ resource "google_compute_instance" "free_tier_vm" {
   }
 
   metadata = {
-    # Masks rendered cloud-init (including secrets) from terraform plan outputs
+    # Keeps the large rendered cloud-init out of terraform plan output
     user-data = sensitive(local.rendered_cloud_init)
 
     # Flags for optimize-vm.sh (it reads them from metadata when run with no args).
