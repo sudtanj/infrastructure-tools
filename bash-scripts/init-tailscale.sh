@@ -3,7 +3,12 @@
 # Low-footprint Tailscale upsert for tiny VMs (e2-micro / COS).
 #
 # Env: TS_AUTHKEY, TS_HOSTNAME, TS_BIN_DIR, TS_EXTRA_ARGS,
-#      TS_CHECK_MINUTES (default 720), FORCE=1 (skip the check interval)
+#      TS_CHECK_MINUTES (default 720), FORCE=1 (skip the check interval),
+#      TS_DNS64 = auto (default) | on | off
+#          auto: apply DNS64 only when the VM has NO external IPv4 (IPv6-only)
+#          on:   always make sure DNS64 works
+#          off:  never touch DNS
+#      TS_DNS64_SERVERS (default: Google public DNS64 resolvers)
 
 set -euo pipefail
 
@@ -41,6 +46,105 @@ fi
 
 echo "[*] upsert-tailscale start"
 echo "[+] using ${TS_BIN_DIR}"
+
+# ---------- DNS64: only on IPv6-only VMs ----------
+# An IPv6-only VM can't reach IPv4-only hosts (download/control endpoints) without DNS64 + NAT64.
+# A VM with an external IPv4 address doesn't need it, and forcing DNS64 there can break resolution,
+# so in "auto" mode this is skipped whenever an external IPv4 address exists.
+TS_DNS64="${TS_DNS64:-auto}"
+TS_DNS64_SERVERS="${TS_DNS64_SERVERS:-2001:4860:4860::6464 2001:4860:4860::64}"
+MDS="http://169.254.169.254/computeMetadata/v1"   # by IP: works even when DNS is broken
+DNS64_STATE="not needed"
+
+metadata_reachable() {
+  curl -sf -m 3 -H 'Metadata-Flavor: Google' "${MDS}/instance/id" >/dev/null 2>&1
+}
+
+has_external_ipv4() {
+  local v
+  v=$(curl -sf -m 3 -H 'Metadata-Flavor: Google' \
+        "${MDS}/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+has_global_ipv6() {
+  local v
+  v=$(ip -6 addr show scope global 2>/dev/null || true)
+  [[ "$v" == *inet6* ]]
+}
+
+# ipv4only.arpa only has A records. With a working DNS64 resolver, an AAAA in 64:ff9b::/96 comes back;
+# without one, glibc returns an IPv4-mapped (::ffff:) address instead.
+dns64_working() {
+  local v
+  v=$(getent ahostsv6 ipv4only.arpa 2>/dev/null || true)
+  [[ "$v" == *64:ff9b:* ]]
+}
+
+apply_dns64() {
+  local conf rc ns s
+  if $SUDO systemctl is-active --quiet systemd-resolved.service 2>/dev/null; then
+    conf=/etc/systemd/resolved.conf.d/99-dns64.conf
+    $SUDO mkdir -p "$(dirname "$conf")"
+    printf '[Resolve]\nDNS=%s\nDomains=~.\nDNSSEC=no\n' "$TS_DNS64_SERVERS" | $SUDO tee "$conf" >/dev/null
+    $SUDO systemctl restart systemd-resolved.service
+  else
+    rc=/etc/resolv.conf
+    ns=""
+    for s in $TS_DNS64_SERVERS; do ns+="nameserver ${s}"$'\n'; done
+    if [ -L "$rc" ]; then $SUDO rm -f "$rc"; fi
+    printf '%soptions timeout:2 attempts:3\n' "$ns" | $SUDO tee "$rc" >/dev/null
+    $SUDO chmod 644 "$rc"
+  fi
+  sleep 1
+}
+
+ensure_dns64() {
+  case "$TS_DNS64" in
+    off)
+      DNS64_STATE="disabled (TS_DNS64=off)"
+      echo "[+] DNS64: disabled by TS_DNS64=off"
+      return 0 ;;
+    on) ;;
+    auto)
+      if ! metadata_reachable; then
+        DNS64_STATE="skipped (GCE metadata unreachable)"
+        echo "[!] DNS64: cannot read GCE metadata, so IPv6-only can't be detected; skipping (use TS_DNS64=on to force)" >&2
+        return 0
+      fi
+      if has_external_ipv4; then
+        DNS64_STATE="not needed (VM has an external IPv4)"
+        echo "[+] DNS64: skipped, VM has an external IPv4 address"
+        return 0
+      fi
+      if ! has_global_ipv6; then
+        DNS64_STATE="skipped (no external IPv4 and no global IPv6)"
+        echo "[!] DNS64: no external IPv4 and no global IPv6; nothing to configure" >&2
+        return 0
+      fi
+      echo "[+] DNS64: IPv6-only VM detected" ;;
+    *)
+      echo "[x] TS_DNS64 must be auto, on or off (got '${TS_DNS64}')" >&2
+      exit 1 ;;
+  esac
+
+  if dns64_working; then
+    DNS64_STATE="already working"
+    echo "[+] DNS64: already working"
+    return 0
+  fi
+
+  echo "[>] enabling DNS64 (${TS_DNS64_SERVERS})"
+  apply_dns64
+  if dns64_working; then
+    DNS64_STATE="applied"
+    echo "[+] DNS64: enabled"
+  else
+    DNS64_STATE="FAILED (no synthesized AAAA for ipv4only.arpa)"
+    echo "[!] DNS64: configured, but IPv4-only names still don't get synthesized AAAA records" >&2
+  fi
+}
+ensure_dns64
 
 # ---------- helpers ----------
 exec_ok() {  # can binaries run from this directory?
@@ -199,7 +303,7 @@ IOWeight=10
 CPUSchedulingPolicy=batch
 MemoryHigh=48M
 MemoryMax=80M
-Environment=GOGC=40
+Environment=GOMAXPROCS=1
 Environment=GOMEMLIMIT=40MiB
 Environment=TS_NO_LOGS_NO_SUPPORT=true
 
@@ -274,8 +378,13 @@ pass() { echo "[✓] $*"; }
 bad()  { echo "[x] $*" >&2; FAIL=1; }
 warn() { echo "[!] $*" >&2; WARN=1; }
 
-backend_state() {
-  $SUDO "$TS" --socket="$TS_SOCKET" status --json 2>/dev/null | tr -d '\n' \
+# One status --json fetch per poll; the result in SJ is reused below (each call starts a Go process)
+SJ=""
+refresh_status() {
+  SJ=$($SUDO "$TS" --socket="$TS_SOCKET" status --json 2>/dev/null | tr -d '\n' || true)
+}
+state_of_sj() {
+  printf '%s' "$SJ" \
     | grep -oE '"BackendState"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
     | sed -E 's/.*"([^"]+)"$/\1/' || true
 }
@@ -283,7 +392,8 @@ backend_state() {
 # 1. Wait (up to ~60s) for the backend to reach Running
 STATE=""
 for _ in $(seq 1 30); do
-  STATE=$(backend_state)
+  refresh_status
+  STATE=$(state_of_sj)
   [ "$STATE" = "Running" ] && break
   # Logged out and no key to log in with: waiting won't help
   [ "$STATE" = "NeedsLogin" ] && [ -z "$TS_AUTHKEY" ] && break
@@ -332,7 +442,7 @@ else
 fi
 
 # 7. Tailscale's own health warnings (DNS, control plane, clock, etc.)
-HEALTH=$($SUDO "$TS" --socket="$TS_SOCKET" status --json 2>/dev/null | tr -d '\n ' \
+HEALTH=$(printf '%s' "$SJ" | tr -d ' ' \
   | grep -oE '"Health":(\[[^]]*\]|null)' | head -1 || true)
 case "$HEALTH" in
   ""|'"Health":[]'|'"Health":null') pass "no health warnings reported" ;;
@@ -375,7 +485,7 @@ fi
 
 # ---------- identity: what the control plane actually registered ----------
 # Compare this with https://login.tailscale.com/admin/machines
-SJ=$($SUDO "$TS" --socket="$TS_SOCKET" status --json 2>/dev/null | tr -d '\n' || true)
+# (reuses the status JSON captured during verification)
 jstr() {  # first string value for key $1 in the JSON on stdin
   grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 \
     | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/' || true
@@ -407,6 +517,7 @@ fi
 echo "[>] summary"
 echo "[*] action: ${ACTION}"
 echo "[*] version: $(installed_version)"
+echo "[*] dns64: ${DNS64_STATE}"
 if ip link show tailscale0 >/dev/null 2>&1; then
   echo "[*] interface: tailscale0 present"
 else
