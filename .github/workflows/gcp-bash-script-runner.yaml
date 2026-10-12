@@ -19,6 +19,12 @@ on:
           - upsert-github-runner
           - optimize-vm
           # add new script names here as you create them
+      debug:
+        description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
+        required: false
+        default: true
+        type: boolean
+
 permissions:
   id-token: write
   contents: read
@@ -52,6 +58,7 @@ jobs:
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
           fi
+          echo "[*] requested: ${REQUESTED:-all} -> ${#files[@]} script(s)"
           if [ "${#files[@]}" -eq 0 ]; then
             echo "scripts=[]" >> "$GITHUB_OUTPUT"
             exit 0
@@ -64,6 +71,7 @@ jobs:
             echo "::error::Missing script(s): ${missing[*]}"
             exit 1
           fi
+          printf '[*] selected: %s\n' "${files[@]}"
           json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
           echo "scripts=$json" >> "$GITHUB_OUTPUT"
 
@@ -85,6 +93,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Run context (safe)
+        env:
+          SCRIPT_PATH: ${{ matrix.script }}
+          DEBUG_LOGS: ${{ inputs.debug }}
+        run: |
+          echo "workflow : ${GITHUB_WORKFLOW}"
+          echo "script   : ${SCRIPT_PATH}"
+          echo "ref      : ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}"
+          echo "run      : #${GITHUB_RUN_NUMBER}, attempt ${GITHUB_RUN_ATTEMPT}"
+          echo "runner   : ${RUNNER_OS}/${RUNNER_ARCH} ${ImageOS:-} ${ImageVersion:-}"
+          echo "debug    : ${DEBUG_LOGS:-true}"
+
       - name: Verify required config
         run: |
           set -euo pipefail
@@ -96,6 +116,7 @@ jobs:
             echo "::error::Missing secrets: ${missing[*]}"
             exit 1
           fi
+          echo "[+] all 5 required GCP secrets are set"
 
       - name: Mask sensitive values
         run: |
@@ -104,6 +125,34 @@ jobs:
           echo "::add-mask::${GCP_ZONE}"
           echo "::add-mask::${GCP_SERVICE_ACCOUNT}"
           echo "::add-mask::${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+
+      - name: Prepare log sanitizer
+        run: |
+          # Every line printed from the VM goes through this filter first. It is the safety net:
+          # even if a script prints an IP, email, hostname or token, it is masked before it reaches
+          # the log or the job summary.
+          cat > "${RUNNER_TEMP}/sanitize.pl" <<'PERL'
+          use strict;
+          use warnings;
+          my @lit = grep { defined($_) && length($_) >= 3 }
+            map { $ENV{$_} } qw(GCP_PROJECT_ID GCP_VM_NAME GCP_ZONE GCP_SERVICE_ACCOUNT GCP_WORKLOAD_IDENTITY_PROVIDER);
+          my $h = '[0-9A-Fa-f]{1,4}';
+          while (my $l = <>) {   # reads files given as arguments, or stdin
+            for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
+            $l =~ s/\b(?:\d{1,3}\.){3}\d{1,3}\b/<ip>/g;
+            $l =~ s/(?<![\w:.])(?:(?:$h:){7}$h|(?:$h:){1,7}:(?:$h(?::$h){0,6})?|::(?:$h(?::$h){0,6})?)(?![\w:])/<ipv6>/g;
+            $l =~ s{(://)[^/\s@]+@}{$1<creds>@}g;
+            $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
+            $l =~ s/\b[\w-]+(?:\.[\w-]+)*\.ts\.net\b/<tailnet-host>/g;
+            $l =~ s/tskey-[\w-]+/tskey-<redacted>/g;
+            $l =~ s/\b(?:gh[pousr]_|github_pat_)\w+/<github-token>/g;
+            $l =~ s/\bsk-[\w-]{8,}/<api-key>/g;
+            $l =~ s/\bBearer\s+\S+/Bearer <redacted>/gi;
+            $l =~ s/((?:authkey|auth_key|token|password|passwd|secret|api[_-]?key)\s*[=:]\s*)(?!(?:set|unset)\b)\S+/$1<redacted>/gi;
+            print $l;
+          }
+          PERL
+          perl -c "${RUNNER_TEMP}/sanitize.pl"
 
       - name: Restore gcloud SDK cache
         id: gcloud-cache
@@ -147,6 +196,29 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
+      - name: Preflight checks (safe, never fails the run)
+        continue-on-error: true
+        run: |
+          set +e
+          echo "[*] cloud sdk: $(gcloud --version 2>/dev/null | head -n 1)"
+          ACCOUNTS=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | wc -l)
+          echo "[*] active gcloud credentials: ${ACCOUNTS}"
+
+          # Only non-identifying fields are printed: status, machine type, and whether an external
+          # IPv4 exists (yes/no). The address itself is never printed.
+          STATUS=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
+                     --format='value(status)' 2>/dev/null)
+          if [ -z "$STATUS" ]; then
+            echo "[!] could not read VM details (missing compute.instances.get permission, wrong name or wrong zone)"
+          else
+            MTYPE=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
+                      --format='value(machineType.basename())' 2>/dev/null)
+            EXT=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
+                    --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null)
+            echo "[*] vm status: ${STATUS} | machine type: ${MTYPE:-unknown} | external IPv4: $([ -n "$EXT" ] && echo yes || echo no)"
+            [ "$STATUS" = "RUNNING" ] || echo "[!] VM is not RUNNING; the IAP SSH step will fail"
+          fi
+
       - name: Preload runner image to VM
         if: ${{ matrix.script == 'bash-scripts/upsert-github-runner.sh' }}
         run: |
@@ -170,6 +242,7 @@ jobs:
             --quiet \
             --ssh-key-expire-after=15m \
             --command="docker load"
+
       - name: Verify script exists locally
         env:
           SCRIPT_PATH: ${{ matrix.script }}
@@ -185,6 +258,7 @@ jobs:
         env:
           SCRIPT_PATH: ${{ matrix.script }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
+          DEBUG_LOGS: ${{ inputs.debug }}
           # Optional: comma-separated prefixes to filter. Empty = export everything.
           # N8N_ lets a secret N8N_ENCRYPTION_KEY override the key the script generates
           # and persists in /etc/n8n/n8n.env. The script refuses to start if the supplied
@@ -196,9 +270,15 @@ jobs:
           SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_"
         run: |
           set +e
+          SECONDS=0
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          DEBUG_LOGS="${DEBUG_LOGS:-true}"
+          umask 077
           LOG=$(mktemp)
+          PAYLOAD=$(mktemp)
+          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
 
-          # Parse the secrets JSON into `export KEY='value'` lines.
+          # Build the payload: `export KEY='value'` lines + the script itself.
           # @sh does shell-safe quoting so values with spaces / quotes / newlines survive.
           # Filter by prefix list (or pass everything if SECRET_FILTER is empty).
           {
@@ -213,30 +293,97 @@ jobs:
             fi
             printf 'export TS_HOSTNAME=%q\n' "${GCP_VM_NAME}"
             printf 'export VERBOSE=0\n'
+            if [ "$DEBUG_LOGS" = "true" ]; then printf 'export INIT_DEBUG=1\n'; else printf 'export INIT_DEBUG=0\n'; fi
             cat "${SCRIPT_PATH}"
-          } | gcloud compute ssh "${GCP_VM_NAME}" \
-                --zone="${GCP_ZONE}" \
-                --tunnel-through-iap \
-                --quiet \
-                --ssh-key-expire-after=5m \
-                --command="bash -s" \
-                > "$LOG" 2>&1
+          } > "$PAYLOAD"
+
+          # Names only, never values.
+          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
+          SHA=$(sha256sum "${SCRIPT_PATH}" | cut -c1-12)
+          echo "::group::Run context (safe)"
+          {
+            echo "[*] script: ${SCRIPT_PATH} ($(wc -l < "${SCRIPT_PATH}") lines, sha256 ${SHA})"
+            echo "[*] payload: $(wc -c < "$PAYLOAD") bytes"
+            echo "[*] env forwarded to the VM: $(echo "$NAMES" | wc -w) variables (values are never printed)"
+            echo "[*] variable names: ${NAMES}"
+            echo "[*] debug logs: ${DEBUG_LOGS}"
+          } | perl "$SAN"
+          echo "::endgroup::"
+
+          gcloud compute ssh "${GCP_VM_NAME}" \
+            --zone="${GCP_ZONE}" \
+            --tunnel-through-iap \
+            --quiet \
+            --ssh-key-expire-after=5m \
+            --command="bash -s" \
+            < "$PAYLOAD" > "$LOG" 2>&1
           RC=$?
+          DUR=$SECONDS
           set -e
 
+          # Only structured lines from the scripts, sanitized. [d] = debug, shown when debug is on.
+          # Always returns 0 (grep exits 1 when nothing matches, which must not abort the step).
+          show() {
+            if [ "$DEBUG_LOGS" = "true" ]; then
+              grep -aE '^\[[*>+!xd]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            else
+              grep -aE '^\[[*>+!x]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            fi
+          }
+          # grep -c exits 1 when it counts 0; `|| true` keeps `set -e` from killing the step before the hints below
+          STRUCT_LINES=$(grep -acE '^\[[*>+!xd]\] |^\[✓\] ' "$LOG" || true)
+          STRUCT_LINES="${STRUCT_LINES:-0}"
+
+          summary() {
+            {
+              echo "### \`${SCRIPT_PATH##*/}\`: $1"
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| exit code | ${RC} |"
+              echo "| duration | ${DUR}s |"
+              echo "| script sha256 | \`${SHA}\` |"
+              echo "| env variables forwarded | $(echo "$NAMES" | wc -w) |"
+              echo "| output lines captured | ${STRUCT_LINES} |"
+              echo ""
+              echo "<details><summary>Output (sanitized)</summary>"
+              echo ""
+              echo '```text'
+              show | tail -n 200
+              echo '```'
+              echo "</details>"
+              echo ""
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          }
+
           if [ "$RC" -eq 0 ]; then
-            echo "[*] script completed successfully"
-            grep -E '^\[\*\] |^\[>\] |^\[\+\] |^\[!\] ' "$LOG" || true
-            rm -f "$LOG"
+            echo "[*] script completed successfully in ${DUR}s"
+            echo "::group::Script output (sanitized)"
+            show || true
+            echo "::endgroup::"
+            # Surface warnings as annotations on the run page (max 5)
+            { show | grep -a '^\[!\] ' | head -n 5 | while IFS= read -r w; do echo "::warning::${w#\[!\] }"; done; } || true
+            summary "succeeded"
             exit 0
           fi
 
-          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC})"
-          grep -E '^\[\*\] |^\[>\] |^\[\+\] |^\[!\] |^\[x\] ' "$LOG" || true
-          echo "---- diagnostic (redacted) ----"
-          grep -vE \
-            'Your (identification|public key)|key fingerprint|randomart|SHA256:|SSH keygen|WARNING|NumPy|Updating project|Waiting for SSH|Permanently added|external IP|To increase the performance|\+---|^\| |([0-9]{1,3}\.){3}[0-9]{1,3}|@[A-Za-z0-9.-]+\.|ts\.net|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' \
-            "$LOG" | tail -40 || true
+          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s"
+          if [ "$STRUCT_LINES" -eq 0 ]; then
+            echo "[!] the script produced no output: it most likely never started."
+            echo "[!] Check: VM is RUNNING (see Preflight), IAP firewall rule for TCP 22 from the IAP range, and the service account's IAP-secured Tunnel User + Compute OS Login roles."
+          fi
+          if [ "$RC" -eq 255 ]; then
+            echo "[!] exit 255 = the SSH/IAP connection itself failed (not the script)."
+          fi
+          echo "::group::Script output (sanitized)"
+          show || true
+          echo "::endgroup::"
+          # Raw tail for cases where the script died without structured lines. Sanitized first
+          # (masking, not dropping), then SSH/gcloud noise is removed.
+          echo "---- diagnostic tail (sanitized) ----"
+          perl "$SAN" "$LOG" | grep -avE \
+            'Your (identification|public key)|key fingerprint|randomart|SHA256:|SSH keygen|WARNING|NumPy|Updating project|Waiting for SSH|Permanently added|external IP|To increase the performance|\+---|^\| |BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' \
+            | tail -60 || true
           echo "---- end ----"
-          rm -f "$LOG"
+          summary "FAILED"
           exit "$RC"
