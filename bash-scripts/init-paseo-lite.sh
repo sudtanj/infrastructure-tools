@@ -10,8 +10,40 @@
 #   auto: pass the DNS64 resolvers to the container only when the VM has NO external IPv4
 #         (IPv6-only). With an external IPv4, the container uses the host's normal DNS.
 #   on:   always pass DNS64 resolvers      off: never pass them
+#
+# INIT_DEBUG = 1 (default) | 0
+#   1: extra "[d]" diagnostic lines (host snapshot, config summary, timings, container state).
+#      Secrets are NEVER printed: only set/unset, and all captured output goes through redact().
+#   0: quiet, original output only.
 
 set -euo pipefail
+
+INIT_DEBUG="${INIT_DEBUG:-1}"
+T_START=$(date +%s)
+
+# ---------- debug helpers ----------
+dbg()     { [ "$INIT_DEBUG" = "1" ] && echo "[d] $*" || true; }
+since()   { echo "$(( $(date +%s) - $1 ))s"; }
+present() { if [ -n "${1:-}" ]; then echo "set"; else echo "unset"; fi; }
+url_host() {  # host part only (drops scheme, credentials, path, query) so URLs never leak tokens
+  if [ -z "${1:-}" ]; then echo "none"; return; fi
+  printf '%s' "$1" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/@]*@)?([^/:?]+).*#\2#'
+}
+
+# Masks the literal value of every secret, plus common token shapes, in whatever is piped through.
+redact() {
+  local t v s
+  t=$(cat)
+  for v in CODEX_API_KEY GH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD; do
+    s="${!v:-}"
+    if [ -n "$s" ]; then t="${t//"$s"/***}"; fi
+  done
+  printf '%s\n' "$t" | sed -E 's/(gh[pousr]_|github_pat_|sk-[A-Za-z0-9-]*)[A-Za-z0-9_]{6,}/\1***/g'
+}
+
+# On any unexpected failure, say where. (BASH_COMMAND is the unexpanded command text, so no secret values.)
+trap 'rc=$?; echo "[x] error at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})" >&2' ERR
+trap 'rc=$?; dbg "exit code ${rc} after $(since "$T_START")"' EXIT
 
 CODEX_BASE_URL="${CODEX_BASE_URL:-}"
 CODEX_API_KEY="${CODEX_API_KEY:-}"
@@ -61,6 +93,25 @@ WORKSPACE_VOLUME="paseo-workspace"
 
 echo "[*] init start"
 
+# ---------- host snapshot (debug only) ----------
+host_snapshot() {
+  dbg "user: $(id -un) (uid $(id -u)) | host: $(hostname) | kernel: $(uname -r)"
+  dbg "time: $(date -u +%FT%TZ) | uptime: $(uptime -p 2>/dev/null || uptime)"
+  dbg "cpu: $(nproc) vCPU | load(1/5/15m): $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  dbg "memory: $(free -m | awk '/^Mem:/{printf "total=%sMB used=%sMB avail=%sMB", $2,$3,$7}') | swap: $(free -m | awk '/^Swap:/{printf "total=%sMB used=%sMB", $2,$3}')"
+  dbg "disk /var/lib/docker: $(df -h /var/lib/docker 2>/dev/null | awk 'NR==2{printf "size=%s used=%s avail=%s use=%s", $2,$3,$4,$5}')"
+  dbg "sudo -n: $(sudo -n true 2>/dev/null && echo yes || echo no) | bash: ${BASH_VERSION}"
+  dbg "docker: server=$(docker version -f '{{.Server.Version}}' 2>/dev/null || echo unknown) cgroup=$(docker info -f '{{.CgroupDriver}}/v{{.CgroupVersion}}' 2>/dev/null || echo unknown) storage=$(docker info -f '{{.Driver}}' 2>/dev/null || echo unknown)"
+  dbg "docker containers running: $(docker ps -q 2>/dev/null | wc -l) | images: $(docker images -q 2>/dev/null | wc -l)"
+}
+host_snapshot
+
+# ---------- config summary (debug only; never prints secret values) ----------
+dbg "config: image=${IMAGE} container=${CONTAINER_NAME} port=${PASEO_PORT} rev=${CONFIG_REV}"
+dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
+dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD")"
+dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL")"
+
 # --- DNS64: only on IPv6-only VMs ---
 # DNS64 resolvers (nat64.net) let an IPv6-only host reach IPv4-only services like github.com.
 # With an external IPv4 address they are unnecessary and can break resolution, so in "auto"
@@ -81,6 +132,9 @@ has_global_ipv6() {
   v=$(ip -6 addr show scope global 2>/dev/null || true)
   [[ "$v" == *inet6* ]]
 }
+
+dbg "network: metadata=$(metadata_reachable && echo reachable || echo unreachable) external_ipv4=$(has_external_ipv4 && echo yes || echo no) global_ipv6=$(has_global_ipv6 && echo yes || echo no)"
+dbg "host resolver: $(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | paste -sd' ' - || echo unknown)"
 
 USE_DNS64=0
 case "$DNS64_MODE" in
@@ -105,6 +159,7 @@ if [ "$USE_DNS64" = "1" ]; then
   DNS_ARGS=(--dns "$DNS1" --dns "$DNS2")
   DNS_HASH="dns64:${DNS1},${DNS2}"
 fi
+dbg "dns decision: mode=${DNS64_MODE} use_dns64=${USE_DNS64} container_dns=${DNS_HASH}"
 
 # --- Validate env ---
 missing=()
@@ -114,6 +169,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "[x] missing required env: ${missing[*]}" >&2
   exit 1
 fi
+dbg "required env present"
 [ -z "$PASEO_PASSWORD" ] && echo "[!] PASEO_PASSWORD not set - direct connections on :${PASEO_PORT} are unauthenticated (relay clients still need the pairing key)" >&2
 
 # --- Host protection (idempotent, best-effort, never restarts sshd) ---
@@ -122,11 +178,15 @@ if [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then
   echo "[>] creating 1G host swapfile"
   if sudo -n sh -c 'fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile' 2>/dev/null; then
     grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo -n tee -a /etc/fstab >/dev/null
+    dbg "host swapfile created and enabled"
   else
     echo "[!] swapfile creation failed (no sudo or no disk space)" >&2
   fi
+else
+  dbg "host swap already active: $(swapon --show --noheadings 2>/dev/null | awk '{printf "%s(%s) ", $1, $3}')"
 fi
 sudo -n sysctl -q vm.swappiness=10 2>/dev/null || true
+dbg "vm.swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo unknown)"
 # 2) Make the kernel OOM-killer avoid sshd/tailscaled/docker (applies on their next restart).
 for svc in ssh sshd tailscaled docker; do
   if systemctl cat "$svc" >/dev/null 2>&1; then
@@ -134,6 +194,9 @@ for svc in ssh sshd tailscaled docker; do
     if [ ! -f "$f" ]; then
       sudo -n mkdir -p "$(dirname "$f")" 2>/dev/null \
         && printf '[Service]\nOOMScoreAdjust=-900\n' | sudo -n tee "$f" >/dev/null 2>&1 || true
+      dbg "oom drop-in created for ${svc}"
+    else
+      dbg "oom drop-in already present for ${svc}"
     fi
   fi
 done
@@ -142,11 +205,16 @@ sudo -n systemctl enable docker >/dev/null 2>&1 || true
 
 # --- Pull latest image before touching the running container ---
 PREV_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "none")
-if ! docker pull -q "$IMAGE" >/dev/null; then
+dbg "pulling ${IMAGE} (local image before pull: ${PREV_ID:0:19})"
+T_PULL=$(date +%s)
+if ! pull_out=$(docker pull -q "$IMAGE" 2>&1); then
   echo "[x] docker pull failed - current container left untouched" >&2
+  printf '%s\n' "$pull_out" | redact >&2
   exit 1
 fi
 NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown")
+if [ "$PREV_ID" = "$NEW_ID" ]; then IMG_NOTE="unchanged"; else IMG_NOTE="CHANGED"; fi
+dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(docker image inspect -f '{{.Size}}' "$IMAGE" 2>/dev/null | awk '{printf "%.0fMB", $1/1048576}')"
 [ "$PREV_ID" != "none" ] && [ "$PREV_ID" != "$NEW_ID" ] && docker image prune -f >/dev/null 2>&1 || true
 
 # --- Skip restart if nothing changed ---
@@ -158,31 +226,53 @@ CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
 RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
+EXISTS=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" >/dev/null 2>&1 && echo yes || echo no)
+CUR_SHORT="${CUR_HASH:0:12}"; CUR_SHORT="${CUR_SHORT:-none}"
+dbg "hash: desired=${CONFIG_HASH:0:12} current=${CUR_SHORT} | container exists=${EXISTS} running=${RUNNING}"
 
 if [ "$CUR_HASH" = "$CONFIG_HASH" ] && [ "$RUNNING" = "true" ]; then
   echo "[+] unchanged - container left running"
+  dbg "container: $(docker inspect -f 'status={{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
+  dbg "usage: $(docker stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
   exit 0
+fi
+
+if [ "$EXISTS" = "no" ]; then REASON="container does not exist"
+elif [ "$RUNNING" != "true" ]; then REASON="container is not running (status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown))"
+elif [ "$IMG_NOTE" = "CHANGED" ]; then REASON="new image pulled"
+else REASON="config/secrets/limits/DNS changed"
 fi
 
 # --- Recreate the container ---
 echo "[>] replacing $CONTAINER_NAME"
+dbg "reason: ${REASON}"
+if [ "$EXISTS" = "yes" ]; then
+  dbg "old container: $(docker inspect -f 'status={{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
+fi
 # Graceful stop first: SIGTERM lets paseo-lite save agent state and the running
 # turn so it resumes after the restart (rm -f alone is SIGKILL with no flush).
+T_STOP=$(date +%s)
 docker stop -t 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+dbg "old container stopped and removed in $(since "$T_STOP")"
 if command -v ss >/dev/null 2>&1 && [ -n "$(ss -Hltn "sport = :${PASEO_PORT}" 2>/dev/null)" ]; then
   echo "[x] port ${PASEO_PORT} is already in use on the host - not starting ${CONTAINER_NAME}" >&2
+  dbg "listener on :${PASEO_PORT}: $(ss -Hltnp "sport = :${PASEO_PORT}" 2>/dev/null | head -n 3)"
   exit 1
 fi
+dbg "port ${PASEO_PORT} is free"
 docker volume create "$HOME_VOLUME"      >/dev/null
 docker volume create "$WORKSPACE_VOLUME" >/dev/null
+dbg "volumes ready: ${HOME_VOLUME}, ${WORKSPACE_VOLUME}"
 
 # Only forward secrets that are actually set.
 opt_env=()
+opt_names=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
          ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD CODEX_MODEL; do
-  [ -n "${!v:-}" ] && opt_env+=(-e "$v=${!v}")
+  if [ -n "${!v:-}" ]; then opt_env+=(-e "$v=${!v}"); opt_names+=("$v"); fi
 done
+dbg "optional env forwarded to container: ${opt_names[*]:-none}"
 
 # CODEX_BASE_URL is deliberately NOT passed into the container: this script
 # writes the complete Codex provider config itself (below), so the image's
@@ -194,7 +284,9 @@ done
 # github.com; empty when the VM has an external IPv4. Docker applies --dns even
 # with --network=host. --restart always: restarts on crash, OOM kill, and
 # Docker/VM reboot.
-docker run -d --name "$CONTAINER_NAME" --restart always \
+dbg "starting container"
+T_RUN=$(date +%s)
+if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   --label "init.hash=${CONFIG_HASH}" \
   --stop-timeout 30 \
   --user 1000:1000 \
@@ -236,30 +328,44 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e BASH_DEFAULT_TIMEOUT_MS=120000 \
   -e BASH_MAX_TIMEOUT_MS=600000 \
   ${opt_env[@]+"${opt_env[@]}"} \
-  "$IMAGE" >/dev/null 2>&1
+  "$IMAGE" 2>&1); then
+  echo "[x] docker run failed:" >&2
+  printf '%s\n' "$run_out" | redact >&2
+  exit 1
+fi
+CID=$(printf '%s\n' "$run_out" | tail -n 1)
+dbg "docker run ok in $(since "$T_RUN"): id=${CID:0:12}"
+if [ "$(printf '%s\n' "$run_out" | wc -l)" -gt 1 ]; then
+  dbg "docker run warnings:"
+  printf '%s\n' "$run_out" | head -n -1 | redact | sed 's/^/    | /'
+fi
 
 # --- Wait until running ---
 STATE="missing"
+WAITED=0
 for _ in 1 2 3 4 5 6 7 8; do
   STATE=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
   [ "$STATE" = "running" ] && break
+  WAITED=$((WAITED + 1))
   sleep 1
 done
 if [ "$STATE" != "running" ]; then
   echo "[x] container not running (state=${STATE})" >&2
-  docker logs --tail 80 "$CONTAINER_NAME" >&2 || true
+  dbg "state detail: $(docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} error={{.State.Error}}' "$CONTAINER_NAME" 2>/dev/null)"
+  docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | redact >&2 || true
   exit 1
 fi
 echo "[+] container running"
+dbg "running after ${WAITED}s of waiting"
+dbg "container: $(docker inspect -f 'pid={{.State.Pid}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
+dbg "limits applied: $(docker inspect -f 'nanocpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} memswap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} net={{.HostConfig.NetworkMode}} dns={{.HostConfig.Dns}}' "$CONTAINER_NAME" 2>/dev/null)"
 
 # --- Seed Codex config + clear stale SQLite state ---
 # paseo-lite starts its shared codex app-server lazily on the first prompt,
 # so writing the config after container start is picked up without a restart.
 # Thread mode (read-only / auto / full-access) chosen in the UI overrides the
 # sandbox/approval defaults below for agent sessions.
-docker exec -i -u 0 \
-  -e CODEX_BASE_URL="$CODEX_BASE_URL" -e CODEX_MODEL="$CODEX_MODEL" \
-  "$CONTAINER_NAME" sh -s >/dev/null 2>&1 <<'EOF' || echo "[!] codex config seeding failed" >&2
+SEED_SCRIPT=$(cat <<'EOF'
 set -e
 D=/home/paseo/.codex
 mkdir -p "$D"
@@ -287,18 +393,66 @@ rm -rf "$D/state" "$D"/*.sqlite "$D"/*.sqlite-shm "$D"/*.sqlite-wal 2>/dev/null 
 } > "$D/config.toml"
 chown -R 1000:1000 "$D"
 EOF
+)
+if seed_out=$(docker exec -i -u 0 \
+    -e CODEX_BASE_URL="$CODEX_BASE_URL" -e CODEX_MODEL="$CODEX_MODEL" \
+    "$CONTAINER_NAME" sh -s <<<"$SEED_SCRIPT" 2>&1); then
+  dbg "codex config seeded: $(docker exec "$CONTAINER_NAME" ls -l /home/paseo/.codex/config.toml 2>&1 | redact)"
+  if [ "$INIT_DEBUG" = "1" ]; then
+    # base_url is masked: it can embed credentials in some gateways
+    docker exec "$CONTAINER_NAME" cat /home/paseo/.codex/config.toml 2>/dev/null \
+      | sed -E 's#^(base_url = ")[^"]*"#\1<masked>"#' | redact | sed 's/^/    | /' || true
+  fi
+else
+  echo "[!] codex config seeding failed" >&2
+  printf '%s\n' "$seed_out" | redact >&2
+fi
 
 # --- Make gh the default git credential helper (uses GH_TOKEN) ---
 # Written to ~/.gitconfig in the home volume; safe to repeat.
-docker exec -u 1000:1000 -e HOME=/home/paseo "$CONTAINER_NAME" sh -c '
+if gh_out=$(docker exec -u 1000:1000 -e HOME=/home/paseo "$CONTAINER_NAME" sh -c '
   gh auth setup-git --hostname github.com 2>/dev/null \
   || { git config --global --replace-all credential.https://github.com.helper "" \
        && git config --global --add credential.https://github.com.helper "!gh auth git-credential" \
        && git config --global --replace-all credential.https://gist.github.com.helper "" \
        && git config --global --add credential.https://gist.github.com.helper "!gh auth git-credential"; }
-' >/dev/null 2>&1 && echo "[+] gh set as git credential helper" || echo "[!] gh git credential setup failed" >&2
+' 2>&1); then
+  echo "[+] gh set as git credential helper"
+  dbg "git credential helpers: $(docker exec -u 1000:1000 -e HOME=/home/paseo "$CONTAINER_NAME" git config --global --get-all credential.https://github.com.helper 2>&1 | paste -sd'|' - | redact)"
+  dbg "gh auth status: $(docker exec -u 1000:1000 -e HOME=/home/paseo "$CONTAINER_NAME" gh auth status 2>&1 | head -n 3 | paste -sd' ' - | redact || true)"
+else
+  echo "[!] gh git credential setup failed" >&2
+  printf '%s\n' "$gh_out" | redact >&2
+fi
+
+# --- Post-start health (debug only, never fails the run) ---
+if [ "$INIT_DEBUG" = "1" ]; then
+  sleep 3
+  S2=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)
+  R2=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")
+  O2=$(docker inspect -f '{{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")
+  dbg "3s after start: status=${S2} restarts=${R2} oom_killed=${O2}"
+  if [ "$S2" != "running" ] || [ "$R2" != "0" ]; then
+    echo "[!] container looks unstable (status=${S2}, restarts=${R2}, oom_killed=${O2}); recent logs:" >&2
+    docker logs --tail 40 "$CONTAINER_NAME" 2>&1 | redact | sed 's/^/    | /' >&2 || true
+  fi
+
+  LISTENING="no"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -n "$(ss -Hltn "sport = :${PASEO_PORT}" 2>/dev/null)" ]; then LISTENING="yes"; break; fi
+    sleep 1
+  done
+  dbg "listening on :${PASEO_PORT}: ${LISTENING}"
+  [ "$LISTENING" = "yes" ] || echo "[!] nothing is listening on :${PASEO_PORT} yet (may still be starting; check: docker logs ${CONTAINER_NAME})" >&2
+
+  dbg "usage: $(docker stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
+  dbg "host memory now: $(free -m | awk '/^Mem:/{printf "used=%sMB avail=%sMB", $3,$7}') | load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  dbg "recent container logs (last 15 lines, redacted):"
+  docker logs --tail 15 "$CONTAINER_NAME" 2>&1 | redact | sed 's/^/    | /' || true
+fi
 
 # The pairing link is a credential for the relay - never print it in CI logs.
 echo "[*] pair a device on the VM: docker exec ${CONTAINER_NAME} paseo-lite pair"
 echo "[+] init done"
+dbg "total time: $(since "$T_START")"
 exit 0
