@@ -29,7 +29,7 @@ runs on every push to `main`:
    - Pushes to Docker Hub as `sudtanj/<folder-name>:latest` and
      `sudtanj/<folder-name>:<the new version>`.
 
-Touching only `claude-code-claudish-happy/` triggers only that image's
+Touching only `paseo-codex/` triggers only that image's
 build; adding a new `my-image/Dockerfile` and pushing triggers only
 `my-image`'s first build (`my-image-v0.1.0`), untouched folders are left
 alone.
@@ -37,7 +37,7 @@ alone.
 ## Adding a new image
 
 1. Create a new top-level folder with a `Dockerfile` in it - that's the
-   only requirement. [`claude-code-claudish-happy/`](claude-code-claudish-happy/)
+   only requirement. [`paseo-codex/`](paseo-codex/)
    is a full worked example (its own `README.md`, `docker-compose.yml` /
    `docker-compose.hub.yml`, `.env.example`, entrypoint scripts, ...), but
    none of that is required by the workflow itself - it only ever looks
@@ -54,7 +54,7 @@ Via the Actions tab, or:
 gh workflow run builder-tools-docker-publish.yml
 
 # Build just one folder (e.g. to force a rebuild without changing anything):
-gh workflow run builder-tools-docker-publish.yml -f folder=claude-code-claudish-happy
+gh workflow run builder-tools-docker-publish.yml -f folder=paseo-codex
 ```
 
 ## One-time setup
@@ -79,7 +79,6 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 
 | Folder | Docker Hub | What it is |
 |---|---|---|
-| [`claude-code-claudish-happy/`](claude-code-claudish-happy/) | [`sudtanj/claude-code-claudish-happy`](https://hub.docker.com/r/sudtanj/claude-code-claudish-happy) | Claude Code + Codex CLI + Happy (mobile/web control), full dev toolchain - see its own [README](claude-code-claudish-happy/README.md) |
 | [`paseo-codex/`](paseo-codex/) | [`sudtanj/paseo-codex`](https://hub.docker.com/r/sudtanj/paseo-codex) | [Paseo](https://github.com/getpaseo/paseo) (remote daemon + web UI) + Codex CLI + Claude Code CLI, BYOK via env vars in the compose YAML, tuned for low-resource hosts (GCP free-tier e2-micro: memory/CPU caps, log rotation, optional agent CLIs) - see its own [README](paseo-codex/README.md) |
 | [`paseo-lite/`](paseo-lite/) | [`sudtanj/paseo-lite`](https://hub.docker.com/r/sudtanj/paseo-lite) | [paseo-lite](https://github.com/sudtanj/paseo-code-rust) (Rust Paseo daemon, Paseo relay compatible) + native Claude Code CLI + native Codex CLI on Alpine, no Node.js; one shared Codex app-server and pooled Claude processes across all projects; same env vars as `paseo-codex` - see its own [README](paseo-lite/README.md) |
 | [`oci-freetier-creator/`](oci-freetier-creator/) | [`sudtanj/oci-freetier-creator`](https://hub.docker.com/r/sudtanj/oci-freetier-creator) | Runs [oracle-freetier-instance-creation](https://github.com/mohankumarpaluru/oracle-freetier-instance-creation) unattended, config via env vars - see its own [README](oci-freetier-creator/README.md) |

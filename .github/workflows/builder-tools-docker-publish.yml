@@ -10,7 +10,7 @@ name: Builder Tools - Build and push Docker images
 # ":<the new tag>".
 #
 # To add a new image: create a new top-level folder with a Dockerfile in
-# it (see claude-code-claudish-happy/ for a full example, including its
+# it (see paseo-codex/ for a full example, including its
 # own docker-compose.yml/README.md pattern - not required, just a
 # convention). Nothing else needs to change here; the next push that
 # touches that folder builds and publishes it automatically.
@@ -30,7 +30,7 @@ name: Builder Tools - Build and push Docker images
 # job per folder - simple and uniform across every folder, at the cost of
 # a slower arm64 build than native arm64 runners would give. Fine for
 # small/medium images; a folder with an unusually heavy build (this
-# repo's claude-code-claudish-happy/ image, for one) will just take
+# repo's paseo-codex/ image, for one) will just take
 # longer to build on arm64, not fail.
 #
 # Per-folder override: put a `.platforms` file in the folder (for example

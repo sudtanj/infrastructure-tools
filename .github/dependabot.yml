@@ -1,8 +1,6 @@
 version: 2
 updates:
   - package-ecosystem: docker
-    directory: /builder-tools/claude-code-claudish-happy
-    schedule: { interval: weekly }
   - package-ecosystem: docker
     directory: /builder-tools/mini-router
     schedule: { interval: weekly }
