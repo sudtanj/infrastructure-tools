@@ -16,7 +16,10 @@ set -euo pipefail
 renice -n 19 -p $$ >/dev/null 2>&1 || true
 command -v ionice >/dev/null 2>&1 && ionice -c3 -p $$ >/dev/null 2>&1 || true
 
-# Skip sudo (extra process) when already root
+# Skip sudo (extra process) when already root.
+# IMPORTANT: when not root, every test/exec on root-only paths must go through $SUDO. /var/lib/docker is
+# mode 0710 and /var/cache/tailscale is 0750 (systemd CacheDirectoryMode), so an unprivileged
+# [ -x ], find, stat, mountpoint or exec on them fails with "Permission denied".
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
@@ -39,7 +42,7 @@ STAMP="${TS_CACHE_DIR}/.last-check"
 if [ -z "$TS_BIN_DIR" ]; then
   UNIT_BIN=$(systemctl show tailscaled.service -p ExecStart 2>/dev/null | grep -oE "path=[^ ;]+tailscaled" | head -1 | cut -d= -f2 || true)
   for d in "${UNIT_BIN:+$(dirname "$UNIT_BIN")}" /var/lib/docker/tailscale-bin /var/lib/cloud/tailscale-bin; do
-    if [ -n "$d" ] && [ -x "$d/tailscaled" ]; then TS_BIN_DIR="$d"; break; fi
+    if [ -n "$d" ] && $SUDO test -x "$d/tailscaled"; then TS_BIN_DIR="$d"; break; fi
   done
   TS_BIN_DIR="${TS_BIN_DIR:-$TS_DEFAULT_BIN_DIR}"
 fi
@@ -164,16 +167,16 @@ exec_ok() {
 
 bindir_diag() {
   echo "---- bin dir diagnostics ----" >&2
-  echo "dir: $1   fstype: $(stat -f -c %T "$1" 2>/dev/null || echo ?)   mode: $(stat -c '%a %U' "$1" 2>/dev/null || echo ?)" >&2
-  df -h "$1" /var /tmp 2>&1 | sed 's/^/  /' >&2 || true
-  df -i "$1" 2>&1 | sed 's/^/  /' >&2 || true
+  echo "dir: $1   fstype: $($SUDO stat -f -c %T "$1" 2>/dev/null || echo ?)   mode: $($SUDO stat -c '%a %U' "$1" 2>/dev/null || echo ?)" >&2
+  $SUDO df -h "$1" /var /tmp 2>&1 | sed 's/^/  /' >&2 || true
+  $SUDO df -i "$1" 2>&1 | sed 's/^/  /' >&2 || true
   free -m 2>&1 | sed 's/^/  /' >&2 || true
   mount | grep -E "$1|/var " 2>&1 | sed 's/^/  /' >&2 || true
   echo "-----------------------------" >&2
 }
 
 installed_version() {
-  "${TS_BIN_DIR}/tailscaled" --version 2>/dev/null | head -n1 | awk '{print $1}' || true
+  $SUDO "${TS_BIN_DIR}/tailscaled" --version 2>/dev/null | head -n1 | awk '{print $1}' || true
 }
 
 fetch_latest() {
@@ -194,7 +197,7 @@ install_ts() {  # install_ts <version> <dest>
   local ver="$1" dest="$2" dn tgz
   dn="tailscale_${ver}_amd64"
   tgz="${TS_CACHE_DIR}/${dn}.tgz"
-  if [ ! -s "$tgz" ]; then
+  if ! $SUDO test -s "$tgz"; then
     $SUDO curl -fsSL --max-time 300 -o "$tgz" "https://pkgs.tailscale.com/stable/${dn}.tgz" \
       || { $SUDO rm -f "$tgz"; return 1; }
   fi
@@ -217,14 +220,23 @@ echo "[>] ensuring executable bin directory"
 $SUDO mkdir -p "$TS_BIN_DIR" "$TS_CACHE_DIR"
 $SUDO chmod 755 "$TS_BIN_DIR"
 
-# Earlier failed runs may have stacked tmpfs mounts on this directory. Each one hides the real dir and
-# holds RAM. Drop tmpfs layers that don't contain an installed tailscaled.
-while mountpoint -q "$TS_BIN_DIR" \
-      && [ "$(stat -f -c %T "$TS_BIN_DIR" 2>/dev/null)" = "tmpfs" ] \
-      && [ ! -x "$TS_BIN_DIR/tailscaled" ]; do
-  echo "[>] removing stale tmpfs mount on ${TS_BIN_DIR}"
-  $SUDO umount "$TS_BIN_DIR" || break
-done
+# Earlier (buggy) runs stacked tmpfs mounts on this directory. Each hides the real dir and holds RAM.
+# If the disk filesystem itself can execute binaries (probe a sibling dir on the same fs), those tmpfs
+# layers are pointless leftovers: stop tailscaled and drop them. Binaries are reinstalled to disk below
+# (the tarball is cached on disk, so no re-download).
+if $SUDO mountpoint -q "$TS_BIN_DIR" && [ "$($SUDO stat -f -c %T "$TS_BIN_DIR" 2>/dev/null)" = "tmpfs" ]; then
+  PROBE="$(dirname "$TS_BIN_DIR")/.ts-exec-probe"
+  $SUDO mkdir -p "$PROBE"
+  PX=0; exec_ok "$PROBE" && PX=0 || PX=$?
+  $SUDO rmdir "$PROBE" 2>/dev/null || true
+  if [ "$PX" = "0" ]; then
+    echo "[>] disk filesystem is exec-capable; removing leftover tmpfs mounts on ${TS_BIN_DIR}"
+    $SUDO systemctl stop tailscaled.service 2>/dev/null || true
+    while $SUDO mountpoint -q "$TS_BIN_DIR" && [ "$($SUDO stat -f -c %T "$TS_BIN_DIR" 2>/dev/null)" = "tmpfs" ]; do
+      $SUDO umount "$TS_BIN_DIR" || { echo "[!] could not unmount ${TS_BIN_DIR} (busy?)" >&2; break; }
+    done
+  fi
+fi
 
 EX=0; exec_ok "$TS_BIN_DIR" && EX=0 || EX=$?
 if [ "$EX" = "2" ]; then
@@ -237,7 +249,7 @@ if [ "$EX" = "1" ]; then
   # Genuinely noexec (COS mounts /var and /home noexec). Preferred fix: bind-mount the directory onto
   # itself and remount that bind mount with exec. Binaries stay on disk, so it costs no RAM.
   echo "[!] ${TS_BIN_DIR} is on a noexec filesystem; trying a disk-backed bind mount with exec"
-  if mountpoint -q "$TS_BIN_DIR"; then
+  if $SUDO mountpoint -q "$TS_BIN_DIR"; then
     $SUDO mount -o remount,exec "$TS_BIN_DIR" 2>/dev/null || true
   else
     $SUDO mount --bind "$TS_BIN_DIR" "$TS_BIN_DIR" 2>/dev/null \
@@ -248,7 +260,7 @@ fi
 
 if [ "$EX" = "1" ]; then
   # Last resort: RAM-backed tmpfs (~100 MB for both binaries; lost on reboot, reinstalled on next run).
-  if mountpoint -q "$TS_BIN_DIR"; then $SUDO umount "$TS_BIN_DIR" 2>/dev/null || true; fi
+  if $SUDO mountpoint -q "$TS_BIN_DIR"; then $SUDO umount "$TS_BIN_DIR" 2>/dev/null || true; fi
   echo "[!] bind mount did not allow exec; falling back to tmpfs (uses ~100 MB of RAM)"
   $SUDO mount -t tmpfs -o exec,mode=0755,size=160m tmpfs "$TS_BIN_DIR"
   exec_ok "$TS_BIN_DIR" && EX=0 || EX=$?
@@ -263,10 +275,10 @@ echo "[+] bin dir ready"
 
 # ---------- current vs latest ----------
 INSTALLED=""
-if [ -x "${TS_BIN_DIR}/tailscaled" ]; then INSTALLED=$(installed_version); fi
+if $SUDO test -x "${TS_BIN_DIR}/tailscaled"; then INSTALLED=$(installed_version); fi
 
 if [ -n "$INSTALLED" ] && [ -z "${FORCE:-}" ] \
-   && [ -n "$(find "$STAMP" -mmin -"$TS_CHECK_MINUTES" 2>/dev/null)" ]; then
+   && [ -n "$($SUDO find "$STAMP" -mmin -"$TS_CHECK_MINUTES" 2>/dev/null)" ]; then
   echo "[+] current: ${INSTALLED} (checked within ${TS_CHECK_MINUTES}m; skipping network check)"
   LATEST="$INSTALLED"
   ACTION="none"
@@ -311,9 +323,9 @@ if [ "$ACTION" != "none" ]; then
     exit 1
   fi
 
-  if ! "${TS_BIN_DIR}/tailscaled" --version >/dev/null 2>&1; then
+  if ! $SUDO "${TS_BIN_DIR}/tailscaled" --version >/dev/null 2>&1; then
     echo "[x] new binary won't execute" >&2
-    file "${TS_BIN_DIR}/tailscaled" >&2 || true
+    $SUDO file "${TS_BIN_DIR}/tailscaled" >&2 || true
     mount | grep "$TS_BIN_DIR" >&2 || echo "(no tmpfs mount)" >&2
     [ "$ACTION" = "update" ] && restore_backup
     exit 1
