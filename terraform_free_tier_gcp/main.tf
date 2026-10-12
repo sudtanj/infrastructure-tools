@@ -19,6 +19,13 @@ terraform {
 # --- Provider ---
 provider "google" {}
 
+# --- optimize-vm.sh flags (move to variables.tf if you keep vars there) ---
+variable "optimize_vm_args" {
+  type        = string
+  default     = "--zram --bbr --no-logging-agent"
+  description = "Space-separated flags passed to optimize-vm.sh at boot."
+}
+
 # --- Random ID Generator for Collision Prevention ---
 resource "random_id" "hex" {
   byte_length = 4
@@ -34,7 +41,6 @@ resource "google_service_account" "vm_sa" {
 locals {
   rendered_cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     tailscale_auth_key            = var.tailscale_auth_key
-    portainer_admin_password_hash = var.portainer_admin_password_hash
   })
 }
 
@@ -93,6 +99,10 @@ resource "google_compute_instance" "free_tier_vm" {
   metadata = {
     # Masks rendered cloud-init (including secrets) from terraform plan outputs
     user-data = sensitive(local.rendered_cloud_init)
+
+    # Flags for optimize-vm.sh (it reads them from metadata when run with no args).
+    # Changing this updates in place (no VM recreation); applies on next boot or manual re-run.
+    optimize-vm-args = var.optimize_vm_args
   }
 
   lifecycle {
@@ -113,22 +123,6 @@ resource "google_compute_firewall" "allow_iap_ssh" {
   }
 
   source_ranges = ["35.235.240.0/20"]
-  target_tags   = ["free-tier-instance"]
-}
-
-# --- Firewall: Allow Portainer Web UI (IPv4) ---
-# Consider deleting this and reaching Portainer over Tailscale instead.
-resource "google_compute_firewall" "allow_portainer_ipv4" {
-  name        = "allow-portainer-ipv4-${random_id.hex.hex}"
-  network     = "default"
-  description = "Allow inbound Portainer Web UI access over IPv4"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["9443"] # HTTPS only; 9000 is plain HTTP
-  }
-
-  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["free-tier-instance"]
 }
 
