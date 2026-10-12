@@ -181,7 +181,8 @@ install_ts() {  # install_ts <version> <dest>
     $SUDO curl -fsSL --max-time 300 -o "$tgz" "https://pkgs.tailscale.com/stable/${dn}.tgz" \
       || { $SUDO rm -f "$tgz"; return 1; }
   fi
-  $SUDO tar -xzf "$tgz" -C "$dest" --strip-components=1 "${dn}/tailscale" "${dn}/tailscaled" || return 1
+  $SUDO tar -xzf "$tgz" -C "$dest" --strip-components=1 "${dn}/tailscale" "${dn}/tailscaled" \
+    || { echo "[x] extract failed; space on ${dest}:" >&2; df -h "$dest" >&2 || true; return 1; }
   $SUDO chmod 755 "$dest/tailscale" "$dest/tailscaled" || return 1
   # Keep only the current tarball on disk
   $SUDO find "$TS_CACHE_DIR" -maxdepth 1 -name 'tailscale_*_amd64.tgz' ! -name "${dn}.tgz" -delete || true
@@ -198,10 +199,28 @@ restore_backup() {
 echo "[>] ensuring executable bin directory"
 $SUDO mkdir -p "$TS_BIN_DIR" "$TS_CACHE_DIR"
 $SUDO chmod 755 "$TS_BIN_DIR"
-# Only use RAM-backed tmpfs if the disk location is noexec
-if ! exec_ok "$TS_BIN_DIR" && ! mountpoint -q "$TS_BIN_DIR"; then
-  echo "[!] ${TS_BIN_DIR} is noexec; falling back to tmpfs (uses RAM)"
-  $SUDO mount -t tmpfs -o exec,mode=0755,size=64m tmpfs "$TS_BIN_DIR"
+# COS mounts /var (and /home) noexec. Preferred fix: bind-mount the directory onto itself and
+# remount that bind mount with exec. Binaries stay on disk, so it costs no RAM. (Root only.)
+if ! exec_ok "$TS_BIN_DIR"; then
+  echo "[!] ${TS_BIN_DIR} is on a noexec filesystem; trying a disk-backed bind mount with exec"
+  if mountpoint -q "$TS_BIN_DIR"; then
+    $SUDO mount -o remount,exec "$TS_BIN_DIR" 2>/dev/null || true
+  else
+    $SUDO mount --bind "$TS_BIN_DIR" "$TS_BIN_DIR" 2>/dev/null \
+      && $SUDO mount -o remount,bind,exec "$TS_BIN_DIR" 2>/dev/null || true
+  fi
+fi
+# Last resort: RAM-backed tmpfs. Both binaries together are ~80 MB+, so it must be large enough,
+# and it is lost on reboot (this script reinstalls on the next run).
+if ! exec_ok "$TS_BIN_DIR"; then
+  if mountpoint -q "$TS_BIN_DIR"; then $SUDO umount "$TS_BIN_DIR" 2>/dev/null || true; fi
+  echo "[!] bind mount did not allow exec; falling back to tmpfs (uses ~100 MB of RAM)"
+  $SUDO mount -t tmpfs -o exec,mode=0755,size=160m tmpfs "$TS_BIN_DIR"
+fi
+if ! exec_ok "$TS_BIN_DIR"; then
+  echo "[x] cannot make ${TS_BIN_DIR} executable (bind mount and tmpfs both failed)" >&2
+  mount | grep "$TS_BIN_DIR" >&2 || true
+  exit 1
 fi
 echo "[+] bin dir ready"
 
@@ -284,6 +303,8 @@ Before=network.target
 
 [Service]
 Type=notify
+# Re-create the exec bind mount after a reboot (no-op if the dir is already a mount; "-" ignores failure)
+ExecStartPre=-/bin/sh -c 'mountpoint -q ${TS_BIN_DIR} || { mount --bind ${TS_BIN_DIR} ${TS_BIN_DIR} && mount -o remount,bind,exec ${TS_BIN_DIR}; }'
 ExecStartPre=${TS_BIN_DIR}/tailscaled --cleanup
 ExecStart=${TS_BIN_DIR}/tailscaled --state=${TS_STATE_DIR}/tailscaled.state --socket=${TS_SOCKET} --port=41641
 ExecStopPost=${TS_BIN_DIR}/tailscaled --cleanup
