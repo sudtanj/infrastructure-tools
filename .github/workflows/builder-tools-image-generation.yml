@@ -29,15 +29,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/cache@v4
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('.github/workflows/builder-tools-image-generation.yml') }}
+          restore-keys: pip-${{ runner.os }}-py312-
+
+      - name: Cache model weights
+        uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-sd-turbo-v1
+          key: hf-sd-turbo-fp16-v1
 
       - name: Install dependencies
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install diffusers transformers accelerate
+          pip install diffusers transformers accelerate safetensors
 
       - name: Generate image
         env:
@@ -47,11 +55,15 @@ jobs:
           python - <<'PY'
           import os, torch
           from diffusers import AutoPipelineForText2Image
+          torch.set_num_threads(os.cpu_count() or 4)
+          # fp16 safetensors only: smaller download, cast to fp32 for CPU
           pipe = AutoPipelineForText2Image.from_pretrained(
-              "stabilityai/sd-turbo", torch_dtype=torch.float32)
-          img = pipe(os.environ["PROMPT"],
-                     num_inference_steps=int(os.environ["STEPS"]),
-                     guidance_scale=0.0).images[0]
+              "stabilityai/sd-turbo", variant="fp16", use_safetensors=True,
+              torch_dtype=torch.float32, safety_checker=None)
+          with torch.inference_mode():
+              img = pipe(os.environ["PROMPT"], width=512, height=512,
+                         num_inference_steps=int(os.environ["STEPS"]),
+                         guidance_scale=0.0).images[0]
           img.save("out.png")
           PY
 
