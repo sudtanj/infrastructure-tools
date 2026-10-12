@@ -44,7 +44,8 @@ write_files:
       #                         their own `cpus:` in compose keep theirs.
       #   --limits              Show the effective CPU cap of every container and exit
       #   --swap-size N         Swapfile size in GB (default 2)
-      #   --keep-cri            Keep containerd's Kubernetes CRI plugin (disabled by default: unused with plain Docker)
+      #   --disable-cri         Disable containerd's Kubernetes CRI plugin (opt-in: saves a little RAM, unused with plain Docker)
+      #   --retry-docker        Retry Docker tuning even if it failed and was reverted on an earlier boot
       #   --nat64               Add NAT64 + DNS64 so IPv6-only workloads can reach IPv4-only sites
       #   --nat64-mode MODE     auto (default) | public | local
       #                           public = DNS64 resolvers + a public NAT64 gateway (zero local CPU; for IPv6-only VMs)
@@ -62,10 +63,15 @@ write_files:
 
       SWAP_GB=2; DRY_RUN=0; NO_RESTART=0; ACTION=apply
       USE_ZRAM=0; USE_BBR=0; NO_LOGGING=0; NO_UPDATES=0
-      CPU_QUOTA=100; CONTAINER_CPUS=""; KEEP_CRI=0
+      CPU_QUOTA=100; CONTAINER_CPUS=""; DISABLE_CRI=0; RETRY_DOCKER=0
       NAT64=0; NAT64_MODE=auto; FORCE_NAT64=0; NAT64_ACTIVE=""; DOCKER_V6=0
       DNS64_SERVERS="2a00:1098:2c::1 2a00:1098:2b::1 2a01:4f8:c2c:123f::1"
       STATE_DIR=/var/lib/optimize-vm
+      : "$${DAEMON_JSON:=/etc/docker/daemon.json}"
+      : "$${DOCKER_DROPIN:=/etc/systemd/system/docker.service.d/99-optimize-vm.conf}"
+      : "$${CTD_DROPIN:=/etc/systemd/system/containerd.service.d/99-optimize-vm.conf}"
+      : "$${CT_CONF:=/etc/containerd/config.toml}"
+      FAIL_MARK="$STATE_DIR/docker-tuning-failed"
       MARK="# managed by optimize-vm.sh"
       MDS=http://169.254.169.254/computeMetadata/v1   # by IP: works even when DNS is broken
 
@@ -91,6 +97,42 @@ write_files:
       have() { command -v "$1" >/dev/null 2>&1; }
       run()  { if (( DRY_RUN )); then echo "$${c_dim}    (dry-run) $*$${c_off}"; else "$@"; fi; }
       unit_exists() { systemctl list-unit-files "$1" 2>/dev/null | grep -q "^$1"; }
+
+      # Bounded docker call for diagnostics. Docker is socket-activated: a client that connects while dockerd is
+      # stuck "activating" blocks forever, which would hang this script and cloud-init's final stage with it.
+      dk() { if have timeout; then timeout 15 docker "$@"; else docker "$@"; fi; }
+
+      docker_ready() {   # docker_ready [seconds]: wait until `docker info` answers
+        local t0=$SECONDS limit="$${1:-60}"
+        while (( SECONDS - t0 < limit )); do
+          if have timeout; then timeout 5 docker info >/dev/null 2>&1 && return 0
+          else docker info >/dev/null 2>&1 && return 0; fi
+          sleep 2
+        done
+        return 1
+      }
+
+      # Undo the Docker/containerd tuning and make sure Docker is back. Remembers the failure so later boots
+      # don't loop on the same broken config.
+      revert_docker_tuning() {
+        bad "Docker did not become ready within 60s with the tuned config. Last Docker log lines:"
+        journalctl -u docker.service -n 25 --no-pager -o cat 2>&1 | sed 's/^/    | /'
+        journalctl -u containerd.service -n 10 --no-pager -o cat 2>&1 | sed 's/^/    | /'
+        warn "Reverting the Docker/containerd tuning so Docker keeps working"
+        rm -f "$DOCKER_DROPIN" "$CTD_DROPIN"
+        if [[ -e "$STATE_DIR/backup$DAEMON_JSON" ]]; then cp -a "$STATE_DIR/backup$DAEMON_JSON" "$DAEMON_JSON"; else echo '{}' > "$DAEMON_JSON"; fi
+        if [[ -f "$CT_CONF" && "$(head -n 1 "$CT_CONF")" == "$MARK" ]]; then sed -i '1,2d' "$CT_CONF"; fi
+        systemctl daemon-reload
+        systemctl reset-failed docker.service containerd.service 2>/dev/null
+        systemctl restart containerd.service 2>/dev/null
+        systemctl restart docker.service 2>/dev/null
+        date -u +%FT%TZ > "$FAIL_MARK" 2>/dev/null
+        if docker_ready 90; then
+          info "reverted: Docker is healthy again. Tuning is skipped on later boots (rm $${FAIL_MARK} or pass --retry-docker to retry)"
+        else
+          bad "Docker is STILL not responding after the revert. Inspect: journalctl -u docker.service"
+        fi
+      }
 
       write_file() {   # write_file <path> [mode] < content ; returns 0 if changed, 1 if same
         local path="$1" mode="$${2:-0644}" tmp; tmp="$(mktemp)"; cat > "$tmp"
@@ -129,7 +171,9 @@ write_files:
           --limits) ACTION=limits ;;
           --container-cpus) CONTAINER_CPUS="$${2:?}"; shift ;;
           --swap-size) SWAP_GB="$${2:?}"; shift ;;
-          --keep-cri) KEEP_CRI=1 ;;
+          --disable-cri) DISABLE_CRI=1 ;;
+          --keep-cri) ;;   # accepted for compatibility (CRI is kept by default now)
+          --retry-docker) RETRY_DOCKER=1 ;;
           -h|--help) sed -n '2,45p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
           *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac; shift
@@ -150,7 +194,7 @@ write_files:
         echo; echo "=== Top cgroups (systemd-cgtop) ==="
         systemd-cgtop -b -n 2 -d 2 --depth=3 2>/dev/null | tail -n 14 || true
         echo; echo "=== CPU pressure (PSI) ==="; cat /proc/pressure/cpu 2>/dev/null || echo n/a
-        if have docker; then echo; echo "=== Containers ==="; docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null; fi
+        if have docker; then echo; echo "=== Containers ==="; dk stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null; fi
         echo; echo "=== Verdict ==="
         (( st >= 15 )) && bad "STEAL $${st}%: GCP is throttling your shared-core VM (e2-micro sustains only ~25% of a vCPU). No software tweak fixes this: cut workload or move to a bigger machine."
         (( wa >= 20 )) && bad "IOWAIT $${wa}%: disk bound, usually swap thrashing or heavy logging."
@@ -170,11 +214,11 @@ write_files:
         echo; echo "=== Effective CPU caps (1.00 = one full vCPU) ==="
         printf '%-26s %-8s %-9s %s\n' CONTAINER CPU-CAP IN-SLICE SHARES
         local id n nc cp sh cap ins
-        for id in $(docker ps -q 2>/dev/null); do
-          n="$(docker inspect -f '{{.Name}}' "$id" | tr -d /)"
-          nc="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$id")"
-          cp="$(docker inspect -f '{{.HostConfig.CgroupParent}}' "$id")"
-          sh="$(docker inspect -f '{{.HostConfig.CpuShares}}' "$id")"
+        for id in $(dk ps -q 2>/dev/null); do
+          n="$(dk inspect -f '{{.Name}}' "$id" | tr -d /)"
+          nc="$(dk inspect -f '{{.HostConfig.NanoCpus}}' "$id")"
+          cp="$(dk inspect -f '{{.HostConfig.CgroupParent}}' "$id")"
+          sh="$(dk inspect -f '{{.HostConfig.CpuShares}}' "$id")"
           cap="NONE"; [[ "$nc" != 0 ]] && cap="$(awk -v n="$nc" 'BEGIN{printf "%.2f", n/1e9}')"
           ins="no"; [[ "$cp" == containers.slice ]] && ins=yes
           printf '%-26s %-8s %-9s %s\n' "$n" "$cap" "$ins" "$sh"
@@ -355,7 +399,7 @@ write_files:
       # =====================================================================
       # 3. DOCKER
       # =====================================================================
-      DOCKER_CHANGED=0
+      DOCKER_CHANGED=0; CONTAINERD_CHANGED=0; SKIP_DT=0
       if have docker && unit_exists docker.service; then
         info "[3/6] Docker"
         MEM_HIGH=$(( MEM_MB * 62 / 100 )); MEM_MAX=$(( MEM_MB * 72 / 100 ))
@@ -373,75 +417,64 @@ write_files:
       IOWeight=30
       EOF
 
-        CG_DRIVER="$(docker info --format '{{.CgroupDriver}}' 2>/dev/null || echo unknown)"
-        mkdir -p /etc/docker; [[ -s /etc/docker/daemon.json ]] || echo '{}' > /etc/docker/daemon.json
-        # Lean daemon defaults:
+        if [[ -e "$FAIL_MARK" ]] && (( ! RETRY_DOCKER )); then
+          warn "Docker tuning failed on an earlier boot and was reverted; skipping it (rm $${FAIL_MARK} or pass --retry-docker to retry)"
+          SKIP_DT=1
+        fi
+        if (( ! SKIP_DT )); then
+        CG_DRIVER="$(dk info --format '{{.CgroupDriver}}' 2>/dev/null || echo unknown)"
+        mkdir -p "$(dirname "$DAEMON_JSON")"; [[ -s "$DAEMON_JSON" ]] || echo '{}' > "$DAEMON_JSON"
+        # Lean daemon defaults (deliberately minimal; every key here must be safe on COS's dockerd):
         #  - local log driver, 2x5 MB per container (compressed, less disk IO than json-file)
         #  - no userland-proxy (no extra docker-proxy process per published port)
         #  - 1 concurrent pull/push layer (less RAM/CPU spikes during deploys)
-        #  - nofile 65536 instead of COS's ~1M: some runtimes (Java, MySQL, Node libs) size
-        #    tables by the fd limit and waste RAM with a huge one
-        #  - 32 MB /dev/shm default instead of 64 MB
-        #  - classic overlay2 image store (containerd snapshotter keeps extra copies on disk)
-        #  - no Swarm/metrics/debug extras
-        BASE_JSON='{"log-driver":"local","log-opts":{"max-size":"5m","max-file":"2"},"live-restore":true,"userland-proxy":false,"mtu":1460,"max-concurrent-downloads":1,"max-concurrent-uploads":1,"max-download-attempts":3,"default-shm-size":"32M","default-ulimits":{"nofile":{"Name":"nofile","Soft":65536,"Hard":65536}},"features":{"containerd-snapshotter":false},"storage-driver":"overlay2","debug":false,"experimental":false}'
+        #  Not set on purpose: storage-driver, default-ulimits, default-shm-size, containerd-snapshotter, debug,
+        #  experimental. They don't save meaningful resources, can conflict with flags in COS's docker.service,
+        #  and change container/image behavior.
+        BASE_JSON='{"log-driver":"local","log-opts":{"max-size":"5m","max-file":"2"},"live-restore":true,"userland-proxy":false,"mtu":1460,"max-concurrent-downloads":1,"max-concurrent-uploads":1,"max-download-attempts":3}'
         if have jq; then
           DESIRED="$BASE_JSON"
           [[ "$CG_DRIVER" == systemd ]] && DESIRED="$(jq '. + {"cgroup-parent":"containers.slice"}' <<<"$DESIRED")"
           (( DOCKER_V6 )) && DESIRED="$(jq '. + {"ipv6":true,"fixed-cidr-v6":"fd00:d0c:64::/64","ip6tables":true,"experimental":true}' <<<"$DESIRED")"
-          MERGED="$(jq -s '.[0] * .[1]' /etc/docker/daemon.json <(echo "$DESIRED"))"
+          MERGED="$(jq -s '.[0] * .[1]' "$DAEMON_JSON" <(echo "$DESIRED"))"
         else
           CGP=""; [[ "$CG_DRIVER" == systemd ]] && CGP=',"cgroup-parent":"containers.slice"'
-          V6=""; (( DOCKER_V6 )) && { V6=',"ipv6":true,"fixed-cidr-v6":"fd00:d0c:64::/64","ip6tables":true'; BASE_JSON="$${BASE_JSON/\"experimental\":false/\"experimental\":true}"; }
+          V6=""; (( DOCKER_V6 )) && V6=',"ipv6":true,"fixed-cidr-v6":"fd00:d0c:64::/64","ip6tables":true,"experimental":true'
           MERGED="$${BASE_JSON%\}}$${CGP}$${V6}}"
         fi
-        write_file /etc/docker/daemon.json <<<"$MERGED" >/dev/null && DOCKER_CHANGED=1
+        write_file "$DAEMON_JSON" <<<"$MERGED" >/dev/null && DOCKER_CHANGED=1
         [[ "$CG_DRIVER" != systemd ]] && warn "cgroup driver is '$CG_DRIVER': containers.slice cap unused; per-container limits below still apply"
 
         # dockerd is a Go program: one P (GOMAXPROCS=1) = fewer threads and less scheduler churn on
         # a shared core; GOMEMLIMIT = GC only works hard near the soft cap (no extra CPU when idle).
-        write_file /etc/systemd/system/docker.service.d/99-optimize-vm.conf <<EOF >/dev/null && { DOCKER_CHANGED=1; run systemctl daemon-reload; }
+        write_file "$DOCKER_DROPIN" <<EOF >/dev/null && { DOCKER_CHANGED=1; run systemctl daemon-reload; }
       $MARK
       [Service]
       Environment=GOMAXPROCS=1
-      Environment=GOMEMLIMIT=96MiB
+      Environment=GOMEMLIMIT=256MiB
       OOMScoreAdjust=-500
       CPUQuota=80%
       Nice=5
       EOF
 
         # containerd + every containerd-shim (shims inherit this env: one P each instead of N)
-        CONTAINERD_CHANGED=0
         if unit_exists containerd.service; then
-          write_file /etc/systemd/system/containerd.service.d/99-optimize-vm.conf <<EOF >/dev/null && CONTAINERD_CHANGED=1
+          write_file "$CTD_DROPIN" <<EOF >/dev/null && CONTAINERD_CHANGED=1
       $MARK
       [Service]
       Environment=GOMAXPROCS=1
-      Environment=GOMEMLIMIT=64MiB
+      Environment=GOMEMLIMIT=128MiB
       CPUQuota=60%
       EOF
-          # Kubernetes CRI plugin: COS ships it enabled for GKE; plain Docker never uses it but it
-          # still costs RAM and periodic CPU. Prepend disabled_plugins (top-level TOML key) to the
-          # existing config and auto-revert if containerd won't come back up.
-          CT_CONF=/etc/containerd/config.toml
-          if (( ! KEEP_CRI )) && [[ -f $CT_CONF ]] && ! grep -q '^disabled_plugins' "$CT_CONF"; then
+          # Kubernetes CRI plugin (opt-in via --disable-cri): COS ships it enabled for GKE; plain Docker never
+          # uses it. Prepend disabled_plugins (a top-level TOML key). If Docker fails to come back, the guarded
+          # restart below removes these two lines again.
+          if (( DISABLE_CRI )) && [[ -f $CT_CONF ]] && ! grep -q '^disabled_plugins' "$CT_CONF"; then
             { echo "$MARK"; echo 'disabled_plugins = ["io.containerd.grpc.v1.cri"]'; cat "$CT_CONF"; } \
-              | write_file "$CT_CONF" >/dev/null && CONTAINERD_CHANGED=2
-          fi
-          if (( CONTAINERD_CHANGED && ! DRY_RUN )); then
-            systemctl daemon-reload
-            if (( NO_RESTART )); then warn "containerd config changed: sudo systemctl restart containerd docker"
-            else
-              info "Restarting containerd (running containers keep going via their shims)"
-              systemctl restart containerd; sleep 2
-              if ! systemctl is-active -q containerd && (( CONTAINERD_CHANGED == 2 )); then
-                bad "containerd failed with CRI disabled; restoring original config"
-                sed -i '1,2d' "$CT_CONF"; systemctl restart containerd   # drop the 2 lines we prepended
-              fi
-              DOCKER_CHANGED=1   # docker must reconnect to the restarted containerd
-            fi
+              | write_file "$CT_CONF" >/dev/null && CONTAINERD_CHANGED=1
           fi
         fi
+        fi   # end: if (( ! SKIP_DT ))
 
         # Weekly prune at idle priority
         write_file /etc/systemd/system/docker-prune.service <<EOF >/dev/null
@@ -468,8 +501,15 @@ write_files:
       EOF
         run systemctl daemon-reload; run systemctl enable --now docker-prune.timer >/dev/null 2>&1
 
-        if (( DOCKER_CHANGED && ! NO_RESTART )); then warn "Restarting Docker (live-restore keeps containers up)"; run systemctl restart docker
-        elif (( DOCKER_CHANGED )); then warn "Docker config changed: sudo systemctl restart docker"; fi
+        if (( (DOCKER_CHANGED || CONTAINERD_CHANGED) && ! NO_RESTART )); then
+          warn "Restarting containerd + Docker to apply the tuning (live-restore keeps containers up)"
+          run systemctl daemon-reload
+          if (( CONTAINERD_CHANGED )); then run systemctl restart containerd; fi
+          run systemctl restart docker
+          if (( ! DRY_RUN )); then
+            if docker_ready 60; then rm -f "$FAIL_MARK"; info "Docker is ready with the tuned config"; else revert_docker_tuning; fi
+          fi
+        elif (( DOCKER_CHANGED || CONTAINERD_CHANGED )); then warn "Docker/containerd config changed: sudo systemctl restart containerd docker"; fi
 
         # CPU guard: caps EVERY container the moment it starts (works with any cgroup driver and
         # survives CI redeploys, which recreate containers and wipe `docker update` limits).
@@ -752,7 +792,7 @@ bootcmd:
       "$MDS/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null || true)
     if [ -n "$EXT_V4" ]; then NET_MODE=ipv4; else NET_MODE=ipv6only; fi
     echo "$NET_MODE" > /run/net-mode
-    logger -t cloud-init-net "external_ipv4=$EXT_V4 mode=$NET_MODE"
+    logger -t cloud-init-net "external_ipv4=$EXT_V4 mode=$NET_MODE" || true
 
   # --- DNS: DNS64 only on IPv6-only hosts, stock systemd-resolved otherwise ---
   # Docker copies the host resolv.conf into containers, so they inherit DNS64 automatically.
@@ -777,9 +817,12 @@ runcmd:
   - sed -i -e '/^AddressFamily/d' /etc/ssh/sshd_config
   - systemctl reload sshd.service || true
 
-  # --- Docker (optimize-vm.sh writes daemon.json and restarts it with live-restore) ---
+  # --- Docker. "timeout" so a stuck Docker start can never block cloud-init's final stage ---
   - systemctl enable docker.service
-  - systemctl start docker.service
+  - timeout 120 systemctl start docker.service || true
 
-  # --- Tuning (flags come from the optimize-vm-args metadata key) ---
-  - bash /var/lib/optimize-vm/optimize-vm.sh 2>&1 | logger -t optimize-vm
+  # --- Tuning (flags come from the optimize-vm-args metadata key). ---
+  # Output goes to a file, not a pipe to logger: a pipe stays open as long as any child holds it, which can
+  # hang this stage. The "||" makes the final command exit 0 whatever happens, so tuning problems are logged
+  # but never turn cloud-init's status into "error".
+  - timeout 900 bash /var/lib/optimize-vm/optimize-vm.sh > /var/log/optimize-vm.log 2>&1 || echo "optimize-vm.sh failed or timed out; see /var/log/optimize-vm.log"
