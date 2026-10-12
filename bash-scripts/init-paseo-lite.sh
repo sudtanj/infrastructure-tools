@@ -19,6 +19,9 @@
 set -euo pipefail
 
 INIT_DEBUG="${INIT_DEBUG:-1}"
+DOCKER_PREFLIGHT_TIMEOUT="${DOCKER_PREFLIGHT_TIMEOUT:-20}"   # seconds to wait for the docker daemon
+PULL_TIMEOUT_SECS="${PULL_TIMEOUT_SECS:-1200}"               # give up on a stuck image pull
+PULL_BEAT_SECS="${PULL_BEAT_SECS:-20}"                       # progress line interval while pulling
 T_START=$(date +%s)
 
 # ---------- debug helpers ----------
@@ -28,6 +31,13 @@ present() { if [ -n "${1:-}" ]; then echo "set"; else echo "unset"; fi; }
 url_host() {  # host part only (drops scheme, credentials, path, query) so URLs never leak tokens
   if [ -z "${1:-}" ]; then echo "none"; return; fi
   printf '%s' "$1" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/@]*@)?([^/:?]+).*#\2#'
+}
+
+# Bounded docker call for diagnostics, so a wedged daemon can't hang the whole run.
+dk() { if command -v timeout >/dev/null 2>&1; then timeout 15 docker "$@"; else docker "$@"; fi; }
+# One-line system pressure summary (no addresses): helps tell "slow" from "thrashing".
+sys_brief() {
+  echo "load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null) mem_avail=$(free -m | awk '/^Mem:/{print $7}')MB swap_used=$(free -m | awk '/^Swap:/{print $3}')MB disk_free=$(df -h /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}')"
 }
 
 # Masks the literal value of every secret, plus common token shapes, in whatever is piped through.
@@ -93,6 +103,26 @@ WORKSPACE_VOLUME="paseo-workspace"
 
 echo "[*] init start"
 
+# ---------- docker preflight: fail fast with a reason instead of hanging ----------
+docker_preflight() {
+  local t0
+  t0=$(date +%s)
+  if command -v timeout >/dev/null 2>&1; then
+    if ! timeout "$DOCKER_PREFLIGHT_TIMEOUT" docker version -f '{{.Server.Version}}' >/dev/null 2>&1; then
+      echo "[x] docker daemon did not respond within ${DOCKER_PREFLIGHT_TIMEOUT}s" >&2
+      echo "[x] services: docker=$(systemctl is-active docker.service 2>&1) containerd=$(systemctl is-active containerd.service 2>&1)" >&2
+      echo "[x] system: $(sys_brief)" >&2
+      echo "[x] last docker journal lines:" >&2
+      sudo -n journalctl -u docker.service -n 15 --no-pager -o cat 2>&1 | redact | sed 's/^/    | /' >&2 || true
+      echo "[x] last containerd journal lines:" >&2
+      sudo -n journalctl -u containerd.service -n 10 --no-pager -o cat 2>&1 | redact | sed 's/^/    | /' >&2 || true
+      exit 1
+    fi
+  fi
+  dbg "docker daemon responded in $(since "$t0")"
+}
+docker_preflight
+
 # ---------- host snapshot (debug only) ----------
 host_snapshot() {
   dbg "user: $(id -un) (uid $(id -u)) | host: $(hostname) | kernel: $(uname -r)"
@@ -101,8 +131,9 @@ host_snapshot() {
   dbg "memory: $(free -m | awk '/^Mem:/{printf "total=%sMB used=%sMB avail=%sMB", $2,$3,$7}') | swap: $(free -m | awk '/^Swap:/{printf "total=%sMB used=%sMB", $2,$3}')"
   dbg "disk /var/lib/docker: $(df -h /var/lib/docker 2>/dev/null | awk 'NR==2{printf "size=%s used=%s avail=%s use=%s", $2,$3,$4,$5}')"
   dbg "sudo -n: $(sudo -n true 2>/dev/null && echo yes || echo no) | bash: ${BASH_VERSION}"
-  dbg "docker: server=$(docker version -f '{{.Server.Version}}' 2>/dev/null || echo unknown) cgroup=$(docker info -f '{{.CgroupDriver}}/v{{.CgroupVersion}}' 2>/dev/null || echo unknown) storage=$(docker info -f '{{.Driver}}' 2>/dev/null || echo unknown)"
-  dbg "docker containers running: $(docker ps -q 2>/dev/null | wc -l) | images: $(docker images -q 2>/dev/null | wc -l)"
+  dbg "docker: server=$(dk version -f '{{.Server.Version}}' 2>/dev/null || echo unknown) cgroup=$(dk info -f '{{.CgroupDriver}}/v{{.CgroupVersion}}' 2>/dev/null || echo unknown) storage=$(dk info -f '{{.Driver}}' 2>/dev/null || echo unknown)"
+  dbg "docker containers running: $(dk ps -q 2>/dev/null | wc -l) | images: $(dk images -q 2>/dev/null | wc -l)"
+  dbg "system: $(sys_brief)"
 }
 host_snapshot
 
@@ -207,11 +238,35 @@ sudo -n systemctl enable docker >/dev/null 2>&1 || true
 PREV_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "none")
 dbg "pulling ${IMAGE} (local image before pull: ${PREV_ID:0:19})"
 T_PULL=$(date +%s)
-if ! pull_out=$(docker pull -q "$IMAGE" 2>&1); then
+PULL_LOG=$(mktemp)
+# Run the pull in the background so we can print progress and enforce a timeout (a first pull on a
+# throttled e2-micro can take minutes and would otherwise look like a hang).
+docker pull -q "$IMAGE" >"$PULL_LOG" 2>&1 &
+PULL_PID=$!
+NEXT_BEAT="$PULL_BEAT_SECS"
+while kill -0 "$PULL_PID" 2>/dev/null; do
+  el=$(( $(date +%s) - T_PULL ))
+  if [ "$el" -ge "$PULL_TIMEOUT_SECS" ]; then
+    kill "$PULL_PID" 2>/dev/null || true
+    echo "[x] docker pull timed out after ${el}s ($(sys_brief))" >&2
+    echo "[x] likely causes: slow/throttled VM (CPU steal or swap thrash), a very large image, or a stalled registry connection" >&2
+    rm -f "$PULL_LOG"
+    exit 1
+  fi
+  if [ "$el" -ge "$NEXT_BEAT" ]; then
+    echo "[>] still pulling ${IMAGE} (${el}s elapsed)"
+    dbg "pull progress: $(sys_brief)"
+    NEXT_BEAT=$(( NEXT_BEAT + PULL_BEAT_SECS ))
+  fi
+  sleep 2
+done
+if ! wait "$PULL_PID"; then
   echo "[x] docker pull failed - current container left untouched" >&2
-  printf '%s\n' "$pull_out" | redact >&2
+  redact < "$PULL_LOG" >&2
+  rm -f "$PULL_LOG"
   exit 1
 fi
+rm -f "$PULL_LOG"
 NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown")
 if [ "$PREV_ID" = "$NEW_ID" ]; then IMG_NOTE="unchanged"; else IMG_NOTE="CHANGED"; fi
 dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(docker image inspect -f '{{.Size}}' "$IMAGE" 2>/dev/null | awk '{printf "%.0fMB", $1/1048576}')"
@@ -233,7 +288,7 @@ dbg "hash: desired=${CONFIG_HASH:0:12} current=${CUR_SHORT} | container exists=$
 if [ "$CUR_HASH" = "$CONFIG_HASH" ] && [ "$RUNNING" = "true" ]; then
   echo "[+] unchanged - container left running"
   dbg "container: $(docker inspect -f 'status={{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
-  dbg "usage: $(docker stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
+  dbg "usage: $(dk stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
   exit 0
 fi
 
@@ -445,7 +500,7 @@ if [ "$INIT_DEBUG" = "1" ]; then
   dbg "listening on :${PASEO_PORT}: ${LISTENING}"
   [ "$LISTENING" = "yes" ] || echo "[!] nothing is listening on :${PASEO_PORT} yet (may still be starting; check: docker logs ${CONTAINER_NAME})" >&2
 
-  dbg "usage: $(docker stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
+  dbg "usage: $(dk stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
   dbg "host memory now: $(free -m | awk '/^Mem:/{printf "used=%sMB avail=%sMB", $3,$7}') | load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
   dbg "recent container logs (last 15 lines, redacted):"
   docker logs --tail 15 "$CONTAINER_NAME" 2>&1 | redact | sed 's/^/    | /' || true
