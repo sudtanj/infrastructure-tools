@@ -15,10 +15,10 @@ on:
           - init-paseo-codex
           - init-paseo-lite
           - init-tailscale
-          - update-tailscale
           - upsert-github-runner
           - optimize-vm
           - debug-cloud-init
+          - reset-containers
           # add new script names here as you create them
       debug:
         description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
@@ -54,7 +54,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
-            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' | sort)
+            # reset-*.sh are destructive (they stop what the init scripts start): only run when picked by name
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
           else
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")

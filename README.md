@@ -33,7 +33,8 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── init-paseo-lite.sh            # Deploy & maintain paseo-lite (Rust Paseo + native Claude Code/Codex)
 │   ├── upsert-github-runner.sh    # Upsert GitHub Actions self-hosted runner
 │   ├── init-n8n.sh                   # Deploy n8n workflow automation, tuned for free tier
-│   ├── init-tailscale.sh             # Dedicated Tailscale deployment & configuration script
+│   ├── init-tailscale.sh             # Install, update & configure Tailscale (idempotent)
+│   ├── reset-containers.sh           # Stop & remove all running containers, keep volumes
 │   └── init-portainer.sh             # Deploy latest Portainer only
 ├── terraform_free_tier_gcp/
 │   ├── cloud-init.yaml.tftpl         # Cloud-config for COS startup, Tailscale & Portainer setup
@@ -77,8 +78,8 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`init-paseo-lite.sh`**: Same deployment pattern and the same secrets as `init-paseo-codex.sh` (`CODEX_*`, `GH_TOKEN`, `ANTHROPIC_*`, `CLAUDE_CODE_*`), for [`sudtanj/paseo-lite`](https://github.com/sudtanj/builder-tools/tree/main/paseo-lite): the Rust Paseo daemon with native Claude Code and Codex CLIs, no Node.js. One shared Codex app-server serves every project, and Claude processes are started per prompt and released when idle (at most `PASEO_CLAUDE_MAX_LIVE`, default 1). Uses its own container (`paseo-lite`), its own home volume (`paseo-lite-home`) and is pinned to port `6768`, since 6767 is already used by `init-paseo-codex.sh`. It refuses to start if something else holds 6768. Running both on one `e2-micro` exceeds its RAM, though, so deploy one of them. The relay pairing link is never logged; run `docker exec paseo-lite paseo-lite pair` on the VM to show it.
 - **`upsert-github-runner.sh`**: Idempotent upsert of a GHCR GitHub Actions runner, capped at 0.50 CPU and 256 MiB memory.
 - **`init-n8n.sh`**: Idempotent n8n deployment sized for the free-tier `e2-micro`. Uses SQLite instead of Postgres/Redis, caps the container at 0.50 CPU / 512 MiB with a matching V8 heap limit, disables telemetry/version/template calls to preserve the free egress allowance, publishes the UI on loopback plus the Tailscale address only, and installs a daily local backup of the data volume. The credential `N8N_ENCRYPTION_KEY` is generated once and persisted in `/etc/n8n/n8n.env` (mode 600) so re-runs never orphan stored credentials.
-- **`init-tailscale.sh`**: Tailscale installation and lifecycle management script.
-- **`update-tailscale.sh`**: Updates the Tailscale binaries installed by `cloud-init.yaml.tftpl` (`/var/lib/docker/tailscale-bin`) to the latest stable (or `TS_VERSION`), restarting `tailscaled` and rolling back if it fails to start. Keeps the node auth and systemd unit untouched.
+- **`init-tailscale.sh`**: Idempotent Tailscale install, update and configuration. Installs or updates the binaries to the latest stable (reusing the cloud-init install in `/var/lib/docker/tailscale-bin`), writes the resource-capped `tailscaled` systemd unit, authenticates with `TS_AUTHKEY` when needed, verifies the node is healthy, and rolls back to the previous binaries if an update fails.
+- **`reset-containers.sh`**: Stops and removes every running Docker container without touching volumes, so re-running the `init-*.sh` scripts restores the services with their data. Excluded from the workflow's `all` option; select `reset-containers` to run it.
 - **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
 
 ### 4. GitHub Actions CI/CD (`.github/workflows/`)

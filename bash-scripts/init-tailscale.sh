@@ -1,5 +1,5 @@
 #!/bin/bash
-# bash-scripts/upsert-tailscale.sh
+# bash-scripts/init-tailscale.sh
 # Low-footprint Tailscale upsert for tiny VMs (e2-micro / COS).
 #
 # Env: TS_AUTHKEY, TS_HOSTNAME, TS_BIN_DIR, TS_EXTRA_ARGS,
@@ -47,7 +47,7 @@ if [ -z "$TS_BIN_DIR" ]; then
   TS_BIN_DIR="${TS_BIN_DIR:-$TS_DEFAULT_BIN_DIR}"
 fi
 
-echo "[*] upsert-tailscale start"
+echo "[*] init-tailscale start"
 echo "[+] using ${TS_BIN_DIR}"
 
 # ---------- DNS64: only on IPv6-only VMs ----------
@@ -593,5 +593,5 @@ if ip link show tailscale0 >/dev/null 2>&1; then
 else
   echo "[*] interface: missing" >&2
 fi
-echo "[+] upsert-tailscale done"
+echo "[+] init-tailscale done"
 exit 0
