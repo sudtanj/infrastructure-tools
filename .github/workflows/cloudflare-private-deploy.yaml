@@ -116,6 +116,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Only this folder of the private repo is searched for projects to deploy.
+  PROJECTS_DIR: cloudflare-projects
   NODE_VERSION: '22'
   NPM_CONFIG_FUND: 'false'
   NPM_CONFIG_AUDIT: 'false'
@@ -342,12 +344,18 @@ jobs:
           # at all. Both markers are matched as FILES, never as directory
           # names, so an unrelated `src/functions/` cannot be mistaken for a
           # Pages project.
+          # Only PROJECTS_DIR is scanned, so folders elsewhere in the private
+          # repo (other runtimes, apps with a `public/`) are never deployed.
+          if [ ! -d "$PROJECTS_DIR" ]; then
+            echo "::error::Folder '$PROJECTS_DIR' not found in the private repo."
+            exit 1
+          fi
           mapfile -t configs < <(
-            find . -path '*/node_modules' -prune -o \
+            find "./$PROJECTS_DIR" -path '*/node_modules' -prune -o \
               \( -name 'wrangler.toml' -o -name 'wrangler.json' -o -name 'wrangler.jsonc' \) -print | sort
           )
           mapfile -t markers < <(
-            find . -path '*/node_modules' -prune -o \
+            find "./$PROJECTS_DIR" -path '*/node_modules' -prune -o \
               \( -name '_headers' -o -name '_routes.json' \) -print | sort
           )
 
@@ -385,7 +393,7 @@ jobs:
             return 1
           }
           mapfile -t publics < <(
-            find . -path '*/node_modules' -prune -o -type d -name 'public' -print | sort
+            find "./$PROJECTS_DIR" -path '*/node_modules' -prune -o -type d -name 'public' -print | sort
           )
           for public_dir in ${publics[@]+"${publics[@]}"}; do
             dir="$(dirname "${public_dir#./}")"
@@ -498,7 +506,7 @@ jobs:
             # or the wrong branch.
             if force_on; then
               echo "::error::force was requested but no Cloudflare Worker or Pages project was found at ${TARGET_SHA:0:12}."
-              echo "Check BUILD_REF points at the branch you meant, and that each folder contains a wrangler.toml, wrangler.json or wrangler.jsonc (Workers) -- or a _headers or _routes.json file (Pages)."
+              echo "Check BUILD_REF points at the branch you meant, and that each folder under $PROJECTS_DIR contains a wrangler.toml, wrangler.json or wrangler.jsonc (Workers) -- or a _headers or _routes.json file (Pages)."
               exit 1
             fi
           else
