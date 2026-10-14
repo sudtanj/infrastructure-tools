@@ -1,0 +1,867 @@
+name: "Build cross-platform apps: Android, iOS, Windows, macOS, Linux (private repo)"
+
+# ---------------------------------------------------------------------------
+# Compiles the Capacitor apps that live in a PRIVATE repository for Android
+# and iOS, using this PUBLIC repo's free GitHub-hosted runner minutes
+# (standard Linux AND macOS runners are unmetered on public repos). The
+# compiled files are published as a GitHub Release on the PRIVATE repo; this
+# repo never stores them.
+#
+# HOW THIS WORKS
+#   1. poll    - ask GitHub for the private repo's latest commit on the tracked
+#                branch; compare with the last one built (cached).
+#   2. detect  - checkout the private repo and list every app the push
+#                touched. An app is any direct child of `apps/` holding
+#                a package.json AND a capacitor.config.(json|ts|js). Nothing
+#                to register: add a folder and it is built.
+#   3. android - (ubuntu) npm build -> `cap sync android` -> Gradle.
+#      ios     - (macOS)  npm build -> `cap sync ios` -> xcodebuild archive.
+#                A missing android/ or ios/ folder is generated with
+#                `cap add`, so a new app builds for both platforms by default.
+#      desktop - (ubuntu, windows, macOS) npm build -> Electron shell ->
+#                electron-builder. An app without electron/main.cjs gets a
+#                default shell that opens its web build in a window.
+#   4. publish - each build job uploads straight to a release on the PRIVATE
+#                repo, tagged `<app>-v<version>-build.<run number>` at the
+#                commit that was built. Both platforms share one release.
+#
+# WHAT YOU GET
+#   Android  - a release APK + AAB signed with your keystore when the
+#              ANDROID_* secrets are set; otherwise a debug APK, which
+#              installs on any device but cannot go to the Play Store.
+#   iOS      - an UNSIGNED .ipa. It proves the app compiles and can be
+#              re-signed (e.g. AltStore/Sideloadly), but cannot be installed
+#              as-is or sent to TestFlight. Signing needs an Apple Developer
+#              account and is not wired in yet.
+#   Windows  - NSIS installer + portable .exe, unsigned (SmartScreen warns:
+#              "More info" -> "Run anyway").
+#   macOS    - .dmg for arm64 and x64, ad-hoc signed only (first launch:
+#              right-click -> Open, or `xattr -cr /Applications/<App>.app`).
+#   Linux    - .AppImage and .deb.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo, and so are its run logs. Install and
+#     build output names private files, so it is reduced to pass/fail with
+#     paths stripped. Nothing is uploaded with actions/upload-artifact,
+#     because artifacts on a public repo are downloadable by anyone.
+#   * The release token can write to the private repo. Anyone who can push to
+#     this repo can change what it does with it: keep push access to trusted
+#     people, and scope the token to that one repository.
+#
+# SETUP
+#   secret PRIVATE_REPO_TOKEN       read access to the private repo (required)
+#   secret PRIVATE_REPO             "owner/name" of the private repo (required)
+#   secret BUILD_REF                branch to track (defaults to main)
+#   secret MOBILE_RELEASE_TOKEN     fine-grained PAT on the private repo with
+#                                   Contents: read & write, used to create
+#                                   releases. Falls back to PRIVATE_REPO_TOKEN
+#                                   if that one already has write access.
+#   secret ANDROID_KEYSTORE_BASE64  OPTIONAL, all four together: `base64 -w0
+#   secret ANDROID_KEYSTORE_PASSWORD  release.jks`, its store password, the
+#   secret ANDROID_KEY_ALIAS          key alias and the key password. One
+#   secret ANDROID_KEY_PASSWORD       keystore signs every app. Keep a backup:
+#                                     losing it means you can never update an
+#                                     app already on the Play Store.
+#
+# VERSIONS
+#   versionName / CFBundleShortVersionString = package.json "version"
+#   versionCode / CFBundleVersion            = this workflow's run number,
+#                                              which only ever increases.
+#
+# RUNNING IT BY HAND
+#   Re-run with `force` checked to build every app, even when the private repo
+#   has not moved since the last successful build.
+#
+# WHAT COUNTS AS "BUILT"
+#   The commit is recorded by the `record` job only when every build
+#   succeeded (or there was nothing to build), so a failure is retried on the
+#   next poll instead of being skipped as "nothing new".
+# ---------------------------------------------------------------------------
+
+on:
+  # Every 30 minutes: app builds are slower and rarer than web deploys. Each
+  # poll is one API call, and a no-change run stops at the poll job.
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build every app even if the private repo has no new commits"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apps-build-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '21'
+  APPS_DIR: 'apps'
+  NPM_CONFIG_FUND: 'false'
+  NPM_CONFIG_AUDIT: 'false'
+  NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+  CAPACITOR_TELEMETRY: 'false'
+  CI: 'true'
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: has the private repo moved?
+  # ------------------------------------------------------------------
+  poll:
+    name: "Poll private repo"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.poll.outputs.changed }}
+      sha: ${{ steps.poll.outputs.sha }}
+      ref: ${{ steps.poll.outputs.ref }}
+
+    steps:
+      # The `record` job rewrites this file after every clean build, with the
+      # run id in the key because cache entries are immutable; `restore-keys`
+      # picks the most recent one.
+      - name: Restore state for next poll
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/apps-build-state.txt
+          key: apps-build-state-${{ secrets.PRIVATE_REPO || github.repository }}
+          restore-keys: |
+            apps-build-state-${{ secrets.PRIVATE_REPO || github.repository }}-
+
+      - name: Resolve repo and fetch latest commit
+        id: poll
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          CFG_REPO: ${{ secrets.PRIVATE_REPO }}
+          CFG_REF: ${{ secrets.BUILD_REF }}
+          FORCE: ${{ inputs.force || github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+
+          force_on() {
+            case "$(printf '%s' "${FORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::No credential: set secret PRIVATE_REPO_TOKEN."
+            exit 1
+          fi
+
+          REPO="${CFG_REPO:-}"
+          if ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::Set secret PRIVATE_REPO to 'owner/name'."
+            exit 1
+          fi
+          REF="${CFG_REF:-main}"
+
+          if ! SHA=$(gh api "repos/${REPO}/commits/${REF}" --jq '.sha' 2>/dev/null) || [ -z "$SHA" ]; then
+            echo "::error::Cannot read ${REPO}@${REF}. Check the token has read access."
+            exit 1
+          fi
+
+          PREV=""
+          [ -f /tmp/apps-build-state.txt ] && PREV="$(cat /tmp/apps-build-state.txt)"
+
+          echo "Latest:     ${SHA:0:12}"
+          echo "Last build: ${PREV:-<none>}"
+
+          CHANGED="false"
+          if [ "$SHA" != "$PREV" ]; then
+            CHANGED="true"
+            echo "New commit detected."
+          else
+            echo "No new commit; nothing to build."
+          fi
+          if force_on; then
+            CHANGED="true"
+            echo "force is ON; building regardless of the commit comparison."
+          fi
+
+          {
+            echo "changed=$CHANGED"
+            echo "sha=$SHA"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # Job 2: which apps need building?
+  # ------------------------------------------------------------------
+  detect:
+    name: "Detect apps"
+    needs: poll
+    if: ${{ needs.poll.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      apps: ${{ steps.detect.outputs.apps }}
+      # A bare integer survives even if GitHub drops `apps` for matching a
+      # secret; the record job uses it to spot that case.
+      count: ${{ steps.detect.outputs.count }}
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.ref }}
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+          # Full history so the push can be diffed against the last build.
+          fetch-depth: 0
+
+      - name: Restore last built commit
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/apps-build-state.txt
+          key: apps-build-state-${{ secrets.PRIVATE_REPO || github.repository }}
+          restore-keys: |
+            apps-build-state-${{ secrets.PRIVATE_REPO || github.repository }}-
+
+      - name: Find changed apps
+        id: detect
+        working-directory: private
+        shell: bash
+        env:
+          TARGET_SHA: ${{ needs.poll.outputs.sha }}
+          FORCE: ${{ inputs.force || github.event.inputs.force }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          force_on() {
+            case "$(printf '%s' "${FORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          base=''
+          [ -f /tmp/apps-build-state.txt ] && base="$(cat /tmp/apps-build-state.txt)"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No comparable base commit; building every app found."
+            base=''
+          fi
+          if force_on; then
+            echo "force is ON; selecting every app."
+            base=''
+          fi
+
+          changed=()
+          if [ -n "$base" ]; then
+            mapfile -t changed < <(git diff --name-only "$base" "$TARGET_SHA" -- "$APPS_DIR")
+          fi
+
+          rows=()
+          skipped=()
+          if [ -d "$APPS_DIR" ]; then
+            for path in "$APPS_DIR"/*/; do
+              [ -d "$path" ] || continue
+              dir="${path%/}"
+              name="${dir##*/}"
+
+              has_config=0
+              for ext in json ts js; do
+                if [ -f "$dir/capacitor.config.$ext" ]; then has_config=1; fi
+              done
+              if [ ! -f "$dir/package.json" ] || [ "$has_config" -eq 0 ]; then
+                echo "Skipping $dir: needs package.json and capacitor.config.(json|ts|js)."
+                continue
+              fi
+              # The name becomes a release tag and a file name.
+              if ! printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+                echo "::warning::Skipping $dir: folder names may only use letters, digits, '.', '_' and '-'."
+                continue
+              fi
+
+              if [ -n "$base" ]; then
+                hit=0
+                for file in ${changed[@]+"${changed[@]}"}; do
+                  case "$file" in "$dir"/*) hit=1; break ;; esac
+                done
+                if [ "$hit" -eq 0 ]; then
+                  skipped+=("$name")
+                  continue
+                fi
+              fi
+
+              version="$(node -p 'require(process.argv[1]).version || "0.0.0"' "./$dir/package.json")"
+              if ! printf '%s' "$version" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.-]*$'; then
+                echo "::error::$dir/package.json has an unusable \"version\": '$version'."
+                exit 1
+              fi
+              lock=''
+              [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
+              tag="${name}-v${version}-build.${RUN_NUMBER}"
+
+              rows+=("$name"$'\t'"$dir"$'\t'"$version"$'\t'"$lock"$'\t'"$tag")
+              echo "  - $name $version -> release $tag"
+            done
+          fi
+
+          echo "Building ${#rows[@]} app(s)."
+          if [ ${#skipped[@]} -gt 0 ]; then
+            echo "Unchanged, skipping: ${skipped[*]}"
+          fi
+          if [ ${#rows[@]} -eq 0 ] && force_on; then
+            echo "::error::force was requested but no app was found under $APPS_DIR/ at ${TARGET_SHA:0:12}."
+            exit 1
+          fi
+
+          echo "apps=$(node -e '
+            const rows = process.argv.slice(1).filter(Boolean).map((row) => {
+              const [name, dir, version, lock, tag] = row.split("\t");
+              return { name, dir, version, lock, tag };
+            });
+            process.stdout.write(JSON.stringify(rows));
+          ' ${rows[@]+"${rows[@]}"})" >> "$GITHUB_OUTPUT"
+          echo "count=${#rows[@]}" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # Job 3a: Android
+  # ------------------------------------------------------------------
+  android:
+    name: "Android: ${{ matrix.app.name }}"
+    needs: [poll, detect]
+    if: ${{ needs.detect.outputs.apps != '' && needs.detect.outputs.apps != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # `|| '[]'`: the matrix is built before `if` is evaluated, and
+        # fromJSON('') fails the run when detect was skipped.
+        app: ${{ fromJSON(needs.detect.outputs.apps || '[]') }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.sha }}
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ matrix.app.lock != '' && 'npm' || '' }}
+          cache-dependency-path: private/${{ matrix.app.lock }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # Caches Gradle and its dependencies. Unlike setup-java's `cache:
+      # gradle`, it does not fail when android/ does not exist yet.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Output from npm, Capacitor and Gradle names private files, so every
+      # command runs through run_quiet: pass/fail plus a short, path-stripped
+      # tail on failure.
+      - name: Build web app and sync Android project
+        working-directory: private/${{ matrix.app.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"; rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            tail -30 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"; return 1
+          }
+
+          if [ -f package-lock.json ]; then
+            run_quiet "npm ci" npm ci --no-audit --no-fund
+          else
+            run_quiet "npm install" npm install --no-audit --no-fund
+          fi
+          if node -e 'process.exit(require("./package.json").scripts?.build ? 0 : 1)'; then
+            run_quiet "web build" npm run build
+          fi
+          if [ ! -d android ]; then
+            echo "No android/ folder; generating the default Capacitor project."
+            run_quiet "cap add android" npx cap add android
+          fi
+          run_quiet "cap sync android" npx cap sync android
+
+      - name: Set version
+        working-directory: private/${{ matrix.app.dir }}/android
+        shell: bash
+        env:
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          gradle_file=app/build.gradle
+          [ -f "$gradle_file" ] || gradle_file=app/build.gradle.kts
+          sed -E -i \
+            -e "s/versionCode( *=)? *[0-9]+/versionCode\1 ${VERSION_CODE}/" \
+            -e "s/versionName( *=)? *\"[^\"]*\"/versionName\1 \"${VERSION_NAME}\"/" \
+            "$gradle_file"
+          grep -E 'versionCode|versionName' "$gradle_file" | sed 's/^ */  /'
+
+      - name: Compile
+        id: compile
+        working-directory: private/${{ matrix.app.dir }}/android
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"; rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            tail -30 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"; return 1
+          }
+
+          out="$RUNNER_TEMP/release-files"
+          mkdir -p "$out"
+          stem="${APP_NAME}-${VERSION_NAME}-build${VERSION_CODE}-android"
+          chmod +x gradlew
+
+          if [ -z "${KEYSTORE_B64:-}" ] || [ -z "${KS_PASS:-}" ] || [ -z "${KEY_ALIAS:-}" ]; then
+            echo "No Android keystore secrets; building a debug APK."
+            run_quiet "gradle assembleDebug" ./gradlew --no-daemon assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk "$out/${stem}-debug.apk"
+          else
+            ks="$RUNNER_TEMP/release.jks"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$ks"
+            KEY_PASS="${KEY_PASS:-$KS_PASS}"
+            export KS_PASS KEY_PASS
+
+            run_quiet "gradle assembleRelease bundleRelease" ./gradlew --no-daemon assembleRelease bundleRelease
+
+            bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+            "$bt/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+            "$bt/apksigner" sign --ks "$ks" --ks-pass env:KS_PASS \
+              --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASS \
+              --out "$out/${stem}-release.apk" "$RUNNER_TEMP/aligned.apk"
+
+            cp app/build/outputs/bundle/release/app-release.aab "$out/${stem}-release.aab"
+            jarsigner -keystore "$ks" -storepass:env KS_PASS -keypass:env KEY_PASS \
+              "$out/${stem}-release.aab" "$KEY_ALIAS" >/dev/null
+            rm -f "$ks"
+            echo "Signed release APK and AAB."
+          fi
+          ls -l "$out" | sed 's/^/  /'
+
+      - name: Publish to private repo release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MOBILE_RELEASE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          TAG: ${{ matrix.app.tag }}
+          SHA: ${{ needs.poll.outputs.sha }}
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # The Android and iOS jobs race to create the same release: whoever
+          # loses gets "already exists" and simply uploads to it.
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" --target "$SHA" \
+              --title "${APP_NAME} ${VERSION_NAME} (build ${VERSION_CODE})" \
+              --notes "Built from ${SHA} by the apps build workflow." >/dev/null \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP"/release-files/* -R "$REPO" --clobber
+          echo "Uploaded to release $TAG."
+
+  # ------------------------------------------------------------------
+  # Job 3b: iOS (unsigned)
+  # ------------------------------------------------------------------
+  ios:
+    name: "iOS: ${{ matrix.app.name }}"
+    needs: [poll, detect]
+    if: ${{ needs.detect.outputs.apps != '' && needs.detect.outputs.apps != '[]' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.detect.outputs.apps || '[]') }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.sha }}
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ matrix.app.lock != '' && 'npm' || '' }}
+          cache-dependency-path: private/${{ matrix.app.lock }}
+
+      # The runner's default Xcode can lag behind what current Capacitor
+      # requires; pick the newest stable one installed.
+      - name: Select Xcode
+        uses: maxim-lukiyanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build web app and sync iOS project
+        working-directory: private/${{ matrix.app.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"; rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            tail -30 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"; return 1
+          }
+
+          if [ -f package-lock.json ]; then
+            run_quiet "npm ci" npm ci --no-audit --no-fund
+          else
+            run_quiet "npm install" npm install --no-audit --no-fund
+          fi
+          if node -e 'process.exit(require("./package.json").scripts?.build ? 0 : 1)'; then
+            run_quiet "web build" npm run build
+          fi
+          if [ ! -d ios ]; then
+            echo "No ios/ folder; generating the default Capacitor project."
+            run_quiet "cap add ios" npx cap add ios
+          fi
+          run_quiet "cap sync ios" npx cap sync ios
+
+      - name: Compile (unsigned archive)
+        working-directory: private/${{ matrix.app.dir }}/ios/App
+        shell: bash
+        env:
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"; rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            grep -E 'error:|BUILD FAILED' "$log" | tail -20 | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            tail -10 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"; return 1
+          }
+
+          # CocoaPods projects build from the workspace; Swift Package
+          # Manager projects (the Capacitor 8 default) from the project.
+          if [ -d App.xcworkspace ]; then
+            container=(-workspace App.xcworkspace)
+          else
+            container=(-project App.xcodeproj)
+          fi
+
+          archive="$RUNNER_TEMP/App.xcarchive"
+          run_quiet "xcodebuild archive" xcodebuild "${container[@]}" \
+            -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$archive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="$VERSION_NAME" CURRENT_PROJECT_VERSION="$VERSION_CODE"
+
+          # An .ipa is a zip of Payload/<name>.app.
+          app_bundle="$(find "$archive/Products/Applications" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$app_bundle" ]; then
+            echo "::error::The archive contains no .app bundle."
+            exit 1
+          fi
+          stage="$RUNNER_TEMP/ipa"
+          mkdir -p "$stage/Payload" "$RUNNER_TEMP/release-files"
+          cp -R "$app_bundle" "$stage/Payload/"
+          ipa="$RUNNER_TEMP/release-files/${APP_NAME}-${VERSION_NAME}-build${VERSION_CODE}-ios-unsigned.ipa"
+          (cd "$stage" && zip -qry "$ipa" Payload)
+          ls -l "$RUNNER_TEMP/release-files" | sed 's/^/  /'
+
+      - name: Publish to private repo release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MOBILE_RELEASE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          TAG: ${{ matrix.app.tag }}
+          SHA: ${{ needs.poll.outputs.sha }}
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" --target "$SHA" \
+              --title "${APP_NAME} ${VERSION_NAME} (build ${VERSION_CODE})" \
+              --notes "Built from ${SHA} by the apps build workflow." >/dev/null \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP"/release-files/* -R "$REPO" --clobber
+          echo "Uploaded to release $TAG."
+
+  # ------------------------------------------------------------------
+  # Job 3c: desktop (Windows, macOS, Linux) via Electron
+  # ------------------------------------------------------------------
+  desktop:
+    name: "Desktop ${{ matrix.os }}: ${{ matrix.app.name }}"
+    needs: [poll, detect]
+    if: ${{ needs.detect.outputs.apps != '' && needs.detect.outputs.apps != '[]' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.detect.outputs.apps || '[]') }}
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    env:
+      # Unsigned builds: never go looking for a signing certificate.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      ELECTRON_BUILDER_TELEMETRY: 'false'
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ needs.poll.outputs.sha }}
+          persist-credentials: false
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ matrix.app.lock != '' && 'npm' || '' }}
+          cache-dependency-path: private/${{ matrix.app.lock }}
+
+      # Git Bash on Windows, so one script serves all three runners. Paths
+      # stay relative to the app folder, which avoids Windows path mangling.
+      - name: Build web app and desktop packages
+        working-directory: private/${{ matrix.app.dir }}
+        shell: bash
+        env:
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "$label: OK"; rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            tail -30 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"; return 1
+          }
+
+          if [ -f package-lock.json ]; then
+            run_quiet "npm ci" npm ci --no-audit --no-fund
+          else
+            run_quiet "npm install" npm install --no-audit --no-fund
+          fi
+          if node -e 'process.exit(require("./package.json").scripts?.build ? 0 : 1)'; then
+            run_quiet "web build" npm run build
+          fi
+
+          # Electron is a CI-only tool here unless the app pins its own
+          # versions in devDependencies.
+          if [ ! -d node_modules/electron ] || [ ! -d node_modules/electron-builder ]; then
+            run_quiet "install electron" npm install --no-save --no-audit --no-fund electron electron-builder
+          fi
+
+          # Same idea as `cap add`: an app without its own desktop shell gets
+          # the default one, which opens the web build in a window.
+          if [ ! -f electron/main.cjs ]; then
+            echo "No electron/main.cjs; using the default desktop shell."
+            mkdir -p electron
+            cat > electron/main.cjs <<'JS'
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+          const webDir = process.env.WEB_DIR_PLACEHOLDER;
+          function createWindow() {
+            const win = new BrowserWindow({ width: 1100, height: 760, webPreferences: { contextIsolation: true } });
+            win.loadFile(path.join(__dirname, '..', webDir, 'index.html'));
+          }
+          app.whenReady().then(createWindow);
+          app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+          app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+          JS
+          fi
+
+          # electron-builder config, written here so package.json stays
+          # untouched. App id, name and web folder come from the Capacitor
+          # config, so one file describes the app for every platform.
+          node - <<'JS'
+          const fs = require('fs');
+          const pkg = require('./package.json');
+          let cap = {};
+          for (const f of ['capacitor.config.json', 'capacitor.config.ts', 'capacitor.config.js']) {
+            if (!fs.existsSync(f)) continue;
+            const raw = fs.readFileSync(f, 'utf8');
+            if (f.endsWith('.json')) { cap = JSON.parse(raw); break; }
+            for (const k of ['appId', 'appName', 'webDir']) {
+              const m = raw.match(new RegExp(k + "\\s*:\\s*['\"]([^'\"]+)['\"]"));
+              if (m) cap[k] = m[1];
+            }
+            break;
+          }
+          const webDir = (cap.webDir || 'dist').replace(/^\.\//, '').replace(/\/$/, '');
+          if (!fs.existsSync(webDir + '/index.html')) {
+            console.error(`::error::${webDir}/index.html not found; does "npm run build" write to the Capacitor webDir?`);
+            process.exit(1);
+          }
+          // Fill in the default shell's web folder, if that is what is in use.
+          const main = 'electron/main.cjs';
+          fs.writeFileSync(main, fs.readFileSync(main, 'utf8')
+            .replace('process.env.WEB_DIR_PLACEHOLDER', JSON.stringify(webDir)));
+
+          const { APP_NAME, VERSION_NAME, VERSION_CODE } = process.env;
+          const stem = `${APP_NAME}-${VERSION_NAME}-build${VERSION_CODE}-desktop`;
+          const config = {
+            appId: cap.appId || `com.example.${APP_NAME.replace(/[^A-Za-z0-9]/g, '')}`,
+            productName: cap.appName || APP_NAME,
+            buildVersion: VERSION_CODE,
+            electronVersion: require('./node_modules/electron/package.json').version,
+            directories: { output: 'release-desktop' },
+            files: [`${webDir}/**`, 'electron/**', 'package.json',
+              // Native mobile sources: useless on desktop, only add weight.
+              '!node_modules/@capacitor/android/**', '!node_modules/@capacitor/ios/**'],
+            extraMetadata: {
+              main: main,
+              version: VERSION_NAME,
+              description: pkg.description || cap.appName || APP_NAME,
+            },
+            win: {
+              target: ['nsis', 'portable'],
+            },
+            nsis: { artifactName: `${stem}-windows-\${arch}-setup.\${ext}` },
+            portable: { artifactName: `${stem}-windows-\${arch}-portable.\${ext}` },
+            mac: {
+              target: [{ target: 'dmg', arch: ['arm64', 'x64'] }],
+              // Ad-hoc signature: no Apple account needed, and Apple Silicon
+              // refuses to run binaries with none at all.
+              identity: '-',
+              artifactName: `${stem}-macos-\${arch}.\${ext}`,
+            },
+            linux: {
+              target: ['AppImage', 'deb'],
+              category: 'Utility',
+              maintainer: `${APP_NAME} <noreply@users.noreply.github.com>`,
+              artifactName: `${stem}-linux-\${arch}.\${ext}`,
+            },
+          };
+          fs.writeFileSync('electron-builder.ci.json', JSON.stringify(config, null, 2));
+          console.log(`Desktop app: ${config.productName} (${config.appId}), web folder ${webDir}`);
+          JS
+
+          run_quiet "electron-builder" npx electron-builder --config electron-builder.ci.json --publish never
+
+          mkdir -p release-files
+          find release-desktop -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} release-files/ \;
+          if [ -z "$(ls -A release-files)" ]; then
+            echo "::error::electron-builder produced no installers."
+            exit 1
+          fi
+          ls -l release-files | sed 's/^/  /'
+
+      - name: Publish to private repo release
+        working-directory: private/${{ matrix.app.dir }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MOBILE_RELEASE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          TAG: ${{ matrix.app.tag }}
+          SHA: ${{ needs.poll.outputs.sha }}
+          APP_NAME: ${{ matrix.app.name }}
+          VERSION_NAME: ${{ matrix.app.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" --target "$SHA" \
+              --title "${APP_NAME} ${VERSION_NAME} (build ${VERSION_CODE})" \
+              --notes "Built from ${SHA} by the apps build workflow." >/dev/null \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          gh release upload "$TAG" release-files/* -R "$REPO" --clobber
+          echo "Uploaded to release $TAG."
+
+  # ------------------------------------------------------------------
+  # Job 4: remember the commit that was actually built
+  # ------------------------------------------------------------------
+  record:
+    name: "Record built commit"
+    needs: [poll, detect, android, ios, desktop]
+    if: >-
+      !cancelled() &&
+      needs.poll.result == 'success' &&
+      needs.poll.outputs.changed == 'true' &&
+      (needs.detect.result == 'success' || needs.detect.result == 'skipped') &&
+      (needs.android.result == 'success' || needs.android.result == 'skipped') &&
+      (needs.ios.result == 'success' || needs.ios.result == 'skipped') &&
+      (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write built commit
+        env:
+          BUILT_SHA: ${{ needs.poll.outputs.sha }}
+          DETECT_COUNT: ${{ needs.detect.outputs.count }}
+          DETECT_APPS: ${{ needs.detect.outputs.apps }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_APPS:-}" ]; then
+            echo "::error::GitHub discarded the 'apps' job output because it matched a repository secret, so no build ran."
+            echo "Detect found ${DETECT_COUNT} app(s). Rename the app folder whose name matches a secret value."
+            exit 1
+          fi
+          printf '%s' "$BUILT_SHA" > /tmp/apps-build-state.txt
+          echo "Recorded $BUILT_SHA as the last built commit."
+
+      - name: Save state for next poll
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/apps-build-state.txt
+          key: apps-build-state-${{ secrets.PRIVATE_REPO || github.repository }}-${{ github.run_id }}
