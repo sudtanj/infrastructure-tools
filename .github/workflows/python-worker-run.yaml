@@ -665,16 +665,72 @@ jobs:
             echo "Egress IP before Tailscale: unavailable."
           fi
 
-          # Prefer the OAuth client secret: it never expires. `tailscale up`
-          # takes it as an auth key when the node advertises tags; the query
-          # string makes each run an ephemeral, pre-authorized node, so it
-          # disappears from the tailnet on logout like the old keys did.
+          # Prefer the OAuth client secret: it never expires. It is exchanged
+          # here, through the Tailscale API, for a single-use, ephemeral,
+          # pre-authorized, tagged auth key that lives 10 minutes -- so the
+          # node disappears from the tailnet on logout like the old keys did.
+          # Doing the exchange explicitly (instead of handing the secret to
+          # `tailscale up`) means a failure names the step that broke. Only
+          # key TYPES and HTTP statuses are ever printed, never values.
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
             if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
               echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
               exit 1
             fi
-            authkey="${TAILSCALE_OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorized=true"
+            # A pasted secret often carries a trailing newline or space.
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            case "$secret" in
+              tskey-client-*) ;;
+              tskey-api-*)
+                echo "::error::TAILSCALE_OAUTH_CLIENT_SECRET holds an API access token (tskey-api-...), not an OAuth client secret. Create one under Settings -> OAuth clients."
+                exit 1 ;;
+              tskey-auth-*)
+                echo "::error::TAILSCALE_OAUTH_CLIENT_SECRET holds an auth key (tskey-auth-...), which expires. Use the secret of an OAuth client (tskey-client-...)."
+                exit 1 ;;
+              *)
+                echo "::error::TAILSCALE_OAUTH_CLIENT_SECRET does not start with 'tskey-client-'. Paste the client SECRET, not the client ID."
+                exit 1 ;;
+            esac
+
+            umask 077
+            # The client_id is not checked by Tailscale; the secret identifies
+            # the client. The secret goes in on stdin, not on a command line.
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none}). Check it is the full, current secret of a client that has not been deleted."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            echo "OAuth client secret accepted."
+
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              # Tailscale's own message is the useful part (e.g. a tag the
+              # client may not use); tag names are stripped before printing.
+              msg="$(jq -r '.message // empty' /tmp/ts-key.json 2>/dev/null \
+                | sed -E 's/tag:[A-Za-z0-9_-]+/tag:<redacted>/g' | head -c 300 || true)"
+              rm -f /tmp/ts-key.json
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}${msg:+: ${msg}}). The client needs the Auth Keys WRITE scope, and must have been created with the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            rm -f /tmp/ts-key.json
+            echo "::add-mask::${authkey}"
+            echo "Ephemeral auth key created."
             tag_args=(--advertise-tags="$TAILSCALE_TAGS")
           else
             authkey="$TAILSCALE_AUTH_KEY"
