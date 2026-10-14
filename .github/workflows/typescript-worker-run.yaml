@@ -150,11 +150,21 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   secret PRIVATE_REPO_TOKEN     read access to the private repo (required)
 #   secret PRIVATE_REPO           "owner/name" of the private repo (required)
 #   secret BUILD_REF              branch to run from (defaults to main)
-#   secret TAILSCALE_AUTH_KEY     required. Use a REUSABLE + ephemeral +
-#                                 pre-authorized + tagged key. A single-use
-#                                 reusable key is the second best option; a
-#                                 pre-authorized key is the most secure, and a
-#                                 plain user key needs manual login approval.
+#   secret TAILSCALE_OAUTH_CLIENT_SECRET
+#                                 RECOMMENDED. A Tailscale OAuth client secret
+#                                 (tskey-client-...) with the "auth_keys"
+#                                 write scope and a tag. Unlike an auth key it
+#                                 NEVER EXPIRES, so there is nothing to renew
+#                                 every 90 days. `tailscale up` accepts it in
+#                                 place of an auth key and mints an ephemeral,
+#                                 pre-authorized node for each run.
+#   secret TAILSCALE_TAGS         required with the OAuth secret, e.g. "tag:ci"
+#                                 (comma-separated for several). Must be tags
+#                                 the OAuth client was created with.
+#   secret TAILSCALE_AUTH_KEY     FALLBACK, used only when the OAuth secret is
+#                                 not set. Auth keys expire after at most 90
+#                                 days. Use a REUSABLE + ephemeral +
+#                                 pre-authorized + tagged key.
 #   secret TAILSCALE_EXIT_NODE    required. See EXIT NODE TARGET above.
 #   secret TAILSCALE_ACCEPT_DNS   OPTIONAL, default "false". Set it to "true"
 #                                 ONLY when the exit node runs a DNS resolver
@@ -195,7 +205,8 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   * The scripts receive the repository's other secrets as environment
 #     variables, because they are the ones that need to call real services --
 #     but they do NOT get PRIVATE_REPO_TOKEN (the clone credential) or
-#     TAILSCALE_AUTH_KEY (the VPN credential). GITHUB_TOKEN is not exposed
+#     TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET (the VPN
+#     credentials). GITHUB_TOKEN is not exposed
 #     either. Values are JSON-quoted and sourced, not eval'd.
 #   * A successful script's output is NOT printed: it goes to a log file and
 #     only a one-line pass is shown, because this run's log is public. On
@@ -572,6 +583,8 @@ jobs:
     timeout-minutes: 60
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
       TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
       TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
       HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
@@ -640,9 +653,19 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for v in TAILSCALE_AUTH_KEY TAILSCALE_EXIT_NODE HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
+          for v in TAILSCALE_EXIT_NODE HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
+          # One VPN credential is enough: the non-expiring OAuth client secret
+          # (which needs tags) wins, the 90-day auth key is the fallback.
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+            echo "Tailscale credential: OAuth client (does not expire)"
+          elif [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+            echo "Tailscale credential: auth key (expires; consider the OAuth client)"
+          else
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing secret(s): ${missing[*]}"
             exit 1
@@ -660,7 +683,8 @@ jobs:
           set -euo pipefail
           # GitHub masks repository secrets on its own; this is belt and
           # braces for the value after it is written into an env file.
-          echo "::add-mask::${TAILSCALE_AUTH_KEY}"
+          if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then echo "::add-mask::${TAILSCALE_AUTH_KEY}"; fi
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then echo "::add-mask::${TAILSCALE_OAUTH_CLIENT_SECRET}"; fi
           echo "::add-mask::${HONEYGAIN_EMAIL}"
           echo "::add-mask::${HONEYGAIN_PASSWORD}"
 
@@ -751,8 +775,25 @@ jobs:
             echo "Egress IP before Tailscale: unavailable."
           fi
 
+          # Prefer the OAuth client secret: it never expires. `tailscale up`
+          # takes it as an auth key when the node advertises tags; the query
+          # string makes each run an ephemeral, pre-authorized node, so it
+          # disappears from the tailnet on logout like the old keys did.
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            authkey="${TAILSCALE_OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorized=true"
+            tag_args=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+            tag_args=()
+          fi
+
           sudo tailscale up \
-            --authkey="$TAILSCALE_AUTH_KEY" \
+            --authkey="$authkey" \
+            "${tag_args[@]}" \
             --exit-node="$TARGET" \
             --accept-dns="$TAILSCALE_ACCEPT_DNS" \
             --hostname="github-actions-${GITHUB_RUN_ID}"
@@ -1149,10 +1190,10 @@ jobs:
           echo "Executing ${#scripts[@]} script(s) with: ${RUNNER}"
 
           # @sh quoting means a secret containing spaces, quotes or newlines
-          # survives being sourced. Two credentials are removed on purpose:
-          # the clone token and the VPN key have no business being visible to
+          # survives being sourced. Credentials are removed on purpose: the
+          # clone token and the VPN keys have no business being visible to
           # the scripts.
-          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY)
+          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY, .TAILSCALE_OAUTH_CLIENT_SECRET)
                  | to_entries[]
                  | "export \(.key)=\(.value | @sh)"' <<< "$ALL_SECRETS" > /tmp/ts-env.sh
           chmod 600 /tmp/ts-env.sh
