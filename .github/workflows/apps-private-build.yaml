@@ -788,6 +788,9 @@ jobs:
               category: 'Utility',
               artifactName: `${stem}-linux-\${arch}.\${ext}`,
             },
+            // App-specific electron-builder settings (e.g. asarUnpack for a
+            // bundled binary) from the standard "build" key in package.json.
+            ...(pkg.build || {}),
           };
           fs.writeFileSync('electron-builder.ci.json', JSON.stringify(config, null, 2));
           console.log(`Desktop app: ${config.productName} (${config.appId}), web folder ${webDir}`);
