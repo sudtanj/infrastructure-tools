@@ -37,7 +37,7 @@ name: "Build cross-platform apps: Android, iOS, Windows, macOS, Linux (private r
 #              "More info" -> "Run anyway").
 #   macOS    - .dmg for arm64 and x64, ad-hoc signed only (first launch:
 #              right-click -> Open, or `xattr -cr /Applications/<App>.app`).
-#   Linux    - .AppImage and .deb.
+#   Linux    - .AppImage.
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo, and so are its run logs. Install and
@@ -530,7 +530,7 @@ jobs:
       # The runner's default Xcode can lag behind what current Capacitor
       # requires; pick the newest stable one installed.
       - name: Select Xcode
-        uses: maxim-lukiyanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
@@ -784,9 +784,8 @@ jobs:
               artifactName: `${stem}-macos-\${arch}.\${ext}`,
             },
             linux: {
-              target: ['AppImage', 'deb'],
+              target: ['AppImage'],
               category: 'Utility',
-              maintainer: `${APP_NAME} <noreply@users.noreply.github.com>`,
               artifactName: `${stem}-linux-\${arch}.\${ext}`,
             },
           };
@@ -798,7 +797,7 @@ jobs:
 
           mkdir -p release-files
           find release-desktop -maxdepth 1 -type f \
-            \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \) \
             -exec cp {} release-files/ \;
           if [ -z "$(ls -A release-files)" ]; then
             echo "::error::electron-builder produced no installers."
