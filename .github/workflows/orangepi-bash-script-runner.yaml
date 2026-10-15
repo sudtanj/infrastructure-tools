@@ -12,10 +12,9 @@ name: "Run Bash Scripts on Orange Pi"
 #   OPI_SSH_USER        SSH login user
 #   OPI_SSH_PASSWORD    SSH password, also used for sudo when the user is not root
 #   OPI_SSH_PORT        optional, default 22
-#   Tailscale for the runner, one of:
-#     TS_OAUTH_CLIENT_ID + TS_OAUTH_SECRET  OAuth client with the auth_keys scope (recommended);
-#                                           nodes get TS_TAGS, default tag:ci
-#     TS_RUNNER_AUTH_KEY                    an ephemeral, pre-approved auth key
+#   Tailscale for the runner (same secrets as the other workflows here), one of:
+#     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
+#     TAILSCALE_AUTH_KEY                              fallback auth key
 #   Script secrets (same names as the GCP runner): HONEYGAIN_, DOZZLE_
 on:
   workflow_dispatch:
@@ -45,8 +44,10 @@ env:
   OPI_SSH_USER: ${{ secrets.OPI_SSH_USER }}
   OPI_SSH_PASSWORD: ${{ secrets.OPI_SSH_PASSWORD }}
   OPI_SSH_PORT: ${{ secrets.OPI_SSH_PORT }}
-  # `secrets` is not allowed in a step's `if:`, so the Tailscale auth mode is derived here
-  TS_USE_OAUTH: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+  # Same Tailscale secrets as the other workflows in this repo
+  TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+  TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
 jobs:
   discover:
@@ -122,23 +123,26 @@ jobs:
           echo "debug    : ${DEBUG_LOGS:-true}"
 
       - name: Verify required config
-        env:
-          HAS_TS_OAUTH: ${{ env.TS_USE_OAUTH }}
-          HAS_TS_KEY: ${{ secrets.TS_RUNNER_AUTH_KEY != '' }}
         run: |
           set -euo pipefail
           missing=()
           for v in OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD; do
             [ -z "${!v:-}" ] && missing+=("$v") || true
           done
-          if [ "$HAS_TS_OAUTH" != "true" ] && [ "$HAS_TS_KEY" != "true" ]; then
-            missing+=("TS_OAUTH_CLIENT_ID+TS_OAUTH_SECRET or TS_RUNNER_AUTH_KEY")
+          # The non-expiring OAuth client secret (which needs tags) wins; the auth key is the fallback
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            [ -n "${TAILSCALE_TAGS:-}" ] || missing+=("TAILSCALE_TAGS")
+            echo "[*] tailscale credential: OAuth client"
+          elif [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+            echo "[*] tailscale credential: auth key"
+          else
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing secrets: ${missing[*]}"
             exit 1
           fi
-          echo "[+] required secrets are set (tailscale auth: $([ "$HAS_TS_OAUTH" = "true" ] && echo oauth || echo auth key))"
+          echo "[+] required secrets are set"
 
       - name: Mask sensitive values
         run: |
@@ -173,19 +177,21 @@ jobs:
           PERL
           perl -c "${RUNNER_TEMP}/sanitize.pl"
 
-      - name: Join tailnet (OAuth)
-        if: env.TS_USE_OAUTH == 'true'
-        uses: tailscale/github-action@v3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: ${{ secrets.TS_TAGS || 'tag:ci' }}
-
-      - name: Join tailnet (auth key)
-        if: env.TS_USE_OAUTH != 'true'
-        uses: tailscale/github-action@v3
-        with:
-          authkey: ${{ secrets.TS_RUNNER_AUTH_KEY }}
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          HOST="gh-opi-runner-${GITHUB_RUN_ID}"
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            # Ephemeral: the node removes itself from the tailnet once the runner goes away
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            sudo tailscale up --authkey="${secret}?ephemeral=true&preauthorized=true" \
+              --advertise-tags="$TAILSCALE_TAGS" --hostname="$HOST" >/dev/null 2>&1
+          else
+            sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
+              --hostname="$HOST" >/dev/null 2>&1
+          fi
+          echo "[+] joined the tailnet"
 
       - name: Configure SSH
         run: |
@@ -238,7 +244,7 @@ jobs:
           SCRIPT_PATH: ${{ matrix.script }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
-          # Only these prefixes reach the device. Never add OPI_ or TS_ here.
+          # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
           SECRET_FILTER: "HONEYGAIN_,DOZZLE_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
@@ -349,3 +355,7 @@ jobs:
           echo "---- end ----"
           summary "FAILED"
           exit "$RC"
+
+      - name: Leave the tailnet
+        if: always()
+        run: sudo tailscale logout >/dev/null 2>&1 || true

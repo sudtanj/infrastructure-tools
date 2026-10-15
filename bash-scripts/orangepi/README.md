@@ -30,10 +30,9 @@ the public log.
 | `OPI_SSH_USER` | SSH user |
 | `OPI_SSH_PASSWORD` | SSH password (also used for sudo) |
 | `OPI_SSH_PORT` | Optional, default 22 |
-| `TS_OAUTH_CLIENT_ID` + `TS_OAUTH_SECRET` | Tailscale OAuth client (`auth_keys` scope); runner nodes get `tag:ci` (override with `TS_TAGS`) |
-| `TS_RUNNER_AUTH_KEY` | Alternative to OAuth: an ephemeral, pre-approved auth key |
+| `TAILSCALE_OAUTH_CLIENT_SECRET` + `TAILSCALE_TAGS` | Same OAuth client as the other workflows; the runner joins as an ephemeral node with those tags |
+| `TAILSCALE_AUTH_KEY` | Fallback when there is no OAuth client |
 | `HONEYGAIN_EMAIL`, `HONEYGAIN_PASSWORD` | Honeygain account |
 | `HONEYGAIN_DEVICE` | Optional dashboard device name |
 
-The tailnet ACL must let the runner's tag reach the device on port 22, and `tag:ci` must be listed
-in `tagOwners` when using OAuth.
+The tailnet ACL must let the runner's tags (`TAILSCALE_TAGS`) reach the device on port 22.
