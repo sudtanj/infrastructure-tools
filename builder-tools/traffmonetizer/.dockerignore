@@ -1,0 +1,4 @@
+# The build copies everything from the upstream images, so nothing from
+# this folder needs to reach the build context.
+*
+!Dockerfile

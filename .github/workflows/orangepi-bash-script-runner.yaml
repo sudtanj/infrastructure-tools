@@ -15,7 +15,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, DOZZLE_
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, DOZZLE_
 on:
   workflow_dispatch:
     inputs:
@@ -27,6 +27,7 @@ on:
         options:
           - all
           - init-honeygain
+          - init-traffmonetizer
           - init-dozzle
           - reset-containers
           # add new script names here as you create them
@@ -154,7 +155,8 @@ jobs:
           use strict;
           use warnings;
           my @lit = grep { defined($_) && length($_) >= 3 }
-            map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE);
+            map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE
+                     TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
             for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
@@ -164,6 +166,7 @@ jobs:
             $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
             $l =~ s/\b[\w-]+(?:\.[\w-]+)*\.ts\.net\b/<tailnet-host>/g;
             $l =~ s/tskey-[\w-]+/tskey-<redacted>/g;
+            $l =~ s/\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b/<id>/g;   # UUID device IDs
             $l =~ s/\b[0-9A-Fa-f]{24,}\b/<id>/g;   # device IDs, hashes
             $l =~ s/\b(?:gh[pousr]_|github_pat_)\w+/<github-token>/g;
             $l =~ s/\bsk-[\w-]{8,}/<api-key>/g;
@@ -247,10 +250,12 @@ jobs:
           ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
-          SECRET_FILTER: "HONEYGAIN_,DOZZLE_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,DOZZLE_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
           HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
+          TRAFFMONETIZER_TOKEN: ${{ secrets.TRAFFMONETIZER_TOKEN }}
+          TRAFFMONETIZER_DEVICE: ${{ secrets.TRAFFMONETIZER_DEVICE }}
         run: |
           set +e
           SECONDS=0

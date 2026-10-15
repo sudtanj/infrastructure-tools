@@ -84,6 +84,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`oci-freetier-creator/`](oci-freetier-creator/) | [`sudtanj/oci-freetier-creator`](https://hub.docker.com/r/sudtanj/oci-freetier-creator) | Runs [oracle-freetier-instance-creation](https://github.com/mohankumarpaluru/oracle-freetier-instance-creation) unattended, config via env vars - see its own [README](oci-freetier-creator/README.md) |
 | [`mini-router/`](mini-router/) | [`sudtanj/mini-router`](https://hub.docker.com/r/sudtanj/mini-router) | [mini-router](https://github.com/sudtanj/mini-router): one OpenAI- and Anthropic-compatible endpoint over every LLM provider you use, with pools, spillover and protocol translation - see its own [README](mini-router/README.md) |
 | [`honeygain/`](honeygain/) | [`sudtanj/honeygain`](https://hub.docker.com/r/sudtanj/honeygain) | Official Honeygain client repackaged on distroless (amd64 + arm64); credentials from `.env`, `-tou-accept` always on - see its own [README](honeygain/README.md) |
+| [`traffmonetizer/`](traffmonetizer/) | [`sudtanj/traffmonetizer`](https://hub.docker.com/r/sudtanj/traffmonetizer) | Official Traffmonetizer client on distroless static, non-root, real multi-arch (amd64 + arm64); token from `.env` - see its own [README](traffmonetizer/README.md) |
 
 ## Non-Docker projects
 

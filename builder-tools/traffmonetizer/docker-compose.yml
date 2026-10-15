@@ -1,0 +1,62 @@
+# Traffmonetizer on distroless, built from this folder.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d --build
+
+services:
+  traffmonetizer:
+    build: .
+    image: sudtanj/traffmonetizer:local
+    restart: unless-stopped
+    hostname: ${TM_DEVICE:-traffmonetizer}
+
+    # AdGuard Family Protection only: blocks known malware, phishing and adult
+    # domains. init-traffmonetizer.sh also firewalls every other resolver;
+    # compose cannot, so this alone does not stop a client that ignores
+    # resolv.conf.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
+    # Compose fills these in from .env before the container starts, so the
+    # distroless image needs no shell.
+    command:
+      - start
+      - accept
+      - --token
+      - ${TM_TOKEN:?set TM_TOKEN in .env}
+      - --device-name
+      - ${TM_DEVICE:-traffmonetizer}
+
+    volumes:
+      # Device ID file, so a recreate is the same device, not a new one.
+      - traffmonetizer-data:/home/nonroot
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure. pids is higher than the memory
+    # suggests because the client resolves hosts on tokio's blocking thread
+    # pool, which grows with concurrent lookups.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 128
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+volumes:
+  traffmonetizer-data:
