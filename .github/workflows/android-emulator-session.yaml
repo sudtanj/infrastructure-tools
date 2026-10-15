@@ -1,0 +1,248 @@
+name: "Android emulator session over Tailscale"
+
+# ---------------------------------------------------------------------------
+# Starts an Android emulator on demand and keeps it reachable on the tailnet
+# as `android-emulator`, so a person and an agent can share the same logged-in
+# device:
+#   adb      android-emulator:5555   (adb, scrcpy, Maestro)
+#   VNC      android-emulator:5900   (watch or click the emulator window)
+#
+# The whole AVD (app data, logins) is encrypted and stored as release assets
+# on the PRIVATE repo, under the release tag `android-emulator-state`, and
+# restored on the next run. Nothing is kept in this public repo's cache or
+# artifacts.
+#
+# The Tailscale node identity (`tailscaled.state.enc`, same release) is kept
+# too, so every run is the same non-ephemeral machine with the same 100.x IP
+# and MagicDNS name. Deleting the machine in the Tailscale admin console makes
+# the next run join as a new machine with a new IP.
+#
+# STOP IT WITH THE STOP FILE, NOT THE CANCEL BUTTON
+#   adb -s android-emulator:5555 shell touch /data/local/tmp/stop-session
+# A cancelled run (or one killed by the job timeout) uploads nothing; the next
+# run resumes from the previous save. Hitting `max_minutes` does save.
+#
+# SECRETS
+#   PRIVATE_REPO                   owner/name of the private repo
+#   PRIVATE_REPO_TOKEN             needs Contents: read AND write on it
+#                                  (releases), not just read
+#   TAILSCALE_OAUTH_CLIENT_SECRET  OAuth client (tskey-client-...)
+#   TAILSCALE_TAGS                 e.g. "tag:ci"
+#   ADB_KEY, ADB_KEY_PUB           shared adb key pair from `adb keygen`; the
+#                                  emulator trusts the host key, so remote
+#                                  clients using it skip the auth prompt
+#   STATE_KEY                      passphrase that encrypts the saved AVD
+#   VNC_PASSWORD                   VNC password (only the first 8 chars count)
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_minutes:
+        description: 'Stop and save after this many minutes if nobody stops it (max 320)'
+        type: number
+        default: 120
+      fresh:
+        description: 'Ignore the saved state; the next save replaces it'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One emulator at a time: two runs would race to save over each other's state.
+concurrency:
+  group: android-emulator-session
+  cancel-in-progress: false
+
+env:
+  STATE_TAG: android-emulator-state
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+          ADB_KEY: ${{ secrets.ADB_KEY }}
+          ADB_KEY_PUB: ${{ secrets.ADB_KEY_PUB }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in PRIVATE_REPO GH_TOKEN TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS ADB_KEY ADB_KEY_PUB STATE_KEY VNC_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error title=Missing secrets::Not set: ${missing[*]}"
+            exit 1
+          fi
+          # gh error text can include the repo path; keep it out of the public log.
+          echo "::add-mask::${PRIVATE_REPO}"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install shared adb key
+        env:
+          ADB_KEY: ${{ secrets.ADB_KEY }}
+          ADB_KEY_PUB: ${{ secrets.ADB_KEY_PUB }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          printf '%s\n' "$ADB_KEY" > ~/.android/adbkey
+          printf '%s\n' "$ADB_KEY_PUB" > ~/.android/adbkey.pub
+          chmod 600 ~/.android/adbkey
+
+      - name: Prepare state release
+        run: |
+          set -euo pipefail
+          if ! gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1; then
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Android emulator state" \
+              --notes "Encrypted AVD saved by infrastructure-tools android-emulator-session." >/dev/null
+          fi
+          # Not `|| true`: a failed listing must stop the run, or a clean
+          # emulator (or a new Tailscale node) would later be saved over the
+          # good state.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' > /tmp/state-assets.txt
+
+      # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`. The
+      # manifest is uploaded last, so only sets with one are complete.
+      - name: Restore saved state
+        if: ${{ !inputs.fresh }}
+        run: |
+          set -euo pipefail
+          names="$(cat /tmp/state-assets.txt)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "No saved state; starting clean."
+            exit 0
+          fi
+          mkdir -p /tmp/state ~/.android/avd
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C ~/.android/avd
+          rm -rf /tmp/state
+          echo "Saved state restored."
+
+      - name: Start virtual display and VNC
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11vnc >/dev/null
+          setsid nohup Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+          sleep 2
+          mkdir -p ~/.vnc
+          x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
+          # localhost only; Tailscale serve is the sole way in.
+          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Join the tailnet
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
+
+          # Same machine identity as last run means the same tailnet IP.
+          if grep -qx 'tailscaled.state.enc' /tmp/state-assets.txt; then
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p tailscaled.state.enc -D /tmp
+            sudo systemctl stop tailscaled
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/tailscaled.state.enc \
+              | sudo tee /var/lib/tailscale/tailscaled.state >/dev/null
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            sudo systemctl start tailscaled
+            rm /tmp/tailscaled.state.enc
+            echo "Tailscale identity restored."
+          else
+            echo "No saved Tailscale identity; joining as a new machine."
+          fi
+
+          # The auth key is only used when the restored identity is missing or
+          # was deleted. Not ephemeral, so the machine and its IP outlive the run.
+          secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+          sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
+            --advertise-tags="$TAILSCALE_TAGS" --hostname=android-emulator
+
+          # Saved straight away, so a cancelled run still keeps the identity.
+          sudo cat /var/lib/tailscale/tailscaled.state \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -out /tmp/tailscaled.state.enc
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/tailscaled.state.enc --clobber
+          rm /tmp/tailscaled.state.enc
+          # Tailnet only: neither port is published on the runner's public interface.
+          sudo tailscale serve --bg --tcp 5555 tcp://localhost:5555 >/dev/null
+          sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
+          echo "Joined the tailnet as android-emulator."
+
+      # `script` runs line by line, so the session logic lives in its own file.
+      - uses: reactivecircus/android-emulator-runner@v2
+        env:
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+        with:
+          # Android 17, newest stable Play Store x86_64 image (4 KB pages).
+          # Pinned, not "latest": a new image breaks the saved AVD, so bump it
+          # by hand and run once with `fresh`. Quoted, or YAML turns it into 37.
+          api-level: '37.0'
+          target: google_apis_playstore
+          arch: x86_64
+          avd-name: session
+          # Reuse the restored AVD instead of recreating it over the saved data.
+          force-avd-creation: false
+          disable-animations: false
+          # No -no-window: the window is drawn on Xvfb for VNC.
+          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash .github/scripts/android-emulator-session.sh
+
+      - name: Save state
+        run: |
+          set -euo pipefail
+          id="${{ github.run_id }}"
+          mkdir -p /tmp/save
+          cd /tmp/save
+          # Release assets cap at 2 GiB each.
+          tar -C ~/.android/avd -cS --zstd --exclude='*.lock' . \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | split -b 1900M -d -a 3 - "state-${id}.part-"
+          sha256sum state-"${id}".part-* > "state-${id}.sha256"
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1 || \
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Android emulator state" \
+              --notes "Encrypted AVD saved by infrastructure-tools android-emulator-session." >/dev/null
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          # Old sets go only after the new manifest is up, so a failed upload
+          # never loses the last good save. tailscaled.state.enc is kept.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
+            | { grep '^state-' || true; } \
+            | { grep -v "^state-${id}\." || true; } \
+            | while read -r name; do
+                gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
+              done
+          echo "State saved."
+
+      # `down`, not `logout`: logout would expire the saved identity and the
+      # next run would come back as a new machine with a new IP.
+      - name: Disconnect from the tailnet
+        if: always()
+        run: sudo tailscale down >/dev/null 2>&1 || true
