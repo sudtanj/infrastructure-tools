@@ -1,0 +1,47 @@
+# Repocket on distroless, built from this folder.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d --build
+
+services:
+  repocket:
+    build: .
+    image: sudtanj/repocket:local
+    restart: unless-stopped
+    hostname: ${RP_DEVICE:-repocket}
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. The client uses the system resolver, so this covers it;
+    # init-repocket.sh also blocks DNS to any other server.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
+    # The only setting the client reads.
+    environment:
+      RP_API_KEY: ${RP_API_KEY:?set RP_API_KEY in .env}
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 64
+
+    # Nothing is written to disk; /tmp is only a safety net.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

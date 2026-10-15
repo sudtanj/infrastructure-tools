@@ -86,6 +86,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`honeygain/`](honeygain/) | [`sudtanj/honeygain`](https://hub.docker.com/r/sudtanj/honeygain) | Official Honeygain client repackaged on distroless (amd64 + arm64); credentials from `.env`, `-tou-accept` always on - see its own [README](honeygain/README.md) |
 | [`traffmonetizer/`](traffmonetizer/) | [`sudtanj/traffmonetizer`](https://hub.docker.com/r/sudtanj/traffmonetizer) | Official Traffmonetizer client on distroless static, non-root, real multi-arch (amd64 + arm64); token from `.env` - see its own [README](traffmonetizer/README.md) |
 | [`earnfm/`](earnfm/) | [`sudtanj/earnfm`](https://hub.docker.com/r/sudtanj/earnfm) | Official EarnFM client on distroless static, non-root, Go runtime capped to the container (amd64 + arm64); token from `.env` - see its own [README](earnfm/README.md) |
+| [`repocket/`](repocket/) | [`sudtanj/repocket`](https://hub.docker.com/r/sudtanj/repocket) | Official Repocket client on distroless cc, non-root instead of forced root (amd64 + arm64); API key from `.env` - see its own [README](repocket/README.md) |
 
 ## Non-Docker projects
 

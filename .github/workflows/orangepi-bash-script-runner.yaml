@@ -15,7 +15,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, DOZZLE_
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, DOZZLE_
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +29,7 @@ on:
           - init-honeygain
           - init-traffmonetizer
           - init-earnfm
+          - init-repocket
           - init-dozzle
           - reset-containers
           # add new script names here as you create them
@@ -157,7 +158,8 @@ jobs:
           use warnings;
           my @lit = grep { defined($_) && length($_) >= 3 }
             map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE
-                     TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE EARNFM_TOKEN EARNFM_DEVICE);
+                     TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE EARNFM_TOKEN EARNFM_DEVICE
+                     REPOCKET_TOKEN REPOCKET_DEVICE);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
             for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
@@ -251,7 +253,7 @@ jobs:
           ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,DOZZLE_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,DOZZLE_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
           HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
@@ -259,6 +261,8 @@ jobs:
           TRAFFMONETIZER_DEVICE: ${{ secrets.TRAFFMONETIZER_DEVICE }}
           EARNFM_TOKEN: ${{ secrets.EARNFM_TOKEN }}
           EARNFM_DEVICE: ${{ secrets.EARNFM_DEVICE }}
+          REPOCKET_TOKEN: ${{ secrets.REPOCKET_TOKEN }}
+          REPOCKET_DEVICE: ${{ secrets.REPOCKET_DEVICE }}
         run: |
           set +e
           SECONDS=0
