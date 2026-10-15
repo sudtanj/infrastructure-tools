@@ -11,9 +11,11 @@
 #
 # Env:
 #   TRAFFMONETIZER_TOKEN         application token (required)
-#   TRAFFMONETIZER_DEVICE        dashboard device name (default: this machine's hostname). The
-#                                device ID is not kept (it lives in a tmpfs), so every new
-#                                container is a new dashboard device.
+#   TRAFFMONETIZER_DEVICE        base dashboard device name (default: this machine's hostname).
+#                                Every new container gets a random suffix (<base>-<6 hex>), used
+#                                as both the device name and the container hostname. The device
+#                                ID is not kept (it lives in a tmpfs), so each deployment is a
+#                                fresh device.
 #   TRAFFMONETIZER_IMAGE         default sudtanj/traffmonetizer:latest
 #   TRAFFMONETIZER_CPU_LIMIT     hard CPU cap, default 0.25
 #   TRAFFMONETIZER_MEMORY_LIMIT  hard RAM cap, swap disabled, default 64m
@@ -62,7 +64,7 @@ status "init traffmonetizer start"
 step "preflight checks"
 "${DOCKER[@]}" info >/dev/null 2>&1 || fail "docker daemon is not available"
 [ -n "$TOKEN" ] || fail "TRAFFMONETIZER_TOKEN is not set"
-[[ "$DEVICE" =~ ^[A-Za-z0-9._-]{1,63}$ ]] || fail "TRAFFMONETIZER_DEVICE must be 1-63 chars of letters, digits, . _ -"
+[[ "$DEVICE" =~ ^[A-Za-z0-9._-]{1,56}$ ]] || fail "TRAFFMONETIZER_DEVICE must be 1-56 chars of letters, digits, . _ - (a 7-char suffix is added)"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -168,7 +170,7 @@ ok "image ready"
 # ---------------------------------------------------------------------------
 # A hash of every setting (token included, never printed) is stored as a label, so an unchanged
 # run leaves a healthy container alone instead of reconnecting it.
-WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$TOKEN" "$DEVICE" "$CPU_LIMIT" "$MEMORY_LIMIT" "$PIDS_LIMIT" "${DNS_SERVERS[*]}" "$NETWORK_NAME" "v2" \
+WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$TOKEN" "$DEVICE" "$CPU_LIMIT" "$MEMORY_LIMIT" "$PIDS_LIMIT" "${DNS_SERVERS[*]}" "$NETWORK_NAME" "v3" \
   | sha256sum | awk '{print $1}')"
 HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "traffmonetizer.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
@@ -187,10 +189,15 @@ else
   "${DOCKER[@]}" volume rm traffmonetizer-data >/dev/null 2>&1 || true
   ok "old container gone"
 
+  # Fresh random suffix per new container, so each deployment has its own name. Not printed
+  # (the base name is identifying).
+  RUN_DEVICE="${DEVICE}-$(od -An -N3 -tx1 /dev/urandom | tr -d " \n")"
+  [[ "$RUN_DEVICE" =~ -[0-9a-f]{6}$ ]] || fail "could not generate a device suffix"
+
   step "starting ${CONTAINER_NAME}"
   "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    --hostname "$DEVICE" \
+    --hostname "$RUN_DEVICE" \
     --network "$NETWORK_NAME" \
     "${DNS_OPTS[@]}" \
     --label "traffmonetizer.config=${WANT_SUM}" \
@@ -203,7 +210,7 @@ else
     --cap-drop ALL --security-opt no-new-privileges \
     --log-driver json-file "${LOG_OPTS[@]}" \
     "$IMAGE" \
-    start accept --token "$TOKEN" --device-name "$DEVICE" >/dev/null \
+    start accept --token "$TOKEN" --device-name "$RUN_DEVICE" >/dev/null \
     || fail "failed to start ${CONTAINER_NAME}"
 fi
 
