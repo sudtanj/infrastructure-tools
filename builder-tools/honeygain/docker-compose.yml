@@ -17,9 +17,9 @@ services:
     # default is the random container ID, which changes on every recreate.
     hostname: ${HG_DEVICE:-honeygain}
 
-    # Filtered DNS by default: AdGuard Family Protection blocks known malware,
-    # phishing and adult domains for every lookup the client makes. Remove this
-    # block to use the host's resolver.
+    # AdGuard Family Protection only: blocks known malware, phishing and adult
+    # domains. init-honeygain.sh also firewalls every other resolver; compose
+    # cannot, so this alone does not stop a client that ignores resolv.conf.
     dns:
       - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
       - 94.140.14.16 # AdGuard Family Protection IPv4
@@ -39,16 +39,18 @@ services:
       # Device state, so a recreate is the same device, not a new one.
       - honeygain-data:/home/nonroot
 
-    # A fuse sized for a 1-4 GB board, not a fit.
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
+    # Hard limits, kept as small as Honeygain runs in: no swap, low CPU
+    # priority, and the first container the kernel kills under memory pressure.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 64
 
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,nodev,size=8m
     security_opt:
       - no-new-privileges:true
     cap_drop:
