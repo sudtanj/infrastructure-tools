@@ -17,6 +17,13 @@ services:
     # default is the random container ID, which changes on every recreate.
     hostname: ${HG_DEVICE:-honeygain}
 
+    # Filtered DNS by default: AdGuard Family Protection blocks known malware,
+    # phishing and adult domains for every lookup the client makes. Remove this
+    # block to use the host's resolver.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
     # Compose fills these in from .env before the container starts, so the
     # distroless image needs no shell. -tou-accept is always passed.
     command:

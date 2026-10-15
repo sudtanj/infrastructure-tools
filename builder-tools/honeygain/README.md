@@ -28,6 +28,9 @@ otherwise every recreate shows up as a new device.
 
 ## Notes
 
+- **Filtered DNS**: the container resolves through AdGuard Family Protection
+  (`94.140.14.15`, `94.140.14.16`), blocking known malware, phishing and adult
+  domains. Remove the `dns:` block to use the host's resolver.
 - **No shell**: `docker exec` won't work. Use `docker logs`, or run the
   official image to debug.
 - **Password visibility**: the binary only takes `-pass`, so the password is

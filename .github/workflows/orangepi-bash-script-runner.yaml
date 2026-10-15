@@ -1,0 +1,351 @@
+name: "Run Bash Scripts on Orange Pi"
+
+# Same pattern as gcp-bash-script-runner.yaml, but the target is a home device reached over
+# Tailscale: the runner joins the tailnet as an ephemeral node, then SSHes in with a password.
+#
+# Scripts are looked up in bash-scripts/orangepi/ first, then bash-scripts/ (so shared ones like
+# init-dozzle work here too). "all" runs bash-scripts/orangepi/*.sh only.
+#
+# Repo secrets (Settings -> Secrets and variables -> Actions). This repo and its logs are public:
+# none of these values is ever printed, and every line from the device is sanitized.
+#   OPI_TAILSCALE_IP    the device's Tailscale IP (100.x.y.z) or MagicDNS name
+#   OPI_SSH_USER        SSH login user
+#   OPI_SSH_PASSWORD    SSH password, also used for sudo when the user is not root
+#   OPI_SSH_PORT        optional, default 22
+#   Tailscale for the runner, one of:
+#     TS_OAUTH_CLIENT_ID + TS_OAUTH_SECRET  OAuth client with the auth_keys scope (recommended);
+#                                           nodes get TS_TAGS, default tag:ci
+#     TS_RUNNER_AUTH_KEY                    an ephemeral, pre-approved auth key
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, DOZZLE_
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Script to run"
+        required: true
+        default: "init-honeygain"
+        type: choice
+        options:
+          - all
+          - init-honeygain
+          - init-dozzle
+          - reset-containers
+          # add new script names here as you create them
+      debug:
+        description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  OPI_TAILSCALE_IP: ${{ secrets.OPI_TAILSCALE_IP }}
+  OPI_SSH_USER: ${{ secrets.OPI_SSH_USER }}
+  OPI_SSH_PASSWORD: ${{ secrets.OPI_SSH_PASSWORD }}
+  OPI_SSH_PORT: ${{ secrets.OPI_SSH_PORT }}
+  # `secrets` is not allowed in a step's `if:`, so the Tailscale auth mode is derived here
+  TS_USE_OAUTH: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.TS_OAUTH_SECRET != '' }}
+
+jobs:
+  discover:
+    name: "Discover scripts"
+    runs-on: ubuntu-latest
+    outputs:
+      scripts: ${{ steps.list.outputs.scripts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: List scripts
+        id: list
+        env:
+          REQUESTED: ${{ inputs.script }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
+            # reset-*.sh are destructive: only run when picked by name
+            mapfile -t files < <(find bash-scripts/orangepi -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
+          else
+            name="${REQUESTED%.sh}"
+            if [ -f "bash-scripts/orangepi/${name}.sh" ]; then
+              files=("bash-scripts/orangepi/${name}.sh")
+            else
+              files=("bash-scripts/${name}.sh")
+            fi
+          fi
+          echo "[*] requested: ${REQUESTED:-all} -> ${#files[@]} script(s)"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "scripts=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || { echo "::error::Missing script: $f"; exit 1; }
+          done
+          printf '[*] selected: %s\n' "${files[@]}"
+          json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
+          echo "scripts=$json" >> "$GITHUB_OUTPUT"
+
+  run:
+    name: "Run (${{ matrix.script }})"
+    needs: discover
+    if: needs.discover.outputs.scripts != '[]'
+    runs-on: ubuntu-latest
+    # One device: never run two scripts on it at once
+    concurrency:
+      group: orangepi-device
+      cancel-in-progress: false
+
+    environment:
+      name: "approve-opi-${{ matrix.script }}"
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        script: ${{ fromJson(needs.discover.outputs.scripts) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run context (safe)
+        env:
+          SCRIPT_PATH: ${{ matrix.script }}
+          DEBUG_LOGS: ${{ inputs.debug }}
+        run: |
+          echo "workflow : ${GITHUB_WORKFLOW}"
+          echo "script   : ${SCRIPT_PATH}"
+          echo "ref      : ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}"
+          echo "run      : #${GITHUB_RUN_NUMBER}, attempt ${GITHUB_RUN_ATTEMPT}"
+          echo "debug    : ${DEBUG_LOGS:-true}"
+
+      - name: Verify required config
+        env:
+          HAS_TS_OAUTH: ${{ env.TS_USE_OAUTH }}
+          HAS_TS_KEY: ${{ secrets.TS_RUNNER_AUTH_KEY != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD; do
+            [ -z "${!v:-}" ] && missing+=("$v") || true
+          done
+          if [ "$HAS_TS_OAUTH" != "true" ] && [ "$HAS_TS_KEY" != "true" ]; then
+            missing+=("TS_OAUTH_CLIENT_ID+TS_OAUTH_SECRET or TS_RUNNER_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "[+] required secrets are set (tailscale auth: $([ "$HAS_TS_OAUTH" = "true" ] && echo oauth || echo auth key))"
+
+      - name: Mask sensitive values
+        run: |
+          echo "::add-mask::${OPI_TAILSCALE_IP}"
+          echo "::add-mask::${OPI_SSH_USER}"
+          echo "::add-mask::${OPI_SSH_PASSWORD}"
+
+      - name: Prepare log sanitizer
+        run: |
+          # Every line printed from the device goes through this filter first, masking anything
+          # identifying even if a script prints it.
+          cat > "${RUNNER_TEMP}/sanitize.pl" <<'PERL'
+          use strict;
+          use warnings;
+          my @lit = grep { defined($_) && length($_) >= 3 }
+            map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE);
+          my $h = '[0-9A-Fa-f]{1,4}';
+          while (my $l = <>) {
+            for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
+            $l =~ s/\b(?:\d{1,3}\.){3}\d{1,3}\b/<ip>/g;
+            $l =~ s/(?<![\w:.])(?:(?:$h:){7}$h|(?:$h:){1,7}:(?:$h(?::$h){0,6})?|::(?:$h(?::$h){0,6})?)(?![\w:])/<ipv6>/g;
+            $l =~ s{(://)[^/\s@]+@}{$1<creds>@}g;
+            $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
+            $l =~ s/\b[\w-]+(?:\.[\w-]+)*\.ts\.net\b/<tailnet-host>/g;
+            $l =~ s/tskey-[\w-]+/tskey-<redacted>/g;
+            $l =~ s/\b(?:gh[pousr]_|github_pat_)\w+/<github-token>/g;
+            $l =~ s/\bsk-[\w-]{8,}/<api-key>/g;
+            $l =~ s/\bBearer\s+\S+/Bearer <redacted>/gi;
+            $l =~ s/((?:authkey|auth_key|token|password|passwd|secret|api[_-]?key|-pass|-email)\s*[=: ]\s*)(?!(?:set|unset)\b)\S+/$1<redacted>/gi;
+            print $l;
+          }
+          PERL
+          perl -c "${RUNNER_TEMP}/sanitize.pl"
+
+      - name: Join tailnet (OAuth)
+        if: env.TS_USE_OAUTH == 'true'
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ secrets.TS_TAGS || 'tag:ci' }}
+
+      - name: Join tailnet (auth key)
+        if: env.TS_USE_OAUTH != 'true'
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_RUNNER_AUTH_KEY }}
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq sshpass >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq sshpass >/dev/null 2>&1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # The device is only reachable inside the tailnet, which authenticates both ends; the
+          # runner is fresh each time, so there is no known_hosts to pin against.
+          cat > ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+            ServerAliveInterval 30
+            ConnectTimeout 20
+            PreferredAuthentications password,keyboard-interactive
+            PubkeyAuthentication no
+          EOF
+          chmod 600 ~/.ssh/config
+          echo "[+] ssh configured"
+
+      - name: Preflight checks (safe)
+        run: |
+          set +e
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          PORT="${OPI_SSH_PORT:-22}"
+          OK=0
+          for attempt in 1 2 3 4 5 6; do
+            if tailscale ping --c 1 --timeout 5s "${OPI_TAILSCALE_IP}" >/dev/null 2>&1; then OK=1; break; fi
+            sleep 5
+          done
+          if [ "$OK" = "1" ]; then
+            echo "[+] device reachable over tailscale"
+          else
+            echo "::error::device not reachable over tailscale (offline, or an ACL blocks the runner's tag)"
+            exit 1
+          fi
+          OUT=$(SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" \
+                'printf "arch=%s docker=%s\n" "$(uname -m)" "$(command -v docker >/dev/null && echo yes || echo no)"' 2>&1)
+          RC=$?
+          if [ "$RC" -ne 0 ]; then
+            echo "$OUT" | perl "$SAN"
+            echo "::error::ssh login failed (exit ${RC}): check OPI_SSH_USER / OPI_SSH_PASSWORD and that sshd allows passwords"
+            exit 1
+          fi
+          echo "[*] $(echo "$OUT" | tail -n1 | perl "$SAN")"
+
+      - name: Run script via Tailscale SSH
+        env:
+          SCRIPT_PATH: ${{ matrix.script }}
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          DEBUG_LOGS: ${{ inputs.debug }}
+          # Only these prefixes reach the device. Never add OPI_ or TS_ here.
+          SECRET_FILTER: "HONEYGAIN_,DOZZLE_"
+          HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
+          HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
+          HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
+        run: |
+          set +e
+          SECONDS=0
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          DEBUG_LOGS="${DEBUG_LOGS:-true}"
+          PORT="${OPI_SSH_PORT:-22}"
+          umask 077
+          LOG=$(mktemp)
+          PAYLOAD=$(mktemp)
+          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
+
+          # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
+          {
+            IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
+            for p in "${PREFIXES[@]}"; do
+              echo "$ALL_SECRETS" | jq -r --arg p "$p" \
+                'to_entries[] | select(.key | startswith($p)) | "export \(.key)=\(.value|@sh)"'
+            done
+            printf 'export VERBOSE=0\n'
+            if [ "$DEBUG_LOGS" = "true" ]; then printf 'export INIT_DEBUG=1\n'; else printf 'export INIT_DEBUG=0\n'; fi
+            # sudo without a tty: an askpass helper reads the SSH password from a 0600 file that
+            # is removed when the script exits. Scripts keep calling plain `sudo`.
+            printf '__SUDO_PW=%q\n' "$OPI_SSH_PASSWORD"
+            cat <<'SHIM'
+          if [ "$(id -u)" -ne 0 ]; then
+            __ASK_DIR="$(mktemp -d)"; chmod 700 "$__ASK_DIR"
+            printf '%s\n' "$__SUDO_PW" > "$__ASK_DIR/pw"; chmod 600 "$__ASK_DIR/pw"
+            printf '#!/bin/sh\ncat %s/pw\n' "$__ASK_DIR" > "$__ASK_DIR/ask"; chmod 700 "$__ASK_DIR/ask"
+            export SUDO_ASKPASS="$__ASK_DIR/ask"
+            trap 'rm -rf "$__ASK_DIR"' EXIT
+            sudo() { command sudo -A "$@"; }
+          fi
+          unset __SUDO_PW
+          SHIM
+            cat "${SCRIPT_PATH}"
+          } > "$PAYLOAD"
+
+          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
+          SHA=$(sha256sum "${SCRIPT_PATH}" | cut -c1-12)
+          echo "::group::Run context (safe)"
+          {
+            echo "[*] script: ${SCRIPT_PATH} ($(wc -l < "${SCRIPT_PATH}") lines, sha256 ${SHA})"
+            echo "[*] env forwarded to the device: $(echo "$NAMES" | wc -w) variables (values are never printed)"
+            echo "[*] variable names: ${NAMES}"
+            echo "[*] debug logs: ${DEBUG_LOGS}"
+          } | perl "$SAN"
+          echo "::endgroup::"
+
+          SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" 'bash -s' \
+            < "$PAYLOAD" > "$LOG" 2>&1
+          RC=$?
+          DUR=$SECONDS
+          set -e
+
+          show() {
+            if [ "$DEBUG_LOGS" = "true" ]; then
+              grep -aE '^\[[*>+!xd]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            else
+              grep -aE '^\[[*>+!x]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            fi
+          }
+          STRUCT_LINES=$(grep -acE '^\[[*>+!xd]\] |^\[✓\] ' "$LOG" || true)
+          STRUCT_LINES="${STRUCT_LINES:-0}"
+
+          summary() {
+            {
+              echo "### \`${SCRIPT_PATH##*/}\`: $1"
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| exit code | ${RC} |"
+              echo "| duration | ${DUR}s |"
+              echo "| script sha256 | \`${SHA}\` |"
+              echo "| output lines captured | ${STRUCT_LINES} |"
+              echo ""
+              echo "<details><summary>Output (sanitized)</summary>"
+              echo ""
+              echo '```text'
+              show | tail -n 200
+              echo '```'
+              echo "</details>"
+              echo ""
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          }
+
+          if [ "$RC" -eq 0 ]; then
+            echo "[*] script completed successfully in ${DUR}s"
+            echo "::group::Script output (sanitized)"
+            show || true
+            echo "::endgroup::"
+            { show | grep -a '^\[!\] ' | head -n 5 | while IFS= read -r w; do echo "::warning::${w#\[!\] }"; done; } || true
+            summary "succeeded"
+            exit 0
+          fi
+
+          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s"
+          [ "$RC" -eq 255 ] && echo "[!] exit 255 = the SSH connection itself failed (not the script)."
+          echo "::group::Script output (sanitized)"
+          show || true
+          echo "::endgroup::"
+          # Raw tail is sanitized and limited to lines that look like errors, not arbitrary output
+          echo "---- diagnostic tail (sanitized) ----"
+          perl "$SAN" "$LOG" | grep -avE 'Permanently added|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' | tail -40 || true
+          echo "---- end ----"
+          summary "FAILED"
+          exit "$RC"
