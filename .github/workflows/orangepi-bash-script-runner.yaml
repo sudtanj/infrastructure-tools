@@ -3,8 +3,7 @@ name: "Run Bash Scripts on Orange Pi"
 # Same pattern as gcp-bash-script-runner.yaml, but the target is a home device reached over
 # Tailscale: the runner joins the tailnet as an ephemeral node, then SSHes in with a password.
 #
-# Scripts are looked up in bash-scripts/orangepi/ first, then bash-scripts/ (so shared ones like
-# init-dozzle work here too). "all" runs bash-scripts/orangepi/*.sh only.
+# Scripts come from bash-scripts/, the same folder the GCP runner uses.
 #
 # Repo secrets (Settings -> Secrets and variables -> Actions). This repo and its logs are public:
 # none of these values is ever printed, and every line from the device is sanitized.
@@ -67,14 +66,10 @@ jobs:
           set -euo pipefail
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
             # reset-*.sh are destructive: only run when picked by name
-            mapfile -t files < <(find bash-scripts/orangepi -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
           else
             name="${REQUESTED%.sh}"
-            if [ -f "bash-scripts/orangepi/${name}.sh" ]; then
-              files=("bash-scripts/orangepi/${name}.sh")
-            else
-              files=("bash-scripts/${name}.sh")
-            fi
+            files=("bash-scripts/${name}.sh")
           fi
           echo "[*] requested: ${REQUESTED:-all} -> ${#files[@]} script(s)"
           if [ "${#files[@]}" -eq 0 ]; then

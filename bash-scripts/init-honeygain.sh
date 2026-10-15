@@ -1,9 +1,8 @@
 #!/bin/bash
-# bash-scripts/orangepi/init-honeygain.sh
+# bash-scripts/init-honeygain.sh
 # Idempotent deploy/update of Honeygain (sudtanj/honeygain: the official client on distroless,
-# see builder-tools/honeygain/). Meant for a home device like an Orange Pi Zero 3: Honeygain
-# rejects datacenter IPs, which is why this lives outside bash-scripts/ and the GCP runner's
-# "all" never picks it up.
+# see builder-tools/honeygain/). Honeygain rejects datacenter IPs, so run it on a home device
+# (e.g. the Orange Pi Zero 3), not on a cloud VM.
 #
 # Security model (this repo is public and its Actions logs are public):
 #   - Account email, password and device name are never printed.
