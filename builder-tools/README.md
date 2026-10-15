@@ -85,6 +85,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`mini-router/`](mini-router/) | [`sudtanj/mini-router`](https://hub.docker.com/r/sudtanj/mini-router) | [mini-router](https://github.com/sudtanj/mini-router): one OpenAI- and Anthropic-compatible endpoint over every LLM provider you use, with pools, spillover and protocol translation - see its own [README](mini-router/README.md) |
 | [`honeygain/`](honeygain/) | [`sudtanj/honeygain`](https://hub.docker.com/r/sudtanj/honeygain) | Official Honeygain client repackaged on distroless (amd64 + arm64); credentials from `.env`, `-tou-accept` always on - see its own [README](honeygain/README.md) |
 | [`traffmonetizer/`](traffmonetizer/) | [`sudtanj/traffmonetizer`](https://hub.docker.com/r/sudtanj/traffmonetizer) | Official Traffmonetizer client on distroless static, non-root, real multi-arch (amd64 + arm64); token from `.env` - see its own [README](traffmonetizer/README.md) |
+| [`earnfm/`](earnfm/) | [`sudtanj/earnfm`](https://hub.docker.com/r/sudtanj/earnfm) | Official EarnFM client on distroless static, non-root, Go runtime capped to the container (amd64 + arm64); token from `.env` - see its own [README](earnfm/README.md) |
 
 ## Non-Docker projects
 

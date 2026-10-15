@@ -1,0 +1,52 @@
+# EarnFM on distroless, built from this folder.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d --build
+
+services:
+  earnfm:
+    build: .
+    image: sudtanj/earnfm:local
+    restart: unless-stopped
+    hostname: ${EFM_DEVICE:-earnfm}
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. The client also queries 9.9.9.9 and 1.1.1.1 directly, which
+    # this does not cover; init-earnfm.sh redirects those to AdGuard with a
+    # firewall rule, compose cannot.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
+    # Read by the client itself, so the token is not on its command line.
+    environment:
+      EARNFM_TOKEN: ${EFM_TOKEN:?set EFM_TOKEN in .env}
+      EARNFM_DEVICE_NAME: ${EFM_DEVICE:-earnfm}
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure. The image sets GOMAXPROCS=1 and
+    # GOMEMLIMIT=48MiB to match.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 64
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+      # EARNFM_DATA_DIR. Not kept: every new container registers as a new
+      # device.
+      - /home/nonroot:rw,noexec,nosuid,nodev,size=1m,uid=65532,gid=65532,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
