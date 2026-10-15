@@ -12,8 +12,8 @@
 # Env:
 #   TRAFFMONETIZER_TOKEN         application token (required)
 #   TRAFFMONETIZER_DEVICE        dashboard device name (default: this machine's hostname). The
-#                                device ID lives in the traffmonetizer-data volume, so recreates
-#                                stay the same dashboard device.
+#                                device ID is not kept (it lives in a tmpfs), so every new
+#                                container is a new dashboard device.
 #   TRAFFMONETIZER_IMAGE         default sudtanj/traffmonetizer:latest
 #   TRAFFMONETIZER_CPU_LIMIT     hard CPU cap, default 0.25
 #   TRAFFMONETIZER_MEMORY_LIMIT  hard RAM cap, swap disabled, default 64m
@@ -26,7 +26,6 @@
 set -euo pipefail
 
 CONTAINER_NAME="traffmonetizer"
-VOLUME_NAME="traffmonetizer-data"
 NETWORK_NAME="traffmonetizer-net"
 NETWORK_SUBNET="10.213.53.8/29"   # next to honeygain-net (10.213.53.0/29)
 FW_CHAIN="TRAFFMON-DNS"
@@ -169,7 +168,7 @@ ok "image ready"
 # ---------------------------------------------------------------------------
 # A hash of every setting (token included, never printed) is stored as a label, so an unchanged
 # run leaves a healthy container alone instead of reconnecting it.
-WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$TOKEN" "$DEVICE" "$CPU_LIMIT" "$MEMORY_LIMIT" "$PIDS_LIMIT" "${DNS_SERVERS[*]}" "$NETWORK_NAME" "v1" \
+WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$TOKEN" "$DEVICE" "$CPU_LIMIT" "$MEMORY_LIMIT" "$PIDS_LIMIT" "${DNS_SERVERS[*]}" "$NETWORK_NAME" "v2" \
   | sha256sum | awk '{print $1}')"
 HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "traffmonetizer.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
@@ -184,7 +183,9 @@ else
   # -------------------------------------------------------------------------
   step "removing existing ${CONTAINER_NAME} container"
   "${DOCKER[@]}" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  ok "old container gone (device ID volume ${VOLUME_NAME} kept)"
+  # v0.1.0 kept the device ID in this volume; nothing uses it any more
+  "${DOCKER[@]}" volume rm traffmonetizer-data >/dev/null 2>&1 || true
+  ok "old container gone"
 
   step "starting ${CONTAINER_NAME}"
   "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
@@ -193,8 +194,8 @@ else
     --network "$NETWORK_NAME" \
     "${DNS_OPTS[@]}" \
     --label "traffmonetizer.config=${WANT_SUM}" \
-    -v "${VOLUME_NAME}:/home/nonroot" \
     --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=4m \
+    --tmpfs /home/nonroot:rw,noexec,nosuid,nodev,size=1m,uid=65532,gid=65532,mode=0700 \
     --cpus "$CPU_LIMIT" --cpu-shares 256 \
     --memory "$MEMORY_LIMIT" --memory-swap "$MEMORY_LIMIT" \
     --oom-score-adj 500 \

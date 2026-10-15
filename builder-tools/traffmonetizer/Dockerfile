@@ -34,12 +34,17 @@ RUN case "$TARGETARCH" in \
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=check /cli /usr/local/bin/cli
 
-# The client keeps its device ID in $HOME/.config/traffmonetizer/
-# (cli_device_ids.json). Upstream leaves that in the container layer, so every
-# recreate is a new device; here it lives under the nonroot home, which the
-# compose files and init script put on a volume. The binary stays outside it,
-# so the volume never hides a newer binary.
+# The client writes its device ID to $HOME/.config/traffmonetizer/
+# (cli_device_ids.json). The compose files and init script mount a 1 MB tmpfs
+# here, so it works on a read-only rootfs and nothing is kept: each new
+# container is a new device.
 ENV HOME=/home/nonroot
 WORKDIR /home/nonroot
+
+# The client runs on tokio, which reads this: one async worker thread instead
+# of one per host core. All the work is network I/O and the container is
+# capped well below one core anyway, so extra workers only add threads,
+# stacks and context switches.
+ENV TOKIO_WORKER_THREADS=1
 
 ENTRYPOINT ["/usr/local/bin/cli"]

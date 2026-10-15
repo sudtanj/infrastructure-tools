@@ -28,10 +28,6 @@ services:
       - --device-name
       - ${TM_DEVICE:-traffmonetizer}
 
-    volumes:
-      # Device ID file, so a recreate is the same device, not a new one.
-      - traffmonetizer-data:/home/nonroot
-
     # Hard limits: no swap, low CPU priority, and the first container the
     # kernel kills under memory pressure. pids is higher than the memory
     # suggests because the client resolves hosts on tokio's blocking thread
@@ -46,6 +42,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=4m
+      # The client writes its device ID file under $HOME. Not kept: every new
+      # container registers as a new device.
+      - /home/nonroot:rw,noexec,nosuid,nodev,size=1m,uid=65532,gid=65532,mode=0700
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -57,6 +56,3 @@ services:
       options:
         max-size: 5m
         max-file: "2"
-
-volumes:
-  traffmonetizer-data:
