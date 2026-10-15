@@ -12,8 +12,10 @@
 # Env:
 #   HONEYGAIN_EMAIL         account email (required)
 #   HONEYGAIN_PASSWORD      account password (required)
-#   HONEYGAIN_DEVICE        dashboard device name, also the container hostname (default: this
-#                           machine's hostname). Keep it stable, or each change is a new device.
+#   HONEYGAIN_DEVICE        base dashboard device name (default: this machine's hostname). Every
+#                           new container gets a random suffix (<base>-<6 hex>), used as both the
+#                           device name and the container hostname, so each deployment is a
+#                           fresh device to Honeygain.
 #   HONEYGAIN_IMAGE         default sudtanj/honeygain:latest
 #   HONEYGAIN_CPU_LIMIT     hard CPU cap, default 0.25
 #   HONEYGAIN_MEMORY_LIMIT  hard RAM cap, swap disabled, default 64m
@@ -64,7 +66,7 @@ step "preflight checks"
 "${DOCKER[@]}" info >/dev/null 2>&1 || fail "docker daemon is not available"
 [ -n "$EMAIL" ] || fail "HONEYGAIN_EMAIL is not set"
 [ -n "$PASSWORD" ] || fail "HONEYGAIN_PASSWORD is not set"
-[[ "$DEVICE" =~ ^[A-Za-z0-9._-]{1,63}$ ]] || fail "HONEYGAIN_DEVICE must be 1-63 chars of letters, digits, . _ -"
+[[ "$DEVICE" =~ ^[A-Za-z0-9._-]{1,56}$ ]] || fail "HONEYGAIN_DEVICE must be 1-56 chars of letters, digits, . _ - (a 7-char suffix is added)"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -187,10 +189,15 @@ else
   "${DOCKER[@]}" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   ok "old container gone (state volume ${VOLUME_NAME} kept)"
 
+  # Fresh random suffix per new container: Honeygain copes badly with a redeploy reusing
+  # the same device name. Not printed (the base name is identifying).
+  RUN_DEVICE="${DEVICE}-$(od -An -N3 -tx1 /dev/urandom | tr -d " \n")"
+  [[ "$RUN_DEVICE" =~ -[0-9a-f]{6}$ ]] || fail "could not generate a device suffix"
+
   step "starting ${CONTAINER_NAME}"
   "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    --hostname "$DEVICE" \
+    --hostname "$RUN_DEVICE" \
     --network "$NETWORK_NAME" \
     "${DNS_OPTS[@]}" \
     --label "honeygain.config=${WANT_SUM}" \
@@ -203,7 +210,7 @@ else
     --cap-drop ALL --security-opt no-new-privileges \
     --log-driver json-file "${LOG_OPTS[@]}" \
     "$IMAGE" \
-    -tou-accept -email "$EMAIL" -pass "$PASSWORD" -device "$DEVICE" >/dev/null \
+    -tou-accept -email "$EMAIL" -pass "$PASSWORD" -device "$RUN_DEVICE" >/dev/null \
     || fail "failed to start ${CONTAINER_NAME}"
 fi
 unset PASSWORD
