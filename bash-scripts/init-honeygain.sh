@@ -218,17 +218,31 @@ unset PASSWORD
 # ---------------------------------------------------------------------------
 # 6. Verify: still running and not restart-looping after a short settle
 # ---------------------------------------------------------------------------
+# Container log tail without the ASCII banner, and with the Honeygain device ID masked:
+# it identifies the device and this repo's logs are public.
+show_logs() {
+  "${DOCKER[@]}" logs --tail "$1" "$CONTAINER_NAME" 2>&1 \
+    | grep -avE '\$\$|\\__|^[[:space:]]*$' \
+    | sed -E 's/[0-9A-Fa-f]{24,}/<id>/g; s/^/'"$2"' /' || true
+}
+
 step "checking ${CONTAINER_NAME} stays up"
-sleep 15
+# RestartCount is cumulative over the container's lifetime, so only restarts during this
+# settle window count as a failure; earlier ones are just reported.
+RESTARTS_BEFORE="$("${DOCKER[@]}" inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo 0)"
+sleep 20
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
 RESTARTS="$("${DOCKER[@]}" inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo 0)"
-if [ "$STATE" != "running" ] || [ "${RESTARTS:-0}" -gt 0 ]; then
-  warn "state: ${STATE}, restarts: ${RESTARTS}"
-  # The workflow's sanitizer masks emails and secrets, but keep the tail short anyway
-  "${DOCKER[@]}" logs --tail 15 "$CONTAINER_NAME" 2>&1 | sed 's/^/[!]   /' >&2 || true
-  OOM="$("${DOCKER[@]}" inspect -f '{{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null || echo false)"
+OOM="$("${DOCKER[@]}" inspect -f '{{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null || echo false)"
+if [ "$STATE" != "running" ] || [ "${RESTARTS:-0}" -gt "${RESTARTS_BEFORE:-0}" ]; then
+  warn "state: ${STATE}, restarts during check: $(( ${RESTARTS:-0} - ${RESTARTS_BEFORE:-0} ))"
+  show_logs 15 '[!]  ' >&2
   [ "$OOM" = "true" ] && fail "${CONTAINER_NAME} hit the ${MEMORY_LIMIT} memory cap; raise HONEYGAIN_MEMORY_LIMIT"
   fail "${CONTAINER_NAME} is not staying up (wrong credentials, or a read-only path; see README)"
+fi
+if [ "${RESTARTS:-0}" -gt 0 ]; then
+  LAST_EXIT="$("${DOCKER[@]}" inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME" 2>/dev/null || echo '?')"
+  warn "${CONTAINER_NAME} restarted ${RESTARTS} time(s) since it was created (oom: ${OOM}, last exit code: ${LAST_EXIT}); stable during the check"
 fi
 
 # DNS: the container must use exactly the AdGuard servers, and the lock must be in place
@@ -241,9 +255,7 @@ NS="$("${SUDO[@]}" grep -E '^nameserver' "$RESOLV" | awk '{print $2}' | paste -s
 "${SUDO[@]}" iptables -C DOCKER-USER -s "$NETWORK_SUBNET" -j "$FW_CHAIN" 2>/dev/null \
   || fail "DNS firewall rule is missing from DOCKER-USER"
 ok "DNS: AdGuard Family Protection only, other resolvers blocked"
-if [ "${INIT_DEBUG:-0}" = "1" ]; then
-  "${DOCKER[@]}" logs --tail 10 "$CONTAINER_NAME" 2>&1 | sed 's/^/[d]   /' || true
-fi
+[ "${INIT_DEBUG:-0}" = "1" ] && show_logs 10 '[d]  '
 ok "${CONTAINER_NAME} is up"
 
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"

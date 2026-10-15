@@ -164,6 +164,7 @@ jobs:
             $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
             $l =~ s/\b[\w-]+(?:\.[\w-]+)*\.ts\.net\b/<tailnet-host>/g;
             $l =~ s/tskey-[\w-]+/tskey-<redacted>/g;
+            $l =~ s/\b[0-9A-Fa-f]{24,}\b/<id>/g;   # device IDs, hashes
             $l =~ s/\b(?:gh[pousr]_|github_pat_)\w+/<github-token>/g;
             $l =~ s/\bsk-[\w-]{8,}/<api-key>/g;
             $l =~ s/\bBearer\s+\S+/Bearer <redacted>/gi;
