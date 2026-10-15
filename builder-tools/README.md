@@ -83,6 +83,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`paseo-lite/`](paseo-lite/) | [`sudtanj/paseo-lite`](https://hub.docker.com/r/sudtanj/paseo-lite) | [paseo-lite](https://github.com/sudtanj/paseo-code-rust) (Rust Paseo daemon, Paseo relay compatible) + native Claude Code CLI + native Codex CLI on Alpine, no Node.js; one shared Codex app-server and pooled Claude processes across all projects; same env vars as `paseo-codex` - see its own [README](paseo-lite/README.md) |
 | [`oci-freetier-creator/`](oci-freetier-creator/) | [`sudtanj/oci-freetier-creator`](https://hub.docker.com/r/sudtanj/oci-freetier-creator) | Runs [oracle-freetier-instance-creation](https://github.com/mohankumarpaluru/oracle-freetier-instance-creation) unattended, config via env vars - see its own [README](oci-freetier-creator/README.md) |
 | [`mini-router/`](mini-router/) | [`sudtanj/mini-router`](https://hub.docker.com/r/sudtanj/mini-router) | [mini-router](https://github.com/sudtanj/mini-router): one OpenAI- and Anthropic-compatible endpoint over every LLM provider you use, with pools, spillover and protocol translation - see its own [README](mini-router/README.md) |
+| [`honeygain/`](honeygain/) | [`sudtanj/honeygain`](https://hub.docker.com/r/sudtanj/honeygain) | Official Honeygain client repackaged on distroless (amd64 + arm64); credentials from `.env`, `-tou-accept` always on - see its own [README](honeygain/README.md) |
 
 ## Non-Docker projects
 

@@ -1,0 +1,58 @@
+# Honeygain on distroless, built locally from the Dockerfile here.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#
+# Use docker-compose.hub.yml to pull the published image instead.
+
+services:
+  honeygain:
+    build:
+      context: .
+      args:
+        HONEYGAIN_VERSION: "0.9.0"
+    image: honeygain-distroless
+    restart: unless-stopped
+    # Fixed hostname so the container identity is stable too; Docker's
+    # default is the random container ID, which changes on every recreate.
+    hostname: ${HG_DEVICE:-honeygain}
+
+    # Compose fills these in from .env before the container starts, so the
+    # distroless image needs no shell. -tou-accept is always passed.
+    command:
+      - -tou-accept
+      - -email
+      - ${HG_EMAIL:?set HG_EMAIL in .env}
+      - -pass
+      - ${HG_PASSWORD:?set HG_PASSWORD in .env}
+      - -device
+      - ${HG_DEVICE:-honeygain}
+
+    volumes:
+      # Device state, so a recreate is the same device, not a new one.
+      - honeygain-data:/home/nonroot
+
+    # A fuse sized for a 1-4 GB board, not a fit.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+volumes:
+  honeygain-data:
