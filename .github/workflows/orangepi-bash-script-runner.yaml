@@ -7,7 +7,8 @@ name: "Run Bash Scripts on Orange Pi"
 #
 # Repo secrets (Settings -> Secrets and variables -> Actions). This repo and its logs are public:
 # none of these values is ever printed, and every line from the device is sanitized.
-#   OPI_TAILSCALE_IP    the device's Tailscale IP (100.x.y.z) or MagicDNS name
+#   OPI_TAILSCALE_IP    the device's Tailscale IP / MagicDNS name, or its LAN IP behind a subnet
+#                       router (the runner joins with --accept-routes)
 #   OPI_SSH_USER        SSH login user
 #   OPI_SSH_PASSWORD    SSH password, also used for sudo when the user is not root
 #   OPI_SSH_PORT        optional, default 22
@@ -181,10 +182,10 @@ jobs:
             # Ephemeral: the node removes itself from the tailnet once the runner goes away
             secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
             sudo tailscale up --authkey="${secret}?ephemeral=true&preauthorized=true" \
-              --advertise-tags="$TAILSCALE_TAGS" --hostname="$HOST" >/dev/null 2>&1
+              --advertise-tags="$TAILSCALE_TAGS" --hostname="$HOST" --accept-routes >/dev/null 2>&1
           else
             sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
-              --hostname="$HOST" >/dev/null 2>&1
+              --hostname="$HOST" --accept-routes >/dev/null 2>&1
           fi
           echo "[+] joined the tailnet"
 
@@ -213,15 +214,20 @@ jobs:
           set +e
           SAN="${RUNNER_TEMP}/sanitize.pl"
           PORT="${OPI_SSH_PORT:-22}"
+          # A TCP check on the SSH port works for both a Tailscale IP and a LAN IP behind a
+          # subnet router (`tailscale ping` only knows tailnet nodes). Routes can take a few
+          # seconds to arrive after joining, hence the retries.
           OK=0
-          for attempt in 1 2 3 4 5 6; do
-            if tailscale ping --c 1 --timeout 5s "${OPI_TAILSCALE_IP}" >/dev/null 2>&1; then OK=1; break; fi
+          for attempt in $(seq 1 12); do
+            if timeout 5 bash -c "exec 3<>/dev/tcp/${OPI_TAILSCALE_IP}/${PORT}" 2>/dev/null; then OK=1; break; fi
             sleep 5
           done
           if [ "$OK" = "1" ]; then
             echo "[+] device reachable over tailscale"
           else
-            echo "::error::device not reachable over tailscale (offline, or an ACL blocks the runner's tag)"
+            ROUTES=$(tailscale status --json 2>/dev/null | jq '[.Peer[]? | select(.PrimaryRoutes != null) | .PrimaryRoutes[]] | length' 2>/dev/null)
+            echo "[*] subnet routes visible to the runner: ${ROUTES:-0}"
+            echo "::error::device not reachable on its SSH port over tailscale (offline, subnet route not approved, or an ACL blocks the runner's tags)"
             exit 1
           fi
           OUT=$(SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" \
