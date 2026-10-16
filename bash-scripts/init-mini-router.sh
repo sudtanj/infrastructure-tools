@@ -24,7 +24,7 @@
 #                                 Use the Tailscale IP (tailscale ip -4) or a LAN IP to reach it remotely;
 #                                 0.0.0.0 exposes it on every interface and is refused unless
 #                                 MINI_ROUTER_ALLOW_ANY=1.
-#   MINI_ROUTER_PORT              default 20128
+#   MINI_ROUTER_PORT              host port to publish, default 20129 (container always listens on 20128)
 #   MINI_ROUTER_IMAGE             default sudtanj/mini-router:latest
 #   MINI_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
 #   MINI_ROUTER_MEMORY_LIMIT      default 96m (swap disabled)
@@ -34,7 +34,8 @@ set -euo pipefail
 CONTAINER_NAME="mini-router"
 VOLUME_NAME="mini-router-data"
 IMAGE="${MINI_ROUTER_IMAGE:-sudtanj/mini-router:latest}"
-PORT="${MINI_ROUTER_PORT:-20128}"
+PORT="${MINI_ROUTER_PORT:-20129}"   # host side
+CPORT=20128                                # container side
 BIND="${MINI_ROUTER_BIND:-127.0.0.1}"
 TURSO_URL="${MINI_ROUTER_TURSO_URL:-}"
 TURSO_TOKEN="${MINI_ROUTER_TURSO_TOKEN:-}"
@@ -46,7 +47,7 @@ JWT_SECRET="${MINI_ROUTER_JWT_SECRET:-}"
 REQUIRE_API_KEY="${MINI_ROUTER_REQUIRE_API_KEY:-false}"
 CPU_LIMIT="${MINI_ROUTER_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${MINI_ROUTER_MEMORY_LIMIT:-96m}"
-CONFIG_REV="2"   # bump when the docker run flags below change
+CONFIG_REV="3"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -141,7 +142,7 @@ else
   ENV_FILE="$(umask 077; mktemp)"
   trap 'rm -f "$ENV_FILE"' EXIT
   {
-    echo "PORT=${PORT}"
+    echo "PORT=${CPORT}"
     echo "HOSTNAME=0.0.0.0"
     echo "MINI_ROUTER_WORKERS=1"
     echo "LOG_LEVEL=warn"
@@ -168,7 +169,7 @@ else
   step "starting ${CONTAINER_NAME} (data: ${MEDIA})"
   "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    -p "${BIND}:${PORT}:${PORT}" \
+    -p "${BIND}:${PORT}:${CPORT}" \
     --env-file "$ENV_FILE" \
     --label "mini-router.config=${WANT_SUM}" \
     "${DATA_OPTS[@]}" "${MID_OPTS[@]}" \
@@ -233,7 +234,7 @@ fi
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 echo "[>] summary"
 echo "[*] image: ${IMAGE}"
-echo "[*] published: ${BIND}:${PORT} (container port ${PORT}) | dashboard: /dashboard | api: /v1"
+echo "[*] published: ${BIND}:${PORT} (container port ${CPORT}) | dashboard: /dashboard | api: /v1"
 echo "[*] storage: $([ "$TURSO_ONLY" = "1" ] && echo "RAM + Turso (no SD writes)" || echo "volume ${VOLUME_NAME}")"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids 64"
 echo "[*] memory: ${MEM:-unknown}"

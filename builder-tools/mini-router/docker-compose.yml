@@ -1,5 +1,5 @@
 # Build from source (the Dockerfile clones mini-router): docker compose up -d --build
-# Dashboard: http://<host>:20128/dashboard   API: http://<host>:20128/v1
+# Dashboard: http://<host>:20129/dashboard   API: http://<host>:20129/v1
 services:
   mini-router:
     build: .
@@ -7,8 +7,8 @@ services:
     container_name: mini-router
     restart: unless-stopped
     ports:
-      # Loopback only. Use "<tailscale-ip>:20128:20128" to reach it remotely.
-      - "127.0.0.1:20128:20128"
+      # Loopback only. Use "<tailscale-ip>:20129:20128" to reach it remotely.
+      - "127.0.0.1:20129:20128"
     env_file: .env
     environment:
       MINI_ROUTER_WORKERS: "1"

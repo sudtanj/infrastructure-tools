@@ -21,9 +21,9 @@ docker compose -f docker-compose.hub.yml up -d     # published image
 docker compose up -d --build                       # or build from source
 ```
 
-Open `http://<host>:20128/dashboard` (password: `INITIAL_PASSWORD`), add
+Open `http://<host>:20129/dashboard` (password: `INITIAL_PASSWORD`), add
 provider connections and an API key, then point clients at
-`http://<host>:20128/v1` (OpenAI) or `http://<host>:20128` (Anthropic).
+`http://<host>:20129/v1` (OpenAI) or `http://<host>:20129` (Anthropic).
 
 On the Orange Pi, [`bash-scripts/init-mini-router.sh`](../../bash-scripts/init-mini-router.sh)
 does the same with tighter limits (runnable from the Orange Pi workflow).
