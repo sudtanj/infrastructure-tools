@@ -2,7 +2,7 @@
 # bash-scripts/init-mini-router.sh
 # Idempotent deploy/update of mini-router (sudtanj/mini-router, see builder-tools/mini-router/)
 # on a small board, tuned for the Orange Pi Zero 3 (4x A53, 1 GB RAM, SD card):
-#   - host networking (no docker-proxy process, no NAT hop)
+#   - published only on 127.0.0.1 by default (not on the LAN); MINI_ROUTER_BIND opens it deliberately
 #   - read-only rootfs, all caps dropped, hard RAM cap without swap, low CPU weight
 #   - 1 tokio worker, warn-level logs capped at 1 MB
 #   - with Turso configured: TURSO_ONLY by default, so the database lives in RAM and
@@ -20,6 +20,10 @@
 #   MINI_ROUTER_INITIAL_PASSWORD  dashboard password until one is saved (default 123456)
 #   MINI_ROUTER_JWT_SECRET        fixed dashboard session secret
 #   MINI_ROUTER_REQUIRE_API_KEY   true | false, default false
+#   MINI_ROUTER_BIND              host address to publish on, default 127.0.0.1 (loopback only).
+#                                 Use the Tailscale IP (tailscale ip -4) or a LAN IP to reach it remotely;
+#                                 0.0.0.0 exposes it on every interface and is refused unless
+#                                 MINI_ROUTER_ALLOW_ANY=1.
 #   MINI_ROUTER_PORT              default 20128
 #   MINI_ROUTER_IMAGE             default sudtanj/mini-router:latest
 #   MINI_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
@@ -31,6 +35,7 @@ CONTAINER_NAME="mini-router"
 VOLUME_NAME="mini-router-data"
 IMAGE="${MINI_ROUTER_IMAGE:-sudtanj/mini-router:latest}"
 PORT="${MINI_ROUTER_PORT:-20128}"
+BIND="${MINI_ROUTER_BIND:-127.0.0.1}"
 TURSO_URL="${MINI_ROUTER_TURSO_URL:-}"
 TURSO_TOKEN="${MINI_ROUTER_TURSO_TOKEN:-}"
 if [ -n "$TURSO_URL" ] && [ -n "$TURSO_TOKEN" ]; then DEF_ONLY=1; else DEF_ONLY=0; fi
@@ -41,7 +46,7 @@ JWT_SECRET="${MINI_ROUTER_JWT_SECRET:-}"
 REQUIRE_API_KEY="${MINI_ROUTER_REQUIRE_API_KEY:-false}"
 CPU_LIMIT="${MINI_ROUTER_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${MINI_ROUTER_MEMORY_LIMIT:-96m}"
-CONFIG_REV="1"   # bump when the docker run flags below change
+CONFIG_REV="2"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -69,6 +74,10 @@ case "$(uname -m)" in
   *) fail "unsupported arch $(uname -m); the image is built for amd64 and arm64 only" ;;
 esac
 [[ "$PORT" =~ ^[0-9]{2,5}$ ]] || fail "MINI_ROUTER_PORT must be a number"
+[[ "$BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "MINI_ROUTER_BIND must be an IPv4 address"
+if [ "$BIND" = "0.0.0.0" ] && [ "${MINI_ROUTER_ALLOW_ANY:-0}" != "1" ]; then
+  fail "MINI_ROUTER_BIND=0.0.0.0 exposes the router on every interface; set MINI_ROUTER_ALLOW_ANY=1 if that is intended"
+fi
 case "$TURSO_ONLY" in 0|1) ;; *) fail "MINI_ROUTER_TURSO_ONLY must be 0 or 1" ;; esac
 if [ "$TURSO_ONLY" = "1" ] && { [ -z "$TURSO_URL" ] || [ -z "$TURSO_TOKEN" ]; }; then
   fail "MINI_ROUTER_TURSO_ONLY=1 needs MINI_ROUTER_TURSO_URL and MINI_ROUTER_TURSO_TOKEN"
@@ -106,7 +115,7 @@ ok "image ready"
 # 3. Skip the restart when nothing changed
 # ---------------------------------------------------------------------------
 # Hash of every setting (secrets included, never printed), stored as a label.
-WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$TURSO_URL" "$TURSO_TOKEN" "$TURSO_ONLY" "$TURSO_SYNC_SECS" \
+WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$BIND" "$TURSO_URL" "$TURSO_TOKEN" "$TURSO_ONLY" "$TURSO_SYNC_SECS" \
   "$INITIAL_PASSWORD" "$JWT_SECRET" "$REQUIRE_API_KEY" "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" \
   | sha256sum | awk '{print $1}')"
 HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "mini-router.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
@@ -159,7 +168,7 @@ else
   step "starting ${CONTAINER_NAME} (data: ${MEDIA})"
   "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    --network host \
+    -p "${BIND}:${PORT}:${PORT}" \
     --env-file "$ENV_FILE" \
     --label "mini-router.config=${WANT_SUM}" \
     "${DATA_OPTS[@]}" "${MID_OPTS[@]}" \
@@ -202,16 +211,17 @@ if [ "$STATE" != "running" ] || [ "${RESTARTS:-0}" -gt "${RESTARTS_BEFORE:-0}" ]
 fi
 
 PROBE=""
+PROBE_HOST="$BIND"; [ "$BIND" = "0.0.0.0" ] && PROBE_HOST=127.0.0.1
 if command -v curl >/dev/null 2>&1; then
-  PROBE="$(curl -fsS -m 5 "http://127.0.0.1:${PORT}/api/info" 2>/dev/null || true)"
+  PROBE="$(curl -fsS -m 5 "http://${PROBE_HOST}:${PORT}/api/info" 2>/dev/null || true)"
 elif command -v wget >/dev/null 2>&1; then
-  PROBE="$(wget -qO- -T 5 "http://127.0.0.1:${PORT}/api/info" 2>/dev/null || true)"
+  PROBE="$(wget -qO- -T 5 "http://${PROBE_HOST}:${PORT}/api/info" 2>/dev/null || true)"
 fi
 if [ -n "$PROBE" ]; then
   ok "HTTP answering on port ${PORT}"
 elif command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
   show_logs 20 '[!]  ' >&2
-  fail "no HTTP answer on 127.0.0.1:${PORT}/api/info"
+  fail "no HTTP answer on ${PROBE_HOST}:${PORT}/api/info"
 else
   warn "no curl/wget on the host, skipped the HTTP probe"
 fi
@@ -223,7 +233,7 @@ fi
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 echo "[>] summary"
 echo "[*] image: ${IMAGE}"
-echo "[*] port: ${PORT} (host network) | dashboard: /dashboard | api: /v1"
+echo "[*] published: ${BIND}:${PORT} (container port ${PORT}) | dashboard: /dashboard | api: /v1"
 echo "[*] storage: $([ "$TURSO_ONLY" = "1" ] && echo "RAM + Turso (no SD writes)" || echo "volume ${VOLUME_NAME}")"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids 64"
 echo "[*] memory: ${MEM:-unknown}"

@@ -6,7 +6,8 @@ services:
     container_name: mini-router
     restart: unless-stopped
     ports:
-      - "20128:20128"
+      # Loopback only. Use "<tailscale-ip>:20128:20128" to reach it remotely.
+      - "127.0.0.1:20128:20128"
     env_file: .env
     environment:
       MINI_ROUTER_WORKERS: "1"

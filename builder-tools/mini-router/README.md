@@ -50,3 +50,13 @@ nothing needs persisting; mount a tmpfs there instead of a volume.
 
 The Dockerfile clones the source and cross-compiles on the build platform
 (no QEMU for the Rust compile). `MINI_ROUTER_REF` pins a tag or branch.
+
+## Network exposure
+
+Compose and `bash-scripts/init-mini-router.sh` publish the port on `127.0.0.1`
+only, so the router is not reachable from the LAN by default. To reach it
+remotely, publish on a specific address instead of opening every interface:
+the Tailscale IP (`MINI_ROUTER_BIND=$(tailscale ip -4)`) or `tailscale serve`.
+Inside the container the router binds `0.0.0.0`; only the published host
+address matters. Requests through Docker's bridge do not count as loopback, so
+the dashboard login and API keys are always enforced.
