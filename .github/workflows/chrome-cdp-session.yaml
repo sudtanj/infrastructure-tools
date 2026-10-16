@@ -56,6 +56,9 @@ name: "Chrome CDP session over Tailscale"
 #   CDP), or press Cancel on the run. Both shut Chrome down cleanly and save
 #   the profile; so does reaching `max_minutes`. Only the 360 minute job
 #   timeout (or cancelling twice) loses the session.
+#   With `vnc_disconnect_minutes` (default 2), it also stops and saves once a
+#   VNC viewer has connected and then every viewer has been gone that long.
+#   A run nobody opens over VNC (agent-only, CDP) is not affected.
 #
 # SECRETS
 #   PRIVATE_REPO                   owner/name of the private repo
@@ -91,6 +94,10 @@ on:
         description: 'Browser language (e.g. en-US, id-ID)'
         type: string
         default: 'en-US'
+      vnc_disconnect_minutes:
+        description: 'Stop and save this many minutes after the last VNC viewer leaves (0 = never)'
+        type: number
+        default: 2
 
 permissions:
   contents: read
@@ -245,6 +252,7 @@ jobs:
         id: chrome
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
+          VNC_DISCONNECT_MINUTES: ${{ inputs.vnc_disconnect_minutes }}
           USE_EXIT_NODE: ${{ inputs.use_exit_node }}
           EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
           TZ: ${{ inputs.timezone }}
@@ -349,6 +357,11 @@ jobs:
           curl -fs http://127.0.0.1:9222/json/version | jq -r '.Browser'
           echo "Chrome ready. Open about:blank#stop-session to stop (limit ${max} minutes)."
 
+          VNC_DISCONNECT_MINUTES="${VNC_DISCONNECT_MINUTES%%.*}"
+          [[ "$VNC_DISCONNECT_MINUTES" =~ ^[0-9]+$ ]] || VNC_DISCONNECT_MINUTES=0
+          vnc_grace=$(( VNC_DISCONNECT_MINUTES * 60 ))
+          vnc_seen=false
+          vnc_gone_at=""
           deadline=$((SECONDS + max * 60))
           while [ "$SECONDS" -lt "$deadline" ]; do
             if curl -fs http://127.0.0.1:9222/json/list 2>/dev/null | jq -e 'any(.[]; .url | endswith("#stop-session"))' >/dev/null; then
@@ -358,6 +371,25 @@ jobs:
                 | while read -r tid; do curl -fs "http://127.0.0.1:9222/json/close/${tid}" >/dev/null || true; done
               sleep 2
               break
+            fi
+            # Once someone has watched over VNC, leaving (every viewer gone for
+            # the grace period) ends the session. Viewers arrive through
+            # Tailscale serve, so they show up as connections to localhost:5900.
+            if [ "$vnc_grace" -gt 0 ]; then
+              viewers="$(ss -Htn state established '( sport = :5900 )' | wc -l)"
+              if [ "$viewers" -gt 0 ]; then
+                [ "$vnc_seen" = true ] || echo "VNC viewer connected."
+                vnc_seen=true
+                vnc_gone_at=""
+              elif [ "$vnc_seen" = true ]; then
+                if [ -z "$vnc_gone_at" ]; then
+                  echo "VNC viewer left; stopping in ${VNC_DISCONNECT_MINUTES} minutes unless one reconnects."
+                  vnc_gone_at=$SECONDS
+                elif [ $((SECONDS - vnc_gone_at)) -ge "$vnc_grace" ]; then
+                  echo "No VNC viewer for ${VNC_DISCONNECT_MINUTES} minutes."
+                  break
+                fi
+              fi
             fi
             # Closing the last window over VNC (or Browser.close over CDP) exits
             # Chrome; bring it back so the session stays usable.
