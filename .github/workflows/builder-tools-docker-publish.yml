@@ -123,6 +123,12 @@ jobs:
       fail-fast: false
       matrix:
         folder: ${{ fromJson(needs.discover.outputs.folders) }}
+    # One build per folder at a time: two runs started together (a push plus a
+    # manual dispatch) would otherwise both pick the same next version tag and
+    # the second would fail pushing it.
+    concurrency:
+      group: builder-tools-${{ matrix.folder }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
