@@ -9,6 +9,8 @@ CODEX_BASE_URL="${CODEX_BASE_URL:-}"
 CODEX_API_KEY="${CODEX_API_KEY:-}"
 CODEX_MODEL="${CODEX_MODEL:-}"
 CODEX_MAX_TOKEN="${CODEX_MAX_TOKEN:-8192}"
+# Claude Code reply cap; 8192 cut off long replies ("exceeded the 8192 output token maximum").
+CLAUDE_MAX_OUTPUT_TOKENS="${CLAUDE_MAX_OUTPUT_TOKENS:-32000}"
 GH_TOKEN="${GH_TOKEN:-}"
 
 # Claude Code auth (optional): OAuth token, API key, or BYOK gateway.
@@ -88,7 +90,7 @@ NEW_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || echo "unknown
 
 # --- Skip restart if nothing changed ---
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
-  "$CODEX_MAX_TOKEN" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
+  "$CODEX_MAX_TOKEN" "$CLAUDE_MAX_OUTPUT_TOKENS" "$GH_TOKEN" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
   "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" "$NODE_HEAP_MB" "$CONFIG_REV" "$DNS1" "$DNS2" \
   | sha256sum | cut -d' ' -f1)
@@ -150,7 +152,7 @@ docker run -d --name "$CONTAINER_NAME" --restart always \
   -e DISABLE_ERROR_REPORTING=1 \
   -e DISABLE_AUTOUPDATER=1 \
   -e DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 \
-  -e CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 \
+  -e CLAUDE_CODE_MAX_OUTPUT_TOKENS="$CLAUDE_MAX_OUTPUT_TOKENS" \
   -e BASH_DEFAULT_TIMEOUT_MS=120000 \
   -e BASH_MAX_TIMEOUT_MS=600000 \
   ${claude_env[@]+"${claude_env[@]}"} \
