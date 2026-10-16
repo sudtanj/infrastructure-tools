@@ -26,9 +26,10 @@ name: "Chrome CDP session over Tailscale"
 # LOOKING LIKE A PERSON, NOT A BOT
 #   This is a real, headful Google Chrome (not Chromium, not headless) with a
 #   persistent profile, so it already avoids most tells. On top of that:
-#   - `--disable-blink-features=AutomationControlled` keeps
-#     navigator.webdriver false, and no `--enable-automation` is passed, so
-#     there is no "controlled by automated software" bar.
+#   - No `--enable-automation` is passed, so navigator.webdriver stays false
+#     and there is no "controlled by automated software" bar. Do not add
+#     `--disable-blink-features=AutomationControlled`: it is unnecessary here
+#     and makes Chrome show an "unsupported command-line flag" warning bar.
 #   - Exit node: the runner's IP is a well-known Azure datacenter range, the
 #     biggest giveaway. With the TAILSCALE_EXIT_NODE secret set (the same one
 #     typescript-worker-run uses: `tag:name`, a MagicDNS name or a 100.x IP)
@@ -269,7 +270,6 @@ jobs:
               --remote-debugging-port=9222 \
               --remote-allow-origins='*' \
               --password-store=basic \
-              --disable-blink-features=AutomationControlled \
               --lang="$LOCALE" \
               --accept-lang="$LOCALE" \
               --restore-last-session \
