@@ -47,7 +47,7 @@ JWT_SECRET="${MINI_ROUTER_JWT_SECRET:-}"
 REQUIRE_API_KEY="${MINI_ROUTER_REQUIRE_API_KEY:-false}"
 CPU_LIMIT="${MINI_ROUTER_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${MINI_ROUTER_MEMORY_LIMIT:-96m}"
-CONFIG_REV="4"   # bump when the docker run flags below change
+CONFIG_REV="5"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -235,6 +235,7 @@ MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAM
 echo "[>] summary"
 echo "[*] image: ${IMAGE}"
 echo "[*] published: ${BIND}:${PORT} (container port ${CPORT}) | dashboard: /dashboard | api: /v1"
+echo "[*] docker port (dots shown as _ because the log sanitizer hides IPs): $("${DOCKER[@]}" port "$CONTAINER_NAME" 2>/dev/null | tr "\n." " _")"
 echo "[*] storage: $([ "$TURSO_ONLY" = "1" ] && echo "RAM + Turso (no SD writes)" || echo "volume ${VOLUME_NAME}")"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids 64"
 echo "[*] memory: ${MEM:-unknown}"
