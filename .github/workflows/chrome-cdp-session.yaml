@@ -1,0 +1,359 @@
+name: "Chrome CDP session over Tailscale"
+
+# ---------------------------------------------------------------------------
+# Starts the latest stable Google Chrome on demand and keeps it reachable on
+# the tailnet as `chrome-cdp`, so a person and an agent or script can share
+# the same logged-in browser:
+#   CDP      <tailnet IP>:9222   (Playwright connectOverCDP, Puppeteer,
+#                                 chrome-devtools-mcp, browser-use, ...)
+#   VNC      chrome-cdp:5900     (watch or click the browser window)
+#
+# Use the 100.x IP for CDP, not the MagicDNS name: Chrome's DevTools HTTP
+# endpoint rejects requests whose Host header is not an IP or `localhost`.
+# CDP has no authentication of its own; anyone who can reach port 9222 on the
+# tailnet controls the browser, so restrict TAILSCALE_TAGS with ACLs.
+#
+# The Chrome profile (cookies, logins, local storage, open tabs) is encrypted
+# and stored as release assets on the PRIVATE repo, under the release tag
+# `chrome-cdp-state`, and restored on the next run. Nothing is kept in this
+# public repo's cache or artifacts.
+#
+# The Tailscale node identity (`tailscaled.state.enc`, same release) is kept
+# too, so every run is the same non-ephemeral machine with the same 100.x IP
+# and MagicDNS name. Deleting the machine in the Tailscale admin console makes
+# the next run join as a new machine with a new IP.
+#
+# LOOKING LIKE A PERSON, NOT A BOT
+#   This is a real, headful Google Chrome (not Chromium, not headless) with a
+#   persistent profile, so it already avoids most tells. On top of that:
+#   - `--disable-blink-features=AutomationControlled` keeps
+#     navigator.webdriver false, and no `--enable-automation` is passed, so
+#     there is no "controlled by automated software" bar.
+#   - `exit_node`: the runner's IP is a well-known Azure datacenter range, the
+#     biggest giveaway. Set it to a tailnet device at home (approved as an
+#     exit node) and the browser's web traffic leaves from that residential IP.
+#     Saving the profile still goes out directly.
+#   - `timezone` / `locale` should match where that IP is, or the mismatch is
+#     itself a signal.
+#   Left to the client: Playwright and Puppeteer send `Runtime.enable`, which
+#   some anti-bot scripts detect. Use patchright, rebrowser-patches or
+#   nodriver/zendriver against this endpoint to avoid it. WebGL reports a
+#   software renderer (no GPU on the runner), which strict checks may notice.
+#
+# STOP IT FROM THE BROWSER, NOT THE CANCEL BUTTON
+#   Open any tab at   about:blank#stop-session
+#   (in the address bar over VNC, or `Target.createTarget` / a new page over
+#   CDP). A cancelled run (or one killed by the job timeout) uploads nothing;
+#   the next run resumes from the previous save. Hitting `max_minutes` does
+#   save.
+#
+# SECRETS
+#   PRIVATE_REPO                   owner/name of the private repo
+#   PRIVATE_REPO_TOKEN             needs Contents: read AND write on it
+#                                  (releases), not just read
+#   TAILSCALE_OAUTH_CLIENT_SECRET  OAuth client (tskey-client-...)
+#   TAILSCALE_TAGS                 e.g. "tag:ci"
+#   STATE_KEY                      passphrase that encrypts the saved profile
+#   VNC_PASSWORD                   VNC password (only the first 8 chars count)
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_minutes:
+        description: 'Stop and save after this many minutes if nobody stops it (max 330)'
+        type: number
+        default: 120
+      fresh:
+        description: 'Ignore the saved profile; the next save replaces it'
+        type: boolean
+        default: false
+      exit_node:
+        description: 'Tailnet exit node (name or 100.x IP) for browser traffic; empty = runner IP'
+        type: string
+        default: ''
+      timezone:
+        description: 'IANA time zone the browser reports, matching the exit IP (e.g. Asia/Jakarta)'
+        type: string
+        default: 'UTC'
+      locale:
+        description: 'Browser language (e.g. en-US, id-ID)'
+        type: string
+        default: 'en-US'
+
+permissions:
+  contents: read
+
+# One browser at a time: two runs would race to save over each other's state.
+concurrency:
+  group: chrome-cdp-session
+  cancel-in-progress: false
+
+env:
+  STATE_TAG: chrome-cdp-state
+  PROFILE_DIR: /home/runner/chrome-profile
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+
+    steps:
+      - name: Check secrets
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in PRIVATE_REPO GH_TOKEN TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS STATE_KEY VNC_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error title=Missing secrets::Not set: ${missing[*]}"
+            exit 1
+          fi
+          # gh error text can include the repo path; keep it out of the public log.
+          echo "::add-mask::${PRIVATE_REPO}"
+
+      - name: Prepare state release
+        run: |
+          set -euo pipefail
+          if ! gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1; then
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Chrome CDP state" \
+              --notes "Encrypted Chrome profile saved by infrastructure-tools chrome-cdp-session." >/dev/null
+          fi
+          # Not `|| true`: a failed listing must stop the run, or a clean
+          # profile (or a new Tailscale node) would later be saved over the
+          # good state.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' > /tmp/state-assets.txt
+
+      # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`. The
+      # manifest is uploaded last, so only sets with one are complete.
+      - name: Restore saved profile
+        if: ${{ !inputs.fresh }}
+        run: |
+          set -euo pipefail
+          names="$(cat /tmp/state-assets.txt)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "No saved profile; starting clean."
+            exit 0
+          fi
+          mkdir -p /tmp/state "$PROFILE_DIR"
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved profile restored."
+
+      - name: Install latest Chrome, virtual display and VNC
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The runner image ships a Chrome that can be weeks old; take today's stable.
+          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox fonts-noto-color-emoji fonts-noto-cjk >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 &
+          sleep 2
+          # A window manager so dialogs, popups and maximise behave over VNC.
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          mkdir -p ~/.vnc
+          x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
+          # localhost only; Tailscale serve is the sole way in.
+          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Join the tailnet
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
+
+          # Same machine identity as last run means the same tailnet IP.
+          if grep -qx 'tailscaled.state.enc' /tmp/state-assets.txt; then
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p tailscaled.state.enc -D /tmp
+            sudo systemctl stop tailscaled
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/tailscaled.state.enc \
+              | sudo tee /var/lib/tailscale/tailscaled.state >/dev/null
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            sudo systemctl start tailscaled
+            rm /tmp/tailscaled.state.enc
+            echo "Tailscale identity restored."
+          else
+            echo "No saved Tailscale identity; joining as a new machine."
+          fi
+
+          # The auth key is only used when the restored identity is missing or
+          # was deleted. Not ephemeral, so the machine and its IP outlive the run.
+          secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+          sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
+            --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp
+
+          # Saved straight away, so a cancelled run still keeps the identity.
+          sudo cat /var/lib/tailscale/tailscaled.state \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -out /tmp/tailscaled.state.enc
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/tailscaled.state.enc --clobber
+          rm /tmp/tailscaled.state.enc
+          # Tailnet only: neither port is published on the runner's public interface.
+          sudo tailscale serve --bg --tcp 9222 tcp://localhost:9222 >/dev/null
+          sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
+          echo "Joined the tailnet as chrome-cdp."
+
+      - name: Run Chrome until stopped
+        env:
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+          EXIT_NODE: ${{ inputs.exit_node }}
+          TZ: ${{ inputs.timezone }}
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          set -uo pipefail
+          # Leave room under the 360 minute job limit to pack and upload the profile.
+          max="${MAX_MINUTES:-120}"
+          if [ "$max" -gt 330 ]; then max=330; fi
+          mkdir -p "$PROFILE_DIR"
+          export LANG="${LOCALE//-/_}.UTF-8" LANGUAGE="${LOCALE//-/_}"
+
+          if [ -n "$EXIT_NODE" ]; then
+            # LAN access keeps the runner's own localhost/VNC/CDP plumbing working.
+            if ! sudo tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access; then
+              echo "::error title=Exit node::Could not use the exit node; is it approved and allowed by ACLs?"
+              exit 1
+            fi
+            sleep 3
+            # Refuse to browse from the datacenter IP when a home IP was asked for.
+            if ! curl -fsS --max-time 15 https://ipinfo.io/org >/dev/null; then
+              echo "::error title=Exit node::No internet through the exit node."
+              exit 1
+            fi
+            echo "Browser traffic goes through the exit node."
+          fi
+
+          start_chrome() {
+            # A profile copied from another machine still holds its lock.
+            rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+            # --password-store=basic: no keyring on the runner, and cookies
+            # must decrypt the same way on the next runner.
+            # CDP listens on localhost; Tailscale serve forwards it.
+            setsid nohup google-chrome \
+              --user-data-dir="$PROFILE_DIR" \
+              --remote-debugging-address=127.0.0.1 \
+              --remote-debugging-port=9222 \
+              --remote-allow-origins='*' \
+              --password-store=basic \
+              --disable-blink-features=AutomationControlled \
+              --lang="$LOCALE" \
+              --accept-lang="$LOCALE" \
+              --restore-last-session \
+              --no-first-run \
+              --no-default-browser-check \
+              --disable-dev-shm-usage \
+              --start-maximized \
+              --window-position=0,0 \
+              --window-size=1920,1080 \
+              >/tmp/chrome.log 2>&1 &
+            chrome_pid=$!
+            for _ in $(seq 1 30); do
+              curl -fs http://127.0.0.1:9222/json/version >/dev/null && return 0
+              sleep 1
+            done
+            echo "::warning::Chrome did not open CDP within 30s."
+          }
+
+          start_chrome
+          curl -fs http://127.0.0.1:9222/json/version | jq -r '.Browser'
+          echo "Chrome ready. Open about:blank#stop-session to stop (limit ${max} minutes)."
+
+          deadline=$((SECONDS + max * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -fs http://127.0.0.1:9222/json/list 2>/dev/null | jq -e 'any(.[]; .url | endswith("#stop-session"))' >/dev/null; then
+              echo "Stop tab found."
+              # Close it so the restored session does not stop the next run.
+              curl -fs http://127.0.0.1:9222/json/list | jq -r '.[] | select(.url | endswith("#stop-session")) | .id' \
+                | while read -r tid; do curl -fs "http://127.0.0.1:9222/json/close/${tid}" >/dev/null || true; done
+              sleep 2
+              break
+            fi
+            # Closing the last window over VNC (or Browser.close over CDP) exits
+            # Chrome; bring it back so the session stays usable.
+            if ! kill -0 "$chrome_pid" 2>/dev/null; then
+              echo "Chrome exited; restarting."
+              start_chrome
+            fi
+            sleep 10
+          done
+
+          # A clean exit flushes cookies and the session file to disk.
+          pkill -TERM -f -- "--user-data-dir=$PROFILE_DIR" || true
+          for _ in $(seq 1 30); do
+            pgrep -f -- "--user-data-dir=$PROFILE_DIR" >/dev/null || break
+            sleep 1
+          done
+          pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
+          echo "Chrome stopped."
+          # Upload the profile straight from the runner, not through the home link.
+          if [ -n "$EXIT_NODE" ]; then sudo tailscale set --exit-node= || true; fi
+
+      - name: Save profile
+        run: |
+          set -euo pipefail
+          id="${{ github.run_id }}"
+          mkdir -p /tmp/save
+          cd /tmp/save
+          # Caches are rebuilt on demand; leaving them out keeps the save small.
+          # Release assets cap at 2 GiB each.
+          tar -C "$PROFILE_DIR" -c --zstd \
+            --exclude='Singleton*' \
+            --exclude='*/Cache' \
+            --exclude='*/Code Cache' \
+            --exclude='*/GPUCache' \
+            --exclude='*/DawnGraphiteCache' \
+            --exclude='*/DawnWebGPUCache' \
+            --exclude='*/Service Worker/CacheStorage' \
+            --exclude='*/Service Worker/ScriptCache' \
+            --exclude='GrShaderCache' \
+            --exclude='GraphiteDawnCache' \
+            --exclude='ShaderCache' \
+            --exclude='component_crx_cache' \
+            --exclude='extensions_crx_cache' \
+            --exclude='Crashpad' \
+            . \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | split -b 1900M -d -a 3 - "state-${id}.part-"
+          sha256sum state-"${id}".part-* > "state-${id}.sha256"
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1 || \
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Chrome CDP state" \
+              --notes "Encrypted Chrome profile saved by infrastructure-tools chrome-cdp-session." >/dev/null
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          # Old sets go only after the new manifest is up, so a failed upload
+          # never loses the last good save. tailscaled.state.enc is kept.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
+            | { grep '^state-' || true; } \
+            | { grep -v "^state-${id}\." || true; } \
+            | while read -r name; do
+                gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
+              done
+          echo "Profile saved."
+
+      # `down`, not `logout`: logout would expire the saved identity and the
+      # next run would come back as a new machine with a new IP.
+      - name: Disconnect from the tailnet
+        if: always()
+        run: sudo tailscale down >/dev/null 2>&1 || true
