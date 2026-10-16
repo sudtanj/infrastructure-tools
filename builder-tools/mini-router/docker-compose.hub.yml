@@ -1,265 +1,30 @@
-# mini-router — one OpenAI- and Anthropic-compatible endpoint over every LLM
-# provider you already pay for.
-#
-#   cp .env.example .env     # provider keys + the key your own apps will use
-#   $EDITOR docker-compose.hub.yml     # uncomment the pool matching your keys
-#   docker compose -f docker-compose.hub.yml up -d
-#
-# Then point any OpenAI client at http://localhost:8080/v1 and any Anthropic
-# client at http://localhost:8080.
-#
-# This is a full reference: everything mini-router reads is shown, with the
-# defaults noted on the settings left commented. There is no config file --
-# this `environment:` block is the whole of it. `--help` lists every variable:
-#
-#   docker compose -f docker-compose.hub.yml run --rm mini-router --help
-#
-# and `--check` prints what your settings actually resolved to, without
-# starting a server:
-#
-#   docker compose -f docker-compose.hub.yml run --rm mini-router --check
-
+# Published image: docker compose -f docker-compose.hub.yml up -d
+# Dashboard: http://<host>:20128/dashboard   API: http://<host>:20128/v1
 services:
   mini-router:
-    # Multi-arch (linux/amd64 + linux/arm64), so this runs unchanged on an
-    # Orange Pi Zero 3. Pin a version instead of :latest for reproducible
-    # pulls -- https://hub.docker.com/r/sudtanj/mini-router/tags
     image: sudtanj/mini-router:latest
-    pull_policy: always
+    container_name: mini-router
     restart: unless-stopped
-
     ports:
-      - "8080:8080"
-
-    env_file:
-      # Secrets live here; structure lives below. Copy .env.example first.
-      - .env
-
+      - "20128:20128"
+    env_file: .env
     environment:
-      # ======================================================================
-      # 1. Providers you have an account with
-      # ======================================================================
-      # A key on its own is enough for these ten: mini-router already knows
-      # each one's URL and which dialect it speaks. Delete the lines you do
-      # not use -- an empty value is treated as unset, so they are harmless.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
-
-      # Autodetection from those keys only runs when no provider is spelled
-      # out below, so a stray OPENAI_API_KEY meant for some other tool cannot
-      # quietly add one.
-      #
-      # The catch: the moment you define a custom provider in section 2, the
-      # keys above stop registering. If you want both -- your own proxy AND
-      # the well-known providers -- turn autodetection back on explicitly:
-      # MINI_ROUTER_AUTODETECT: "true"
-
-      # ======================================================================
-      # 2. A custom provider: a proxy, a gateway, a self-hosted box
-      # ======================================================================
-      # <NAME> is yours to pick -- uppercase here, and it is the name you use
-      # in a pool below (MYPROXY -> myproxy). Underscores become dashes.
-      #
-      # Take all three from .env rather than writing one literally: a literal
-      # value beside empty neighbours leaves the provider half-defined and
-      # mini-router refuses to start with
-      #   provider "myproxy" needs a URL
-      # With all three empty the provider simply does not exist.
-      # Defining anything here switches autodetection off, so the keys in
-      # section 1 stop registering on their own. Set MINI_ROUTER_AUTODETECT
-      # to "true" above if you want your proxy alongside them.
-      MINI_ROUTER_PROVIDER_MYPROXY_URL: ${MYPROXY_URL:-}
-      MINI_ROUTER_PROVIDER_MYPROXY_PROTOCOL: ${MYPROXY_PROTOCOL:-}
-      MINI_ROUTER_PROVIDER_MYPROXY_API_KEY: ${MYPROXY_API_KEY:-}
-
-      # The rest of what a provider can carry, all optional:
-      # MINI_ROUTER_PROVIDER_MYPROXY_API_KEY_ENV: SOME_OTHER_VAR
-      # MINI_ROUTER_PROVIDER_MYPROXY_MAX_CONCURRENCY: "8"   # default 8
-      # MINI_ROUTER_PROVIDER_MYPROXY_WEIGHT: "1"            # weighted strategy
-      # MINI_ROUTER_PROVIDER_MYPROXY_FALLBACK_ONLY: "false" # hold in reserve
-      # MINI_ROUTER_PROVIDER_MYPROXY_MODELS: |              # default: discover
-      #   gpt-4o-mini
-      #   gpt-4o
-      # MINI_ROUTER_PROVIDER_MYPROXY_HEADERS: |             # k=v per line
-      #   HTTP-Referer=https://my.lan
-      #   X-Title=mini-router
-
-      # A local model server is the same thing with no key:
-      # MINI_ROUTER_PROVIDER_LOCAL_URL: http://ollama:11434/v1
-      # MINI_ROUTER_PROVIDER_LOCAL_MAX_CONCURRENCY: "1"
-
-      # Priority order for requests naming a bare model id rather than a pool.
-      # Alphabetical by default, so it is at least stable.
-      # MINI_ROUTER_PROVIDER_ORDER: |
-      #   myproxy
-      #   openai
-
-      # ======================================================================
-      # 3. Pools — one client-facing name over several provider models
-      # ======================================================================
-      # Order is priority: the first member serves, and anything that fails
-      # spills to the next -- across providers and across dialects.
-      #
-      # Written one per line with YAML's `|`, so the order reads top to
-      # bottom. A real YAML list (`- openai:gpt-4o-mini`) will not work: a
-      # compose `environment:` value has to become a process environment
-      # variable, and those are strings, so compose rejects a list. `|` keeps
-      # it one string while still giving a line per member. Commas work too.
-      #
-      # Uncomment the variant matching the keys you filled in -- a pool naming
-      # a provider you have no key for stops mini-router from starting:
-      #   pool "fast" refers to unknown upstream "anthropic"
-      # Leaving every pool commented is fine: ask for real model names and
-      # routing still works.
-      #
-      # With both an OpenAI and an Anthropic key:
-      # MINI_ROUTER_POOL_FAST: |
-      #   openai:gpt-4o-mini
-      #   anthropic:claude-haiku-4-5
-      # MINI_ROUTER_POOL_SMART: |
-      #   anthropic:claude-sonnet-4-5
-      #   openai:gpt-4o
-      #
-      # With only an OpenAI key:
-      # MINI_ROUTER_POOL_FAST: |
-      #   openai:gpt-4o-mini
-      # MINI_ROUTER_POOL_SMART: |
-      #   openai:gpt-4o
-      #
-      # Through your own proxy first, cloud as backup:
-      # MINI_ROUTER_POOL_FAST: |
-      #   myproxy:gpt-4o-mini
-      #   openai:gpt-4o-mini
-      #
-      # Per-pool overrides:
-      # MINI_ROUTER_POOL_FAST_STRATEGY: round-robin   # overrides the global
-      # MINI_ROUTER_POOL_FAST_WEIGHTS: "3,1"         # one per member
-      # MINI_ROUTER_POOL_FAST_DESCRIPTION: Cheap and quick
-
-      # Apps with a hard-coded model name reach a pool through an alias. Only
-      # set this once the pool it points at exists.
-      # MINI_ROUTER_ALIASES: |
-      #   gpt-3.5-turbo=fast
-      #   gpt-4o-mini=fast
-      #   claude-3-5-haiku-20241022=fast
-
-      # ======================================================================
-      # 4. Routing
-      # ======================================================================
-      # priority     declaration order; first healthy member serves (default)
-      # round-robin  plain rotation
-      # least-conn   fewest requests in flight first
-      # weighted     rotation biased by each member's weight
-      # p2c-latency  power of two choices on time-to-first-byte
-      # MINI_ROUTER_STRATEGY: priority
-
-      # What counts as a reason to try the next candidate.
-      #   any-error    anything that is not a 2xx, plus every transport
-      #                failure: refused connection, timeout, rate limit,
-      #                expired key, a model the provider does not have.
-      #   status-list  only the statuses in MINI_ROUTER_RETRY_ON_STATUS.
-      # MINI_ROUTER_SPILLOVER: any-error
-      # MINI_ROUTER_RETRY_ON_STATUS: "408,409,429,500,502,503,504,529"
-
-      # Cap on attempts per request. 0 tries every candidate.
-      # MINI_ROUTER_MAX_ATTEMPTS: "0"
-
-      # ======================================================================
-      # 5. Access — the key YOUR apps send to mini-router
-      # ======================================================================
-      # Not a provider key. You invent this one; mini-router checks it and then
-      # replaces it with the provider's own key on the way out, so a client
-      # never holds a provider credential.
-      #
-      # Generate one:  openssl rand -hex 32
-      # Several, one per device, so you can revoke just one:
-      #   MINI_ROUTER_API_KEYS: |
-      #     sk-laptop-aaa
-      #     sk-phone-bbb
-      #
-      # Clients send it as whichever header their SDK uses -- either works:
-      #   Authorization: Bearer <key>        (OpenAI SDKs)
-      #   x-api-key: <key>                   (Anthropic SDKs)
-      #
-      # The `:?` makes compose refuse to start rather than silently leave the
-      # port open with no key set.
-      MINI_ROUTER_REQUIRE_AUTH: "true"
-      MINI_ROUTER_API_KEYS: ${MINI_ROUTER_API_KEYS:?set MINI_ROUTER_API_KEYS in .env}
-
-      # Or read client keys from other variables instead of listing them:
-      # MINI_ROUTER_API_KEY_ENVS: SOME_VAR,ANOTHER_VAR
-
-      # ======================================================================
-      # 6. Observability
-      # ======================================================================
-      # /metrics is Prometheus text and /admin/upstreams is JSON. There is no
-      # web UI in mini-router at all. Setting either to false removes that
-      # route outright -- 404, not 401. /healthz and /readyz always remain, so
-      # the container healthcheck keeps working.
-      # MINI_ROUTER_ADMIN: "true"
-      # MINI_ROUTER_METRICS: "true"
-      MINI_ROUTER_LOG: info               # error | warn | info | debug | trace
-
-      # ======================================================================
-      # 7. Tuning — every one of these has a working default
-      # ======================================================================
-      # MINI_ROUTER_LISTEN: 0.0.0.0:8080
-      # MINI_ROUTER_WORKER_THREADS: "2"         # 0 = one per core
-      # MINI_ROUTER_MAX_BODY_BYTES: "8388608"
-      # MINI_ROUTER_MAX_TRANSLATE_BYTES: "8388608"
-      # MINI_ROUTER_HEADER_TIMEOUT_SECS: "120"  # not a limit on generation
-      # MINI_ROUTER_QUEUE_TIMEOUT_SECS: "60"
-      # MINI_ROUTER_POOL_IDLE_TIMEOUT_SECS: "90"
-      #
-      # Health probing doubles as model discovery.
-      # MINI_ROUTER_HEALTH_INTERVAL_SECS: "60"  # 0 disables probing
-      # MINI_ROUTER_HEALTH_TIMEOUT_SECS: "10"
-      # MINI_ROUTER_HEALTH_PATH: /models
-      # MINI_ROUTER_FAILURE_THRESHOLD: "3"
-      # MINI_ROUTER_SUCCESS_THRESHOLD: "2"
-      # MINI_ROUTER_COOLDOWN_SECS: "30"
-      # MINI_ROUTER_MAX_COOLDOWN_SECS: "300"    # ceiling on a Retry-After
-      #
-      # Cross-dialect translation.
-      # MINI_ROUTER_DEFAULT_MAX_TOKENS: "4096"  # Anthropic requires max_tokens
-      # MINI_ROUTER_ANTHROPIC_VERSION: "2023-06-01"
-
-    # Measured on arm64 at 2 GB / 4 CPUs -- an Orange Pi Zero 3's shape -- in
-    # mini-router's own CI: 3.2 MB idle, 4.3 MB under 16 concurrent streams.
-    # This limit is a fuse, not a fit.
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-
-    # Nothing is written to disk, so the filesystem can be read-only.
+      MINI_ROUTER_WORKERS: "1"
+      LOG_LEVEL: warn
+    volumes:
+      - mini-router-data:/data
+      # Stable machine id: API keys embed it, like 9router.
+      - /etc/machine-id:/etc/machine-id:ro
     read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: 1.0
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: 1m, max-file: "1" }
 
-    # No healthcheck here on purpose. The image already declares one that runs
-    # `mini-router --healthcheck`, which probes /healthz over a socket from
-    # inside the binary -- so the image carries no curl or wget, and an
-    # override reaching for either would fail.
-
-  # A local model server, if you want one behind the same endpoint. It is just
-  # another OpenAI-compatible provider as far as mini-router is concerned --
-  # see MINI_ROUTER_PROVIDER_LOCAL_URL above.
-  # ollama:
-  #   image: ollama/ollama
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ollama:/root/.ollama
-
-# volumes:
-#   ollama:
+volumes:
+  mini-router-data:
