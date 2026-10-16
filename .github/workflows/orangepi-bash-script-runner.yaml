@@ -269,8 +269,6 @@ jobs:
           MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
           MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
           MINI_ROUTER_JWT_SECRET: ${{ secrets.MINI_ROUTER_JWT_SECRET }}
-          MINI_ROUTER_BIND: ${{ secrets.MINI_ROUTER_BIND || '0.0.0.0' }}
-          MINI_ROUTER_ALLOW_ANY: '1'
         run: |
           set +e
           SECONDS=0
@@ -284,6 +282,9 @@ jobs:
 
           # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
           {
+            # mini-router defaults (not secrets, so ALL_SECRETS never carries them); a
+            # MINI_ROUTER_BIND repo secret exported below overrides the bind address.
+            printf 'export MINI_ROUTER_BIND=0.0.0.0\nexport MINI_ROUTER_ALLOW_ANY=1\n'
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
             for p in "${PREFIXES[@]}"; do
               echo "$ALL_SECRETS" | jq -r --arg p "$p" \
