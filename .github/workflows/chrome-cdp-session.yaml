@@ -322,7 +322,7 @@ jobs:
             [ -s "$prefs" ] || echo '{}' > "$prefs"
             jq '.session.restore_on_startup = 1
                 | .profile.exit_type = "Normal"
-                | .background_mode.enabled = false' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+                | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
             # --password-store=basic: no keyring on the runner, and cookies
             # must decrypt the same way on the next runner.
             # CDP listens on localhost; Tailscale serve forwards it.
