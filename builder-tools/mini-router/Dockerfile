@@ -57,13 +57,10 @@ RUN set -eux; \
     printf '%s' "${cc}" > /tmp/cc
 
 WORKDIR /src
-RUN set -eux; \
-    if [ -n "${MINI_ROUTER_REF}" ]; then \
-      git clone --depth 1 --branch "${MINI_ROUTER_REF}" "${MINI_ROUTER_REPO}" .; \
-    else \
-      git clone --depth 1 "${MINI_ROUTER_REPO}" .; \
-    fi; \
-    git --no-pager log -1 --format='building mini-router %h (%cs) %d'
+# A BuildKit git source, not `RUN git clone`: BuildKit resolves the ref to a
+# commit on every build and keys the cache on it, so a new commit always
+# rebuilds. A RUN clone has a constant command line and stays cached forever.
+ADD ${MINI_ROUTER_REPO}.git#${MINI_ROUTER_REF:-main} /src
 
 # --locked: build against the committed Cargo.lock.
 RUN set -eux; \
