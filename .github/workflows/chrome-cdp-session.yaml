@@ -29,10 +29,11 @@ name: "Chrome CDP session over Tailscale"
 #   - `--disable-blink-features=AutomationControlled` keeps
 #     navigator.webdriver false, and no `--enable-automation` is passed, so
 #     there is no "controlled by automated software" bar.
-#   - `exit_node`: the runner's IP is a well-known Azure datacenter range, the
-#     biggest giveaway. Set it to a tailnet device at home (approved as an
-#     exit node) and the browser's web traffic leaves from that residential IP.
-#     Saving the profile still goes out directly.
+#   - Exit node: the runner's IP is a well-known Azure datacenter range, the
+#     biggest giveaway. With the TAILSCALE_EXIT_NODE secret set (the same one
+#     typescript-worker-run uses: `tag:name`, a MagicDNS name or a 100.x IP)
+#     and `use_exit_node` on, the browser's web traffic leaves from that
+#     residential IP. Saving the profile still goes out directly.
 #   - `timezone` / `locale` should match where that IP is, or the mismatch is
 #     itself a signal.
 #   Left to the client: Playwright and Puppeteer send `Runtime.enable`, which
@@ -55,6 +56,7 @@ name: "Chrome CDP session over Tailscale"
 #   TAILSCALE_TAGS                 e.g. "tag:ci"
 #   STATE_KEY                      passphrase that encrypts the saved profile
 #   VNC_PASSWORD                   VNC password (only the first 8 chars count)
+#   TAILSCALE_EXIT_NODE            optional; exit node for browser traffic (see above)
 # ---------------------------------------------------------------------------
 
 on:
@@ -68,10 +70,10 @@ on:
         description: 'Ignore the saved profile; the next save replaces it'
         type: boolean
         default: false
-      exit_node:
-        description: 'Tailnet exit node (name or 100.x IP) for browser traffic; empty = runner IP'
-        type: string
-        default: ''
+      use_exit_node:
+        description: 'Send browser traffic through the TAILSCALE_EXIT_NODE secret'
+        type: boolean
+        default: true
       timezone:
         description: 'IANA time zone the browser reports, matching the exit IP (e.g. Asia/Jakarta)'
         type: string
@@ -219,7 +221,8 @@ jobs:
       - name: Run Chrome until stopped
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
-          EXIT_NODE: ${{ inputs.exit_node }}
+          USE_EXIT_NODE: ${{ inputs.use_exit_node }}
+          EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
           TZ: ${{ inputs.timezone }}
           LOCALE: ${{ inputs.locale }}
         run: |
@@ -230,10 +233,19 @@ jobs:
           mkdir -p "$PROFILE_DIR"
           export LANG="${LOCALE//-/_}.UTF-8" LANGUAGE="${LOCALE//-/_}"
 
-          if [ -n "$EXIT_NODE" ]; then
+          if [ "$USE_EXIT_NODE" = true ]; then
+            if [ -z "$EXIT_NODE" ]; then
+              echo "::error title=Exit node::use_exit_node is on but the TAILSCALE_EXIT_NODE secret is not set."
+              exit 1
+            fi
+            echo "::add-mask::${EXIT_NODE}"
+            if [[ ! "$EXIT_NODE" =~ ^(tag:[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z0-9][A-Za-z0-9._-]*)$ ]]; then
+              echo "::error title=Exit node::TAILSCALE_EXIT_NODE must be tag:name, a MagicDNS name or a Tailscale IPv4 address."
+              exit 1
+            fi
             # LAN access keeps the runner's own localhost/VNC/CDP plumbing working.
             if ! sudo tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access; then
-              echo "::error title=Exit node::Could not use the exit node; is it approved and allowed by ACLs?"
+              echo "::error title=Exit node::Could not use the exit node; does it advertise 0.0.0.0/0 and do the ACLs allow it?"
               exit 1
             fi
             sleep 3
@@ -308,7 +320,7 @@ jobs:
           pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
           echo "Chrome stopped."
           # Upload the profile straight from the runner, not through the home link.
-          if [ -n "$EXIT_NODE" ]; then sudo tailscale set --exit-node= || true; fi
+          if [ "$USE_EXIT_NODE" = true ]; then sudo tailscale set --exit-node= || true; fi
 
       - name: Save profile
         run: |
