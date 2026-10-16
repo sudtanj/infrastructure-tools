@@ -34,13 +34,21 @@ name: "Chrome CDP session over Tailscale"
 #     biggest giveaway. With the TAILSCALE_EXIT_NODE secret set (the same one
 #     typescript-worker-run uses: `tag:name`, a MagicDNS name or a 100.x IP)
 #     and `use_exit_node` on, the browser's web traffic leaves from that
-#     residential IP. Saving the profile still goes out directly.
-#   - `timezone` / `locale` should match where that IP is, or the mismatch is
-#     itself a signal.
+#     residential IP; the run stops if the public IP did not actually change.
+#     Saving the profile still goes out directly.
+#   - `timezone` defaults to `auto`: the zone of the IP the browser is seen
+#     from, so the clock never disagrees with the IP. `locale` should match it
+#     too.
+#   - WebGL draws with Mesa (llvmpipe) through a GLX-enabled display instead of
+#     Chrome's SwiftShader fallback, whose renderer string is the classic
+#     headless/bot fingerprint.
+#   - A PulseAudio null sink gives the page a working audio output device, and
+#     the common Windows/Linux web fonts are installed, so the audio, media
+#     device and font fingerprints look like an ordinary Linux desktop.
 #   Left to the client: Playwright and Puppeteer send `Runtime.enable`, which
 #   some anti-bot scripts detect. Use patchright, rebrowser-patches or
-#   nodriver/zendriver against this endpoint to avoid it. WebGL reports a
-#   software renderer (no GPU on the runner), which strict checks may notice.
+#   nodriver/zendriver against this endpoint to avoid it, and log in by hand
+#   over VNC rather than scripting the login form.
 #
 # STOP IT FROM THE BROWSER, NOT THE CANCEL BUTTON
 #   Open any tab at   about:blank#stop-session
@@ -76,9 +84,9 @@ on:
         type: boolean
         default: true
       timezone:
-        description: 'IANA time zone the browser reports, matching the exit IP (e.g. Asia/Jakarta)'
+        description: 'IANA time zone the browser reports (e.g. Asia/Jakarta); auto = from the egress IP'
         type: string
-        default: 'UTC'
+        default: 'auto'
       locale:
         description: 'Browser language (e.g. en-US, id-ID)'
         type: string
@@ -168,11 +176,24 @@ jobs:
           # The runner image ships a Chrome that can be weeks old; take today's stable.
           curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get update -qq
-          sudo apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox fonts-noto-color-emoji fonts-noto-cjk >/dev/null
+          # Mesa for a real GL renderer, PulseAudio for an audio device, and the
+          # fonts an ordinary desktop has (a bare runner has very few).
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
           rm /tmp/chrome.deb
           google-chrome --version
-          setsid nohup Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 &
+          # GLX on the display lets Chrome use Mesa instead of SwiftShader.
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
           sleep 2
+          # A null sink: pages see a normal speaker output and AudioContext works.
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
           # A window manager so dialogs, popups and maximise behave over VNC.
           DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
           mkdir -p ~/.vnc
@@ -244,6 +265,9 @@ jobs:
               echo "::error title=Exit node::TAILSCALE_EXIT_NODE must be tag:name, a MagicDNS name or a Tailscale IPv4 address."
               exit 1
             fi
+            # Masked: a real public address in a public log.
+            before="$(curl -fsS --max-time 15 https://api.ipify.org || true)"
+            [ -n "$before" ] && echo "::add-mask::${before}"
             # LAN access keeps the runner's own localhost/VNC/CDP plumbing working.
             if ! sudo tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access; then
               echo "::error title=Exit node::Could not use the exit node; does it advertise 0.0.0.0/0 and do the ACLs allow it?"
@@ -251,12 +275,29 @@ jobs:
             fi
             sleep 3
             # Refuse to browse from the datacenter IP when a home IP was asked for.
-            if ! curl -fsS --max-time 15 https://ipinfo.io/org >/dev/null; then
+            after="$(curl -fsS --max-time 15 https://api.ipify.org || true)"
+            if [ -z "$after" ]; then
               echo "::error title=Exit node::No internet through the exit node."
+              exit 1
+            fi
+            echo "::add-mask::${after}"
+            if [ "$after" = "$before" ]; then
+              echo "::error title=Exit node::Public IP did not change; traffic is not going through the exit node."
               exit 1
             fi
             echo "Browser traffic goes through the exit node."
           fi
+
+          # Match the clock to wherever the browser appears to be. Not printed:
+          # it narrows down where the exit node is.
+          if [ "$TZ" = auto ]; then
+            TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+            if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+              echo "::warning::Could not detect the time zone; using UTC."
+              TZ=UTC
+            fi
+          fi
+          export TZ
 
           start_chrome() {
             # A profile copied from another machine still holds its lock.
@@ -270,6 +311,10 @@ jobs:
               --remote-debugging-port=9222 \
               --remote-allow-origins='*' \
               --password-store=basic \
+              --use-gl=angle \
+              --use-angle=gl \
+              --ignore-gpu-blocklist \
+              --enable-gpu-rasterization \
               --lang="$LOCALE" \
               --accept-lang="$LOCALE" \
               --restore-last-session \
