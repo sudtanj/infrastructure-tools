@@ -62,7 +62,7 @@ name: "Deploy Deno Projects (private repo)"
 #
 #   A missing application is created on its first deploy, the same as:
 #     deno deploy create --org "$ORG" --app "$APP" --source local \
-#         --runtime-mode dynamic --entrypoint main.ts
+#         --runtime-mode dynamic --entrypoint main.ts --region global
 #   The entrypoint is the first of main.ts, src/main.ts, mod.ts in the folder.
 #   The default application name is the folder name (or the repository name
 #   for a project at the root).
@@ -650,7 +650,7 @@ jobs:
               echo "No application named '$WANTED_APP' exists; creating it (entrypoint $entrypoint)."
               (cd "$PROJECT_DIR" && deno deploy create --non-interactive \
                 --org "$DEPLOY_ORG" --app "$WANTED_APP" --source local \
-                --runtime-mode dynamic --entrypoint "$entrypoint")
+                --runtime-mode dynamic --entrypoint "$entrypoint" --region global)
               app="$WANTED_APP" ;;
             *)
               echo "::warning::Could not read the app list; using the configured name."
