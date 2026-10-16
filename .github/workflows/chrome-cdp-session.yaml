@@ -50,12 +50,12 @@ name: "Chrome CDP session over Tailscale"
 #   nodriver/zendriver against this endpoint to avoid it, and log in by hand
 #   over VNC rather than scripting the login form.
 #
-# STOP IT FROM THE BROWSER, NOT THE CANCEL BUTTON
+# STOPPING
 #   Open any tab at   about:blank#stop-session
 #   (in the address bar over VNC, or `Target.createTarget` / a new page over
-#   CDP). A cancelled run (or one killed by the job timeout) uploads nothing;
-#   the next run resumes from the previous save. Hitting `max_minutes` does
-#   save.
+#   CDP), or press Cancel on the run. Both shut Chrome down cleanly and save
+#   the profile; so does reaching `max_minutes`. Only the 360 minute job
+#   timeout (or cancelling twice) loses the session.
 #
 # SECRETS
 #   PRIVATE_REPO                   owner/name of the private repo
@@ -149,6 +149,7 @@ jobs:
       # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`. The
       # manifest is uploaded last, so only sets with one are complete.
       - name: Restore saved profile
+        id: restore
         if: ${{ !inputs.fresh }}
         run: |
           set -euo pipefail
@@ -241,6 +242,7 @@ jobs:
           echo "Joined the tailnet as chrome-cdp."
 
       - name: Run Chrome until stopped
+        id: chrome
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
           USE_EXIT_NODE: ${{ inputs.use_exit_node }}
@@ -302,6 +304,15 @@ jobs:
           start_chrome() {
             # A profile copied from another machine still holds its lock.
             rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+            # "Continue where you left off": without it Chrome deletes session
+            # cookies on exit, and many sites keep the login in
+            # one. A clean exit flag also avoids the "Restore pages?" bubble.
+            prefs="$PROFILE_DIR/Default/Preferences"
+            mkdir -p "$PROFILE_DIR/Default"
+            [ -s "$prefs" ] || echo '{}' > "$prefs"
+            jq '.session.restore_on_startup = 1
+                | .profile.exit_type = "Normal"
+                | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
             # --password-store=basic: no keyring on the runner, and cookies
             # must decrypt the same way on the next runner.
             # CDP listens on localhost; Tailscale serve forwards it.
@@ -326,6 +337,7 @@ jobs:
               --window-size=1920,1080 \
               >/tmp/chrome.log 2>&1 &
             chrome_pid=$!
+            echo "$chrome_pid" > /tmp/chrome.pid
             for _ in $(seq 1 30); do
               curl -fs http://127.0.0.1:9222/json/version >/dev/null && return 0
               sleep 1
@@ -356,20 +368,40 @@ jobs:
             sleep 10
           done
 
-          # A clean exit flushes cookies and the session file to disk.
-          pkill -TERM -f -- "--user-data-dir=$PROFILE_DIR" || true
-          for _ in $(seq 1 30); do
-            pgrep -f -- "--user-data-dir=$PROFILE_DIR" >/dev/null || break
-            sleep 1
-          done
+          echo "Session over."
+
+      # Runs on cancel too, so the Cancel button saves like the stop tab does.
+      # Chrome was started with setsid, so it outlives the cancelled step.
+      - name: Stop Chrome
+        if: ${{ always() && steps.chrome.outcome != 'skipped' }}
+        run: |
+          # TERM to the browser process only: it then closes its own children
+          # and writes cookies, Preferences and the session file. Killing the
+          # whole tree at once can leave the profile marked as crashed.
+          pid="$(cat /tmp/chrome.pid 2>/dev/null || true)"
+          if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" || true
+            for _ in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+          fi
           pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
           echo "Chrome stopped."
           # Upload the profile straight from the runner, not through the home link.
-          if [ "$USE_EXIT_NODE" = true ]; then sudo tailscale set --exit-node= || true; fi
+          sudo tailscale set --exit-node= >/dev/null 2>&1 || true
 
       - name: Save profile
+        # Also after a cancel, but never when the restore itself failed or was
+        # cancelled: that profile is empty and would replace the good save.
+        if: ${{ always() && steps.chrome.outcome != 'skipped' && (steps.restore.outcome == 'success' || steps.restore.outcome == 'skipped') }}
         run: |
           set -euo pipefail
+          # Nothing to save if Chrome never created a profile; keep the last save.
+          if [ ! -s "$PROFILE_DIR/Local State" ]; then
+            echo "::warning::No Chrome profile on disk; keeping the previous save."
+            exit 0
+          fi
           id="${{ github.run_id }}"
           mkdir -p /tmp/save
           cd /tmp/save
