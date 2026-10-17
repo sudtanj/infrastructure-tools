@@ -22,12 +22,12 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #                 A guard step refuses to continue unless Tailscale reports
 #                 BackendState=Running AND the exit node is reachable on the
 #                 tailnet, so a script can never silently run un-VPNed.
-#                 Then the shared Chrome from chrome-cdp-session.yaml is
-#                 checked over the tailnet, and every script runs, in sorted
+#                 Then a Chrome with the saved chrome-cdp-session profile
+#                 starts on the runner, and every script runs, in sorted
 #                 order, sequentially, in the same job -- one Tailscale node,
 #                 one exit-node route, stable egress IP for the whole run.
-#   3. teardown - stop the shared Chrome session (it saves its profile) and
-#                 log out of the tailnet, so no registered node lingers.
+#   3. teardown - stop Chrome, log out of the tailnet, so no registered node
+#                 lingers, and save the Chrome profile.
 #
 # WHY SEQUENTIAL AND NOT A MATRIX
 #   A matrix would bring Tailscale up once per script: N auth keys burned,
@@ -81,21 +81,20 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   When NODE_VERSION is pinned below 23.6, the flag is passed explicitly so
 #   the fallback still works instead of failing on a syntax error.
 #
-# BROWSER (shared Chrome over CDP)
-#   No browser is started here. The scripts use the logged-in Google Chrome
-#   that chrome-cdp-session.yaml keeps on the tailnet, so start that session
-#   first. Its tailnet IP is the CHROME_CDP_IP secret; the run checks
-#   http://<CHROME_CDP_IP>:9222/json/version after the exit-node guard and
-#   exports, for connectOverCDP():
-#     CHROME_CDP_URL  http://<CHROME_CDP_IP>:9222
+# BROWSER (Chrome over CDP, on this runner)
+#   The run starts the same headful Google Chrome as chrome-cdp-session.yaml,
+#   with the same encrypted profile (release `chrome-cdp-state` on the
+#   private repo), so the scripts are logged in wherever a person logged in
+#   over VNC. chrome-cdp-session.yaml stays a manual run, for those logins.
+#   Chrome starts after the exit-node guard, so its traffic leaves through
+#   the exit node, and the scripts get, for connectOverCDP():
+#     CHROME_CDP_URL  http://127.0.0.1:9222
 #     CDP_URL         same value, for a generic client
 #
-#   The tailnet ACL must let this runner's TAILSCALE_TAGS reach the Chrome
-#   node on port 9222.
-#
-#   Teardown opens about:blank#stop-session on that Chrome, which makes the
-#   session workflow save its profile and finish. Uncheck `browser` when
-#   dispatching to skip the check and the stop.
+#   Teardown closes Chrome and saves the profile back, unless a newer save
+#   appeared during the run (a manual session ended meanwhile): that one is
+#   kept, so a login made over VNC is never overwritten by an older profile.
+#   Uncheck `browser` when dispatching to skip Chrome entirely.
 #
 # EXIT NODE TARGET
 #   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
@@ -131,11 +130,11 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #                                 otherwise every hostname lookup in the
 #                                 scripts fails. "false" still routes all IP
 #                                 traffic through the exit node.
-#   secret CHROME_CDP_IP          tailnet IPv4 of the chrome-cdp-session Chrome
-#                                 (required unless `browser` is unchecked).
-#                                 Use the 100.x IP, not the MagicDNS name:
-#                                 Chrome rejects CDP requests whose Host is not
-#                                 an IP. Masked like the exit node.
+#   secret STATE_KEY              passphrase of the saved Chrome profile, as in
+#                                 chrome-cdp-session.yaml (required unless
+#                                 `browser` is unchecked). PRIVATE_REPO_TOKEN
+#                                 then also needs Contents: write, for the
+#                                 release that holds the profile.
 #   secret NODE_VERSION           OPTIONAL, default "24". Needs to be >= 23.6
 #                                 for the bare `node file.ts` fallback to work
 #                                 without a flag; lower versions still run,
@@ -157,8 +156,7 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #       host name. A jq rollup (state, peer count, exit-node-capable peers)
 #       answers the same questions without identifying anything.
 #     * Everything a script writes is passed through redact(), which replaces
-#       IPv4, IPv6 and *.ts.net host names (loopback is kept). That includes
-#       the Chrome CDP address, which is also masked as CHROME_CDP_IP.
+#       IPv4, IPv6 and *.ts.net host names (loopback is kept).
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo: visible to everyone, and forkable.
@@ -207,7 +205,7 @@ on:
         default: false
         type: boolean
       browser:
-        description: "Use the shared Chrome CDP session (CHROME_CDP_IP) and stop it afterwards"
+        description: "Start Chrome with the saved chrome-cdp-session profile and save it afterwards"
         required: false
         default: true
         type: boolean
@@ -550,8 +548,9 @@ jobs:
       TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
       HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
       HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
-      CHROME_CDP_IP: ${{ secrets.CHROME_CDP_IP }}
       USE_BROWSER: ${{ inputs.browser != false }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
 
     steps:
       - name: Checkout private repo
@@ -601,13 +600,15 @@ jobs:
           echo "Dependencies installed in private/${TSWORKER_DIR}/."
 
       - name: Verify required secrets
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
           for v in TAILSCALE_EXIT_NODE HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
-          if [ "$USE_BROWSER" = "true" ] && [ -z "${CHROME_CDP_IP:-}" ]; then missing+=("CHROME_CDP_IP"); fi
+          if [ "$USE_BROWSER" = "true" ] && [ -z "${STATE_KEY:-}" ]; then missing+=("STATE_KEY"); fi
           # One VPN credential is enough: the non-expiring OAuth client secret
           # (which needs tags) wins, the 90-day auth key is the fallback.
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
@@ -644,7 +645,6 @@ jobs:
           # in a PUBLIC repo -- so it is masked like a secret even though it
           # is not one. See LOG REDACTION in the header.
           echo "::add-mask::${TAILSCALE_EXIT_NODE}"
-          if [ -n "${CHROME_CDP_IP:-}" ]; then echo "::add-mask::${CHROME_CDP_IP}"; fi
 
           # A one-way fingerprint of the exit node. The log can then prove
           # WHICH node was used -- useful when a run fails -- without ever
@@ -673,6 +673,68 @@ jobs:
           echo "Exit node fingerprint: $(cat /tmp/exit-node-fp.txt) (address masked)"
 
       # ---------------- Tailscale: install, join, verify ----------------
+
+      # ------------- Chrome profile and install (before the VPN) -------------
+
+      # Same encrypted profile and format as chrome-cdp-session.yaml: a set is
+      # `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`, the manifest
+      # uploaded last, so only sets with one are complete.
+      - name: Restore the Chrome profile
+        id: restore
+        if: ${{ env.USE_BROWSER == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Starting clean on a failed lookup is safe: the save step then sees
+          # a save it did not restore and keeps it.
+          names=""
+          if gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1; then
+            names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name')"
+          fi
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          # The save step compares against this to spot a newer save made meanwhile.
+          echo "$id" > /tmp/chrome-restored-id
+          mkdir -p "$PROFILE_DIR"
+          if [ -z "$id" ]; then
+            echo "No saved Chrome profile; starting clean."
+            exit 0
+          fi
+          mkdir -p /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages as chrome-cdp-session.yaml, so the browser has the
+      # same fingerprint in both (real GL, audio device, desktop fonts). No VNC.
+      - name: Install Chrome and a virtual display
+        if: ${{ env.USE_BROWSER == 'true' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Install Tailscale
         run: |
@@ -889,28 +951,69 @@ jobs:
             echo "DNS: resolved by the runner, not the exit node (TAILSCALE_ACCEPT_DNS=false)."
           fi
 
-      # ---------------------- shared Chrome (CDP) ----------------------
+      # ------------------------- Chrome (CDP) -------------------------
 
-      - name: Check the shared Chrome CDP session
+      - name: Start Chrome
+        id: chrome
         if: ${{ env.USE_BROWSER == 'true' }}
         run: |
           set -euo pipefail
-          # Checked after the exit-node guard, so a broken VPN fails first.
-          URL="http://${CHROME_CDP_IP}:9222"
-          for _ in $(seq 1 12); do
-            if curl -fsS --max-time 5 "$URL/json/version" > /dev/null 2>&1; then
+          # Started after the exit-node guard, so its traffic leaves through
+          # the exit node. The clock matches the zone of that IP, as in
+          # chrome-cdp-session.yaml's `auto`; not printed, it narrows down
+          # where the exit node is.
+          TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+          if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+            echo "::warning::Could not detect the time zone; using UTC."
+            TZ=UTC
+          fi
+          export TZ LANG=en_US.UTF-8 LANGUAGE=en_US
+          # A profile copied from another machine still holds its lock.
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          # Keep session cookies on exit and skip the "Restore pages?" bubble.
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          jq '.session.restore_on_startup = 1
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+          # Same flags as chrome-cdp-session.yaml; CDP on localhost only.
+          setsid nohup google-chrome \
+            --user-data-dir="$PROFILE_DIR" \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
+            --lang=en-US \
+            --accept-lang=en-US \
+            --restore-last-session \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-dev-shm-usage \
+            --start-maximized \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            >/tmp/chrome.log 2>&1 &
+          echo $! > /tmp/chrome.pid
+          URL="http://127.0.0.1:9222"
+          for _ in $(seq 1 30); do
+            if curl -fs "$URL/json/version" > /dev/null 2>&1; then
               # Sourced by the script step: every step is its own shell.
               {
                 printf 'export CHROME_CDP_URL=%q\n' "$URL"
                 printf 'export CDP_URL=%q\n' "$URL"
               } > /tmp/chrome-cdp.env
-              chmod 600 /tmp/chrome-cdp.env
-              echo "Shared Chrome answers on CDP (address masked)."
+              curl -fs "$URL/json/version" | jq -r '.Browser'
+              echo "Chrome ready on ${URL}."
               exit 0
             fi
-            sleep 5
+            sleep 1
           done
-          echo "::error::Shared Chrome did not answer on CHROME_CDP_IP:9222. Start chrome-cdp-session.yaml first and check the tailnet ACL."
+          echo "::error::Chrome did not open CDP within 30s."
           exit 1
 
       # ------------------------- the scripts -------------------------
@@ -1061,9 +1164,9 @@ jobs:
 
           # @sh quoting means a secret containing spaces, quotes or newlines
           # survives being sourced. Credentials are removed on purpose: the
-          # clone token and the VPN keys have no business being visible to
-          # the scripts.
-          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY, .TAILSCALE_OAUTH_CLIENT_SECRET)
+          # clone token, the VPN keys and the profile key have no business
+          # being visible to the scripts.
+          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY, .TAILSCALE_OAUTH_CLIENT_SECRET, .STATE_KEY)
                  | to_entries[]
                  | "export \(.key)=\(.value | @sh)"' <<< "$ALL_SECRETS" > /tmp/ts-env.sh
           chmod 600 /tmp/ts-env.sh
@@ -1071,14 +1174,14 @@ jobs:
           . /tmp/ts-env.sh
           rm -f /tmp/ts-env.sh
 
-          # The shared Chrome's CDP URL. Written by the check step and absent
+          # The local Chrome's CDP URL. Written by the start step and absent
           # when `browser` was unchecked.
           if [ -s /tmp/chrome-cdp.env ]; then
             # shellcheck disable=SC1091
             . /tmp/chrome-cdp.env
-            echo "Shared Chrome: CHROME_CDP_URL set (address masked)"
+            echo "Chrome: CHROME_CDP_URL set"
           else
-            echo "Shared Chrome: not used for this run."
+            echo "Chrome: not used for this run."
           fi
 
           # Redaction helper from the mask step. Anything a script prints --
@@ -1159,24 +1262,86 @@ jobs:
           fi
           echo "All ${#scripts[@]} script(s) completed under the exit node."
 
-      - name: Stop the shared Chrome and leave the tailnet
+      - name: Stop Chrome and leave the tailnet
         if: always()
         run: |
-          # Always, even after a failed script: the Chrome session keeps
-          # spending runner minutes until stopped, and a node left joined keeps
-          # burning auth key uses and holds an exit-node route.
-          if [ -s /tmp/chrome-cdp.env ]; then
-            # shellcheck disable=SC1091
-            . /tmp/chrome-cdp.env
-            # chrome-cdp-session.yaml watches for this tab, then closes Chrome,
-            # saves the profile and ends its run.
-            if curl -fsS --max-time 10 -X PUT "${CHROME_CDP_URL}/json/new?about:blank%23stop-session" > /dev/null 2>&1; then
-              echo "Asked the shared Chrome session to stop and save."
-            else
-              echo "::warning::Could not reach the shared Chrome to stop it; it ends at its own max_minutes."
-            fi
+          # TERM to the browser process only: it then closes its own children
+          # and writes cookies, Preferences and the session file. Killing the
+          # whole tree at once can leave the profile marked as crashed.
+          pid="$(cat /tmp/chrome.pid 2>/dev/null || true)"
+          if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" || true
+            for _ in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
+            echo "Chrome stopped."
           fi
+          # Always, even after a failed script: a node left joined keeps
+          # burning auth key uses and holds an exit-node route.
           sudo tailscale logout 2>&1 | tail -3 || true
+
+      - name: Save the Chrome profile
+        # Never when the restore failed or was cancelled: that profile is
+        # empty and would replace the good save.
+        if: ${{ always() && steps.chrome.outcome != 'skipped' && steps.restore.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$PROFILE_DIR/Local State" ]; then
+            echo "::warning::No Chrome profile on disk; keeping the previous save."
+            exit 0
+          fi
+          # A manual chrome-cdp-session run may have saved since the restore
+          # (a login over VNC). Its profile is newer than ours, so it wins.
+          latest="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null \
+            | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1 || true)"
+          if [ "$latest" != "$(cat /tmp/chrome-restored-id)" ]; then
+            echo "::notice::A newer Chrome profile was saved during this run; keeping it."
+            exit 0
+          fi
+          id="${{ github.run_id }}"
+          mkdir -p /tmp/save
+          cd /tmp/save
+          # Same exclusions as chrome-cdp-session.yaml: caches are rebuilt on
+          # demand. Release assets cap at 2 GiB each.
+          tar -C "$PROFILE_DIR" -c --zstd \
+            --exclude='Singleton*' \
+            --exclude='*/Cache' \
+            --exclude='*/Code Cache' \
+            --exclude='*/GPUCache' \
+            --exclude='*/DawnGraphiteCache' \
+            --exclude='*/DawnWebGPUCache' \
+            --exclude='*/Service Worker/CacheStorage' \
+            --exclude='*/Service Worker/ScriptCache' \
+            --exclude='GrShaderCache' \
+            --exclude='GraphiteDawnCache' \
+            --exclude='ShaderCache' \
+            --exclude='component_crx_cache' \
+            --exclude='extensions_crx_cache' \
+            --exclude='Crashpad' \
+            . \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | split -b 1900M -d -a 3 - "state-${id}.part-"
+          sha256sum state-"${id}".part-* > "state-${id}.sha256"
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1 || \
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Chrome CDP state" \
+              --notes "Encrypted Chrome profile saved by infrastructure-tools chrome-cdp-session." >/dev/null
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          # Old sets go only after the new manifest is up, so a failed upload
+          # never loses the last good save. tailscaled.state.enc is kept.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
+            | { grep '^state-' || true; } \
+            | { grep -v "^state-${id}\." || true; } \
+            | while read -r name; do
+                gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
+              done
+          echo "Chrome profile saved."
 
       - name: Summary
         if: always()
@@ -1186,13 +1351,12 @@ jobs:
             echo
             echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
             echo "- Exit node: \`$(cat /tmp/exit-node-fp.txt 2>/dev/null || echo '<never connected>') (fingerprint, address withheld)\`"
-            # The address stays out of the public summary.
             if [ -s /tmp/chrome-cdp.env ]; then
-              browser='reachable, stopped after the scripts'
+              browser='started with the saved profile'
             else
               browser='<not used>'
             fi
-            echo "- Shared Chrome: \`${browser}\`"
+            echo "- Chrome: \`${browser}\`"
             echo
             if [ -s /tmp/ts-results.txt ]; then
               echo "| Script | Result |"
