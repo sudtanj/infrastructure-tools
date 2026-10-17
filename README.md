@@ -24,6 +24,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── terraform-deploy.yml          # Format, plan, and protected apply for all HCP Terraform directories
 │   ├── terraform-free-tier-oci.yaml  # Scheduled OCI A1.Flex capacity-grab workflow
 │   ├── workflow-cleanup-job.yaml     # Daily cleanup of GitHub Actions runs
+│   ├── job-hunter.yaml               # Manual: find remote jobs matching your CV, report to the private repo
 │   ├── apps-private-build.yaml       # Build a private repo's apps/ for Android, iOS, Windows, macOS, Linux; publish as its release
 │   └── builder-tools-*.yml           # Docker image publish, PR check, dependabot merge and Mi 3 firmware build for builder-tools/
 ├── builder-tools/                    # Docker images (Docker Hub) + Padavan firmware builder, migrated from sudtanj/builder-tools
@@ -88,6 +89,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`terraform-free-tier-oci.yaml`**: Attempts one OCI instance `terraform apply` every 15 minutes, or manually on demand. It skips an instance already present in state and treats known capacity or throttling errors as a retryable miss.
 - **`gcp-bash-script-runner.yaml`**: Triggers remote execution of scripts (for example, `init-paseo-codex.sh` and `init-tailscale.sh`) directly on the target VM via `gcloud compute ssh` over IAP.
 - **`chrome-cdp-session.yaml`**: Manually dispatched; runs the latest stable Google Chrome on the runner, reachable only on the tailnet as `chrome-cdp` with CDP on port 9222 (for Playwright, Puppeteer or AI agents; connect by the 100.x IP) and VNC on 5900. The profile (logins, cookies, tabs) and the Tailscale identity are encrypted with `STATE_KEY` and stored on the private repo's `chrome-cdp-state` release, so the next run restores the same browser at the same tailnet IP. Runs until the browser is closed or nothing is connected over VNC or CDP for `idle_minutes` (default 30); past the 6-hour job limit it saves and continues in a new run. To look less like a bot it keeps `navigator.webdriver` false and sends traffic through the existing `TAILSCALE_EXIT_NODE` secret (turn off with `use_exit_node`), with `timezone` and `locale` inputs to match.
+- **`job-hunter.yaml`**: Manually dispatched; checks out the private repo and runs its `job-hunter/job_hunter.ts`, which reads your CV from `job-hunt/cv.md` in the private repo, collects remote software jobs from a throwaway SearXNG on the runner (Google, Bing, DuckDuckGo and others, searching Greenhouse, Lever, Ashby and Workable) plus the Remotive, Remote OK, Jobicy, We Work Remotely and Working Nomads feeds, scores the new ones against the CV with the 9router model on the tailnet, drafts copy-paste application answers for the top 5, and commits the report to `job-hunt/<timestamp>.md` in the private repo. Secrets are listed in the workflow header; the log shows counts only.
 - **`workflow-cleanup-job.yaml`**: Automated daily run maintenance keeping workflow execution logs clean.
 
 ---

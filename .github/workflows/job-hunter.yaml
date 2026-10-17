@@ -1,0 +1,249 @@
+name: "Job hunter: remote jobs matched to a CV"
+
+# ---------------------------------------------------------------------------
+# Finds remote software jobs, scores each against the CV with the 9router
+# model on the tailnet, drafts copy-paste application answers for the best
+# matches, and commits the report to the PRIVATE repo. Manual runs only.
+#
+# HOW THIS WORKS
+#   1. SearXNG starts on the runner (loopback only), a metasearch engine that
+#      queries Google, Bing, DuckDuckGo and others at once. The script asks it
+#      for job pages on Greenhouse, Lever, Ashby and Workable.
+#   2. The runner joins the tailnet, so 9router is reachable, through the exit
+#      node when TAILSCALE_EXIT_NODE is set (search engines are kinder to a
+#      home IP than to a GitHub datacenter one).
+#   3. `job-hunter/job_hunter.ts`, checked out from the PRIVATE repo (only
+#      that folder), reads `job-hunt/cv.md` from the same repo,
+#      collects jobs from SearXNG plus the Remotive, Remote OK, Jobicy, We Work
+#      Remotely and Working Nomads feeds, drops those already reported, has
+#      9router score them and draft answers for the top 5, and commits
+#      `job-hunt/<UTC timestamp>.md` and `job-hunt/seen.json` to the private
+#      repo through the GitHub API.
+#   4. SearXNG is removed and the runner leaves the tailnet, even on failure.
+#
+# SETUP
+#   In the private repo: commit your CV as `job-hunt/cv.md` (plain text or
+#   Markdown; paste it from LinkedIn or your PDF).
+#
+#   secret PRIVATE_REPO          "owner/name" of the private repo holding the
+#                                script, the CV and the reports, as in the
+#                                worker workflows
+#   secret PRIVATE_REPO_TOKEN    Contents: Read and write on it. Clones the
+#                                script, and the script uses it to read the CV
+#                                and commit the report.
+#   secret BUILD_REF             OPTIONAL branch to run from and commit to,
+#                                default main
+#   secret NINEROUTER_BASE_URL   OpenAI-compatible base ending in /v1, e.g.
+#                                http://100.x.y.z:PORT/v1. Use the 100.x
+#                                address: MagicDNS names do not resolve here.
+#   secret NINEROUTER_MODEL      model name as 9router lists it
+#   secret NINEROUTER_API_KEY    OPTIONAL, only if 9router wants one
+#   secret JOB_HUNTER_PROFILE    OPTIONAL facts forms ask for and a CV lacks:
+#                                work authorisation, salary expectation,
+#                                notice period, timezone. Without them those
+#                                answers say "NEEDS YOUR INPUT".
+#   secret JOB_SEARCH_QUERY      OPTIONAL default search terms, comma-separated;
+#                                the `query` input wins, and with neither the
+#                                model derives them from the CV
+#   secret TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, or TAILSCALE_AUTH_KEY
+#                                the same tailnet credentials as the worker
+#                                workflows. The tag must be allowed to reach
+#                                9router's host and port in the tailnet ACL.
+#   secret TAILSCALE_EXIT_NODE   OPTIONAL exit node, as in the worker workflows
+#
+# THIS REPO IS PUBLIC: the `query` input and this run's log are visible to
+# anyone. The script prints counts only, never the CV, a job or a model reply;
+# everything else goes to the private repo.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search terms, comma-separated (visible to anyone: this repo is public). Empty: JOB_SEARCH_QUERY, else derived from the CV'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two runs at once would both report the same jobs and race on seen.json.
+  group: job-hunter
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # The script talks to GitHub through the API, not git; no token in .git/config.
+          persist-credentials: false
+          sparse-checkout: job-hunter
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
+          node-version: 24
+
+      - name: Verify required secrets
+        env:
+          NINEROUTER_BASE_URL: ${{ secrets.NINEROUTER_BASE_URL }}
+          NINEROUTER_MODEL: ${{ secrets.NINEROUTER_MODEL }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in NINEROUTER_BASE_URL NINEROUTER_MODEL; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          # Not a secret, but a real address in a public log.
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+          echo "Secrets present."
+
+      # Before the VPN: the image pull is faster straight from the datacenter.
+      - name: Start SearXNG
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/searxng
+          # JSON output is off by default, and the limiter would throttle the
+          # one client this instance has.
+          cat > /tmp/searxng/settings.yml <<EOF
+          use_default_settings: true
+          server:
+            secret_key: "$(openssl rand -hex 32)"
+            limiter: false
+          search:
+            formats: [html, json]
+          EOF
+          # The container writes next to its settings as its own user.
+          chmod -R a+rwX /tmp/searxng
+          docker run -d --name searxng -p 127.0.0.1:8080:8080 \
+            -v /tmp/searxng:/etc/searxng searxng/searxng:latest >/dev/null
+          for _ in $(seq 1 45); do
+            if curl -fsS -o /dev/null --max-time 5 'http://127.0.0.1:8080/healthz'; then
+              echo "SearXNG is up."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::SearXNG did not start."
+          docker logs searxng 2>&1 | tail -20
+          exit 1
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # Same credential handling as typescript-worker-run.yaml: the OAuth
+      # client secret is exchanged for a single-use, ephemeral, 10-minute auth
+      # key; only HTTP statuses are ever printed.
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      - name: Find, score and report jobs
+        env:
+          SEARXNG_URL: http://127.0.0.1:8080
+          NINEROUTER_BASE_URL: ${{ secrets.NINEROUTER_BASE_URL }}
+          NINEROUTER_MODEL: ${{ secrets.NINEROUTER_MODEL }}
+          NINEROUTER_API_KEY: ${{ secrets.NINEROUTER_API_KEY }}
+          # The clone token doubles as the API token for the CV and the report.
+          JOB_HUNTER_GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          JOB_HUNTER_REPO: ${{ secrets.PRIVATE_REPO }}
+          JOB_HUNTER_BRANCH: ${{ secrets.BUILD_REF || 'main' }}
+          JOB_HUNTER_PROFILE: ${{ secrets.JOB_HUNTER_PROFILE }}
+          JOB_SEARCH_QUERY: ${{ inputs.query || secrets.JOB_SEARCH_QUERY }}
+        run: node private/job-hunter/job_hunter.ts
+
+      - name: Stop SearXNG and leave the tailnet
+        if: always()
+        run: |
+          docker rm -f searxng >/dev/null 2>&1 || true
+          # A node left joined keeps an exit-node route and a tailnet slot.
+          sudo tailscale logout 2>&1 | tail -3 || true
