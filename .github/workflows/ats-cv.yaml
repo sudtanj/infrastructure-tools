@@ -6,7 +6,8 @@ name: "ATS CV: PDF from the job hunter's CV"
 # it as `job-hunt/<first name>_cv.pdf`. Manual runs only.
 #
 # HOW THIS WORKS
-#   1. The runner joins the tailnet (no exit node: only 9router is needed).
+#   1. The runner joins the tailnet, through TAILSCALE_EXIT_NODE when set, as
+#      job-hunter.yaml does (9router may only be reachable through it).
 #   2. `job-hunter/ats_cv.ts`, checked out from the PRIVATE repo, has 9router
 #      sort cv.md into a CV's sections from its facts only, lays it out the
 #      way applicant tracking systems parse best (one column, standard
@@ -17,7 +18,8 @@ name: "ATS CV: PDF from the job hunter's CV"
 # SECRETS: the same as job-hunter.yaml, minus the search and Chrome ones:
 #   PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read and write), BUILD_REF
 #   (optional), NINEROUTER_BASE_URL, NINEROUTER_MODEL, NINEROUTER_API_KEY
-#   (optional), and TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS or
+#   (optional), TAILSCALE_EXIT_NODE (optional), and
+#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS or
 #   TAILSCALE_AUTH_KEY.
 #
 # THIS REPO IS PUBLIC: the script prints counts only, never the CV or the
@@ -43,6 +45,7 @@ jobs:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
       TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
 
     steps:
       - name: Checkout private repo
@@ -81,6 +84,8 @@ jobs:
             echo "::error::Missing secret(s): ${missing[*]}"
             exit 1
           fi
+          # Not a secret, but a real address in a public log.
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
           # The runner image ships Google Chrome, which prints the PDF.
           google-chrome --version
           echo "Secrets present."
@@ -100,6 +105,15 @@ jobs:
         run: |
           set -euo pipefail
           args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
 
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
             if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
@@ -148,7 +162,7 @@ jobs:
             echo "::error::Tailscale is not connected (BackendState=${state})."
             exit 1
           fi
-          echo "Joined the tailnet."
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
 
 
       - name: Write the ATS CV
