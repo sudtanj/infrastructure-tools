@@ -279,6 +279,16 @@ NS="$("${SUDO[@]}" grep -E '^nameserver' "$RESOLV" | awk '{print $2}' | paste -s
 "${SUDO[@]}" iptables -C "$FW_CHAIN" -d 192.168.0.0/16 -j DROP 2>/dev/null \
   || fail "LAN block rule is missing from ${FW_CHAIN}"
 ok "DNS: AdGuard Family Protection only, other resolvers blocked; LAN unreachable"
+
+# UPnP: discovery is SSDP multicast and port mapping is a request to the router on the LAN;
+# both are dropped. Crash reports: the Sentry host must resolve to loopback in the container.
+"${SUDO[@]}" iptables -C "$FW_CHAIN" -d 224.0.0.0/4 -j DROP 2>/dev/null \
+  || fail "multicast (UPnP discovery) block rule is missing from ${FW_CHAIN}"
+HAVE_HOSTS=" $("${DOCKER[@]}" inspect -f '{{join .HostConfig.ExtraHosts " "}}' "$CONTAINER_NAME") "
+for h in "${TELEMETRY_HOSTS[@]}"; do
+  [[ "$HAVE_HOSTS" == *" ${h}:127.0.0.1 "* ]] || fail "${h} is not pointed at loopback in ${CONTAINER_NAME}"
+done
+ok "UPnP blocked (no multicast, no LAN), crash reports go nowhere"
 [ "${INIT_DEBUG:-0}" = "1" ] && show_logs 10 '[d]  '
 unset PASSWORD
 ok "${CONTAINER_NAME} is up"
