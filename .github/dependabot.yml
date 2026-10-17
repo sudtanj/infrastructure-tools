@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: docker
-    directory: /builder-tools/mini-router
+    directory: /builder-tools/zilong-router
     schedule: { interval: weekly }
   - package-ecosystem: docker
     directory: /builder-tools/oci-freetier-creator

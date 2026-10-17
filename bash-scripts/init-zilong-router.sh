@@ -1,8 +1,8 @@
 #!/bin/bash
-# bash-scripts/init-mini-router.sh
-# Idempotent deploy/update of mini-router (sudtanj/mini-router, see builder-tools/mini-router/)
+# bash-scripts/init-zilong-router.sh
+# Idempotent deploy/update of zilong-router (sudtanj/zilong-router, see builder-tools/zilong-router/)
 # on a small board, tuned for the Orange Pi Zero 3 (4x A53, 1 GB RAM, SD card):
-#   - published only on 127.0.0.1 by default (not on the LAN); MINI_ROUTER_BIND opens it deliberately
+#   - published only on 127.0.0.1 by default (not on the LAN); ZILONG_ROUTER_BIND opens it deliberately
 #   - read-only rootfs, all caps dropped, hard RAM cap without swap, low CPU weight
 #   - 1 tokio worker, warn-level logs capped at 1 MB
 #   - with Turso configured: TURSO_ONLY by default, so the database lives in RAM and
@@ -13,40 +13,49 @@
 # that is deleted right after `docker run`.
 #
 # Env (all optional):
-#   MINI_ROUTER_TURSO_URL         libsql://<db>-<org>.turso.io
-#   MINI_ROUTER_TURSO_TOKEN       Turso auth token
-#   MINI_ROUTER_TURSO_ONLY        1 | 0, default 1 when both Turso values are set, else 0
-#   MINI_ROUTER_TURSO_SYNC_SECS   push interval, default 30
-#   MINI_ROUTER_INITIAL_PASSWORD  dashboard password until one is saved (default 123456)
-#   MINI_ROUTER_JWT_SECRET        fixed dashboard session secret
-#   MINI_ROUTER_REQUIRE_API_KEY   true | false, default false
-#   MINI_ROUTER_BIND              host address to publish on, default 127.0.0.1 (loopback only).
-#                                 Use the Tailscale IP (tailscale ip -4) or a LAN IP to reach it remotely;
-#                                 0.0.0.0 exposes it on every interface and is refused unless
-#                                 MINI_ROUTER_ALLOW_ANY=1.
-#   MINI_ROUTER_PORT              host port to publish, default 20129 (container always listens on 20128)
-#   MINI_ROUTER_IMAGE             default sudtanj/mini-router:latest
-#   MINI_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
-#   MINI_ROUTER_MEMORY_LIMIT      default 96m (swap disabled)
+#   ZILONG_ROUTER_TURSO_URL         libsql://<db>-<org>.turso.io
+#   ZILONG_ROUTER_TURSO_TOKEN       Turso auth token
+#   ZILONG_ROUTER_TURSO_ONLY        1 | 0, default 1 when both Turso values are set, else 0
+#   ZILONG_ROUTER_TURSO_SYNC_SECS   push interval, default 30
+#   ZILONG_ROUTER_INITIAL_PASSWORD  dashboard password until one is saved (default 123456)
+#   ZILONG_ROUTER_JWT_SECRET        fixed dashboard session secret
+#   ZILONG_ROUTER_REQUIRE_API_KEY   true | false, default false
+#   ZILONG_ROUTER_BIND              host address to publish on, default 127.0.0.1 (loopback only).
+#                                   Use the Tailscale IP (tailscale ip -4) or a LAN IP to reach it remotely;
+#                                   0.0.0.0 exposes it on every interface and is refused unless
+#                                   ZILONG_ROUTER_ALLOW_ANY=1.
+#   ZILONG_ROUTER_PORT              host port to publish, default 20129 (container always listens on 20128)
+#   ZILONG_ROUTER_IMAGE             default sudtanj/zilong-router:latest
+#   ZILONG_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
+#   ZILONG_ROUTER_MEMORY_LIMIT      default 96m (swap disabled)
+# Each also accepts its pre-rename MINI_ROUTER_* name (the existing repo secrets),
+# used when the ZILONG_ROUTER_* one is unset.
 
 set -euo pipefail
 
-CONTAINER_NAME="mini-router"
-VOLUME_NAME="mini-router-data"
-IMAGE="${MINI_ROUTER_IMAGE:-sudtanj/mini-router:latest}"
-PORT="${MINI_ROUTER_PORT:-20129}"   # host side
+# Renamed from mini-router: fall back to the old variable names.
+while IFS= read -r old; do
+  new="ZILONG_ROUTER_${old#MINI_ROUTER_}"
+  [ -n "${!new+x}" ] || export "${new}=${!old}"
+done < <(compgen -e | grep '^MINI_ROUTER_' || true)
+
+CONTAINER_NAME="zilong-router"
+LEGACY_NAME="mini-router"   # container, volume and image name before the rename
+VOLUME_NAME="zilong-router-data"
+IMAGE="${ZILONG_ROUTER_IMAGE:-sudtanj/zilong-router:latest}"
+PORT="${ZILONG_ROUTER_PORT:-20129}"   # host side
 CPORT=20128                                # container side
-BIND="${MINI_ROUTER_BIND:-127.0.0.1}"
-TURSO_URL="${MINI_ROUTER_TURSO_URL:-}"
-TURSO_TOKEN="${MINI_ROUTER_TURSO_TOKEN:-}"
+BIND="${ZILONG_ROUTER_BIND:-127.0.0.1}"
+TURSO_URL="${ZILONG_ROUTER_TURSO_URL:-}"
+TURSO_TOKEN="${ZILONG_ROUTER_TURSO_TOKEN:-}"
 if [ -n "$TURSO_URL" ] && [ -n "$TURSO_TOKEN" ]; then DEF_ONLY=1; else DEF_ONLY=0; fi
-TURSO_ONLY="${MINI_ROUTER_TURSO_ONLY:-$DEF_ONLY}"
-TURSO_SYNC_SECS="${MINI_ROUTER_TURSO_SYNC_SECS:-30}"
-INITIAL_PASSWORD="${MINI_ROUTER_INITIAL_PASSWORD:-}"
-JWT_SECRET="${MINI_ROUTER_JWT_SECRET:-}"
-REQUIRE_API_KEY="${MINI_ROUTER_REQUIRE_API_KEY:-false}"
-CPU_LIMIT="${MINI_ROUTER_CPU_LIMIT:-1.0}"
-MEMORY_LIMIT="${MINI_ROUTER_MEMORY_LIMIT:-96m}"
+TURSO_ONLY="${ZILONG_ROUTER_TURSO_ONLY:-$DEF_ONLY}"
+TURSO_SYNC_SECS="${ZILONG_ROUTER_TURSO_SYNC_SECS:-30}"
+INITIAL_PASSWORD="${ZILONG_ROUTER_INITIAL_PASSWORD:-}"
+JWT_SECRET="${ZILONG_ROUTER_JWT_SECRET:-}"
+REQUIRE_API_KEY="${ZILONG_ROUTER_REQUIRE_API_KEY:-false}"
+CPU_LIMIT="${ZILONG_ROUTER_CPU_LIMIT:-1.0}"
+MEMORY_LIMIT="${ZILONG_ROUTER_MEMORY_LIMIT:-96m}"
 CONFIG_REV="5"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
@@ -63,7 +72,7 @@ if [ "$(id -u)" -eq 0 ] || docker info >/dev/null 2>&1; then DOCKER=(docker); el
 renice -n 19 -p $$ >/dev/null 2>&1 || true
 command -v ionice >/dev/null 2>&1 && ionice -c3 -p $$ >/dev/null 2>&1 || true
 
-status "init mini-router start"
+status "init zilong-router start"
 
 # ---------------------------------------------------------------------------
 # 1. Preflight
@@ -74,21 +83,28 @@ case "$(uname -m)" in
   x86_64|aarch64|arm64) ;;
   *) fail "unsupported arch $(uname -m); the image is built for amd64 and arm64 only" ;;
 esac
-[[ "$PORT" =~ ^[0-9]{2,5}$ ]] || fail "MINI_ROUTER_PORT must be a number"
-[[ "$BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "MINI_ROUTER_BIND must be an IPv4 address"
-if [ "$BIND" = "0.0.0.0" ] && [ "${MINI_ROUTER_ALLOW_ANY:-0}" != "1" ]; then
-  fail "MINI_ROUTER_BIND=0.0.0.0 exposes the router on every interface; set MINI_ROUTER_ALLOW_ANY=1 if that is intended"
+[[ "$PORT" =~ ^[0-9]{2,5}$ ]] || fail "ZILONG_ROUTER_PORT must be a number"
+[[ "$BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "ZILONG_ROUTER_BIND must be an IPv4 address"
+if [ "$BIND" = "0.0.0.0" ] && [ "${ZILONG_ROUTER_ALLOW_ANY:-0}" != "1" ]; then
+  fail "ZILONG_ROUTER_BIND=0.0.0.0 exposes the router on every interface; set ZILONG_ROUTER_ALLOW_ANY=1 if that is intended"
 fi
-case "$TURSO_ONLY" in 0|1) ;; *) fail "MINI_ROUTER_TURSO_ONLY must be 0 or 1" ;; esac
+case "$TURSO_ONLY" in 0|1) ;; *) fail "ZILONG_ROUTER_TURSO_ONLY must be 0 or 1" ;; esac
 if [ "$TURSO_ONLY" = "1" ] && { [ -z "$TURSO_URL" ] || [ -z "$TURSO_TOKEN" ]; }; then
-  fail "MINI_ROUTER_TURSO_ONLY=1 needs MINI_ROUTER_TURSO_URL and MINI_ROUTER_TURSO_TOKEN"
+  fail "ZILONG_ROUTER_TURSO_ONLY=1 needs ZILONG_ROUTER_TURSO_URL and ZILONG_ROUTER_TURSO_TOKEN"
 fi
 if [ -z "$INITIAL_PASSWORD" ]; then
-  warn "MINI_ROUTER_INITIAL_PASSWORD unset: dashboard password is the 9router default until changed"
+  warn "ZILONG_ROUTER_INITIAL_PASSWORD unset: dashboard password is the 9router default until changed"
 fi
 if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
-   && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+   && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1 \
+   && ! "${DOCKER[@]}" inspect "$LEGACY_NAME" >/dev/null 2>&1; then
   fail "port ${PORT} is already in use on the host"
+fi
+# Keep using the pre-rename data volume rather than starting empty.
+if ! "${DOCKER[@]}" volume inspect "$VOLUME_NAME" >/dev/null 2>&1 \
+   && "${DOCKER[@]}" volume inspect "${LEGACY_NAME}-data" >/dev/null 2>&1; then
+  VOLUME_NAME="${LEGACY_NAME}-data"
+  debug "using the pre-rename volume ${VOLUME_NAME}"
 fi
 MEM_AVAIL="$(free -m | awk '/^Mem:/{print $7}')"
 debug "turso: url=$(present "$TURSO_URL") token=$(present "$TURSO_TOKEN") only=${TURSO_ONLY} | password=$(present "$INITIAL_PASSWORD") jwt=$(present "$JWT_SECRET") | mem_avail=${MEM_AVAIL}MB"
@@ -119,7 +135,7 @@ ok "image ready"
 WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$BIND" "$TURSO_URL" "$TURSO_TOKEN" "$TURSO_ONLY" "$TURSO_SYNC_SECS" \
   "$INITIAL_PASSWORD" "$JWT_SECRET" "$REQUIRE_API_KEY" "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" \
   | sha256sum | awk '{print $1}')"
-HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "mini-router.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "zilong-router.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
 
 if [ "$WANT_SUM" = "$HAVE_SUM" ] && [ "$STATE" = "running" ]; then
@@ -144,7 +160,7 @@ else
   {
     echo "PORT=${CPORT}"
     echo "HOSTNAME=0.0.0.0"
-    echo "MINI_ROUTER_WORKERS=1"
+    echo "ZILONG_ROUTER_WORKERS=1"
     echo "LOG_LEVEL=warn"
     echo "REQUIRE_API_KEY=${REQUIRE_API_KEY}"
     # Claude Code / Codex requests rarely exceed a few MB; bound what one request can pin.
@@ -161,9 +177,14 @@ else
   } > "$ENV_FILE"
 
   step "removing existing ${CONTAINER_NAME} container"
-  # SIGTERM first: with Turso, mini-router does a final push on clean shutdown.
+  # SIGTERM first: with Turso, zilong-router does a final push on clean shutdown.
   "${DOCKER[@]}" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
   "${DOCKER[@]}" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  if "${DOCKER[@]}" inspect "$LEGACY_NAME" >/dev/null 2>&1; then
+    step "removing the pre-rename ${LEGACY_NAME} container"
+    "${DOCKER[@]}" stop -t 15 "$LEGACY_NAME" >/dev/null 2>&1 || true
+    "${DOCKER[@]}" rm -f "$LEGACY_NAME" >/dev/null 2>&1 || true
+  fi
   ok "old container gone"
 
   step "starting ${CONTAINER_NAME} (data: ${MEDIA})"
@@ -171,7 +192,7 @@ else
     --restart unless-stopped \
     -p "${BIND}:${PORT}:${CPORT}" \
     --env-file "$ENV_FILE" \
-    --label "mini-router.config=${WANT_SUM}" \
+    --label "zilong-router.config=${WANT_SUM}" \
     "${DATA_OPTS[@]}" "${MID_OPTS[@]}" \
     --read-only \
     --cpus "$CPU_LIMIT" --cpu-shares 512 \
@@ -189,6 +210,7 @@ unset TURSO_TOKEN INITIAL_PASSWORD JWT_SECRET
 if [ -n "$OLD_IMAGE_ID" ] && [ "$OLD_IMAGE_ID" != "$IMAGE_ID" ]; then
   "${DOCKER[@]}" rmi "$OLD_IMAGE_ID" >/dev/null 2>&1 && debug "removed previous image" || true
 fi
+"${DOCKER[@]}" rmi "sudtanj/${LEGACY_NAME}:latest" >/dev/null 2>&1 && debug "removed the pre-rename image" || true
 
 # ---------------------------------------------------------------------------
 # 4. Verify: running, not restart-looping, and answering HTTP
@@ -207,7 +229,7 @@ OOM="$("${DOCKER[@]}" inspect -f '{{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev
 if [ "$STATE" != "running" ] || [ "${RESTARTS:-0}" -gt "${RESTARTS_BEFORE:-0}" ]; then
   warn "state: ${STATE}, restarts during check: $(( ${RESTARTS:-0} - ${RESTARTS_BEFORE:-0} ))"
   show_logs 20 '[!]  ' >&2
-  [ "$OOM" = "true" ] && fail "${CONTAINER_NAME} hit the ${MEMORY_LIMIT} memory cap; raise MINI_ROUTER_MEMORY_LIMIT"
+  [ "$OOM" = "true" ] && fail "${CONTAINER_NAME} hit the ${MEMORY_LIMIT} memory cap; raise ZILONG_ROUTER_MEMORY_LIMIT"
   fail "${CONTAINER_NAME} is not staying up"
 fi
 
@@ -239,4 +261,4 @@ echo "[*] docker port (dots shown as _ because the log sanitizer hides IPs): $("
 echo "[*] storage: $([ "$TURSO_ONLY" = "1" ] && echo "RAM + Turso (no SD writes)" || echo "volume ${VOLUME_NAME}")"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids 64"
 echo "[*] memory: ${MEM:-unknown}"
-ok "init mini-router done"
+ok "init zilong-router done"

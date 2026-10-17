@@ -1,20 +1,19 @@
-# Build from source (the Dockerfile clones mini-router): docker compose up -d --build
+# Published image: docker compose -f docker-compose.hub.yml up -d
 # Dashboard: http://<host>:20129/dashboard   API: http://<host>:20129/v1
 services:
-  mini-router:
-    build: .
-    image: mini-router:local
-    container_name: mini-router
+  zilong-router:
+    image: sudtanj/zilong-router:latest
+    container_name: zilong-router
     restart: unless-stopped
     ports:
       # Loopback only. Use "<tailscale-ip>:20129:20128" to reach it remotely.
       - "127.0.0.1:20129:20128"
     env_file: .env
     environment:
-      MINI_ROUTER_WORKERS: "1"
+      ZILONG_ROUTER_WORKERS: "1"
       LOG_LEVEL: warn
     volumes:
-      - mini-router-data:/data
+      - zilong-router-data:/data
       # Stable machine id: API keys embed it, like 9router.
       - /etc/machine-id:/etc/machine-id:ro
     read_only: true
@@ -29,4 +28,4 @@ services:
       options: { max-size: 1m, max-file: "1" }
 
 volumes:
-  mini-router-data:
+  zilong-router-data:

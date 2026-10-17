@@ -15,7 +15,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, DOZZLE_, MINI_ROUTER_
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, DOZZLE_, ZILONG_ROUTER_ (or the older MINI_ROUTER_ names)
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +32,7 @@ on:
           - init-repocket
           - init-pawns
           - init-dozzle
-          - init-mini-router
+          - init-zilong-router
           - reset-containers
           # add new script names here as you create them
       debug:
@@ -163,7 +163,9 @@ jobs:
                      TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE EARNFM_TOKEN EARNFM_DEVICE
                      REPOCKET_TOKEN REPOCKET_DEVICE PAWNS_EMAIL PAWNS_PASSWORD PAWNS_DEVICE
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
-                     MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET);
+                     ZILONG_ROUTER_TURSO_TOKEN ZILONG_ROUTER_TURSO_URL
+                     MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
+                     ZILONG_ROUTER_INITIAL_PASSWORD ZILONG_ROUTER_JWT_SECRET);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
             for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
@@ -257,7 +259,7 @@ jobs:
           ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,DOZZLE_,MINI_ROUTER_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,DOZZLE_,MINI_ROUTER_,ZILONG_ROUTER_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
           HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
@@ -274,6 +276,10 @@ jobs:
           MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
           MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
           MINI_ROUTER_JWT_SECRET: ${{ secrets.MINI_ROUTER_JWT_SECRET }}
+          ZILONG_ROUTER_TURSO_TOKEN: ${{ secrets.ZILONG_ROUTER_TURSO_TOKEN }}
+          ZILONG_ROUTER_TURSO_URL: ${{ secrets.ZILONG_ROUTER_TURSO_URL }}
+          ZILONG_ROUTER_INITIAL_PASSWORD: ${{ secrets.ZILONG_ROUTER_INITIAL_PASSWORD }}
+          ZILONG_ROUTER_JWT_SECRET: ${{ secrets.ZILONG_ROUTER_JWT_SECRET }}
         run: |
           set +e
           SECONDS=0
@@ -287,8 +293,9 @@ jobs:
 
           # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
           {
-            # mini-router defaults (not secrets, so ALL_SECRETS never carries them); a
-            # MINI_ROUTER_BIND repo secret exported below overrides the bind address.
+            # zilong-router defaults (not secrets, so ALL_SECRETS never carries them), under the
+            # pre-rename names so that any MINI_ROUTER_/ZILONG_ROUTER_ repo secret exported below
+            # overrides them (the init script prefers ZILONG_ROUTER_* over MINI_ROUTER_*).
             printf 'export MINI_ROUTER_BIND=0.0.0.0\nexport MINI_ROUTER_ALLOW_ANY=1\n'
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
             for p in "${PREFIXES[@]}"; do
