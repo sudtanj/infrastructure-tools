@@ -1002,6 +1002,16 @@ jobs:
           URL="http://127.0.0.1:9222"
           for _ in $(seq 1 30); do
             if curl -fs "$URL/json/version" > /dev/null 2>&1; then
+              # Session restore is still opening tabs when CDP comes up.
+              sleep 5
+              # Close the restored tabs (scripts open their own): a tab restored but
+              # never loaded makes Playwright's connectOverCDP wait forever. A blank
+              # tab opens first so closing the rest does not quit Chrome.
+              curl -fs -X PUT "$URL/json/new?about:blank" -o /tmp/chrome-blank.json
+              blank="$(jq -r '.id' /tmp/chrome-blank.json)"
+              for id in $(curl -fs "$URL/json/list" | jq -r --arg keep "$blank" '.[] | select(.type == "page" and .id != $keep) | .id'); do
+                curl -fs "$URL/json/close/$id" -o /dev/null || true
+              done
               # Sourced by the script step: every step is its own shell.
               {
                 printf 'export CHROME_CDP_URL=%q\n' "$URL"
