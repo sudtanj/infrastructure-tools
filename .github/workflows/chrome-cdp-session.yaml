@@ -50,17 +50,17 @@ name: "Chrome CDP session over Tailscale"
 #   nodriver/zendriver against this endpoint to avoid it, and log in by hand
 #   over VNC rather than scripting the login form.
 #
-# STOPPING
-#   Open any tab at   about:blank#stop-session
-#   (in the address bar over VNC, or `Target.createTarget` / a new page over
-#   CDP), or press Cancel on the run. Both shut Chrome down cleanly and save
-#   the profile; so does reaching `max_minutes`. Only the 360 minute job
-#   timeout (or cancelling twice) loses the session.
-#   With `vnc_disconnect_minutes` (default 2), it also stops and saves once a
-#   VNC viewer has connected and then every viewer has been gone that long.
-#   A run nobody opens over VNC (agent-only, CDP) is not affected.
-#   Closing the browser itself (its last window, or Browser.close over CDP)
-#   also ends the session and saves; only a crash restarts Chrome.
+# HOW LONG IT RUNS
+#   Until the browser is closed (its last window over VNC, or Browser.close
+#   over CDP), or until nothing has been connected to VNC or CDP for
+#   `idle_minutes` (default 30, counted from start too). An open VNC viewer or
+#   CDP connection keeps it alive. Only a crash restarts Chrome.
+#   One GitHub job can run at most 360 minutes, so at 320 minutes the run
+#   saves and, if anything was connected in the last `idle_minutes`, starts a
+#   new run that restores the same profile at the same tailnet IP (a few
+#   minutes' gap while it boots).
+#   Also: `about:blank#stop-session` in any tab, or Cancel (once). Every way
+#   out saves the profile, except cancelling twice.
 #
 # SECRETS
 #   PRIVATE_REPO                   owner/name of the private repo
@@ -76,10 +76,10 @@ name: "Chrome CDP session over Tailscale"
 on:
   workflow_dispatch:
     inputs:
-      max_minutes:
-        description: 'Stop and save after this many minutes if nobody stops it (max 330)'
+      idle_minutes:
+        description: 'Stop and save after this many minutes with no VNC or CDP connection'
         type: number
-        default: 120
+        default: 30
       fresh:
         description: 'Ignore the saved profile; the next save replaces it'
         type: boolean
@@ -96,13 +96,11 @@ on:
         description: 'Browser language (e.g. en-US, id-ID)'
         type: string
         default: 'en-US'
-      vnc_disconnect_minutes:
-        description: 'Stop and save this many minutes after the last VNC viewer leaves (0 = never)'
-        type: number
-        default: 2
 
 permissions:
   contents: read
+  # Only to dispatch the follow-up run when one run's time is up.
+  actions: write
 
 # One browser at a time: two runs would race to save over each other's state.
 concurrency:
@@ -253,17 +251,17 @@ jobs:
       - name: Run Chrome until stopped
         id: chrome
         env:
-          MAX_MINUTES: ${{ inputs.max_minutes }}
-          VNC_DISCONNECT_MINUTES: ${{ inputs.vnc_disconnect_minutes }}
+          IDLE_MINUTES: ${{ inputs.idle_minutes }}
           USE_EXIT_NODE: ${{ inputs.use_exit_node }}
           EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
           TZ: ${{ inputs.timezone }}
           LOCALE: ${{ inputs.locale }}
         run: |
           set -uo pipefail
-          # Leave room under the 360 minute job limit to pack and upload the profile.
-          max="${MAX_MINUTES:-120}"
-          if [ "$max" -gt 330 ]; then max=330; fi
+          idle_min="${IDLE_MINUTES%%.*}"
+          [[ "$idle_min" =~ ^[0-9]+$ ]] && [ "$idle_min" -gt 0 ] || idle_min=30
+          # Leaves room under the 360 minute job limit to pack and upload the profile.
+          cap_min=320
           mkdir -p "$PROFILE_DIR"
           export LANG="${LOCALE//-/_}.UTF-8" LANGUAGE="${LOCALE//-/_}"
 
@@ -357,15 +355,18 @@ jobs:
 
           start_chrome
           curl -fs http://127.0.0.1:9222/json/version | jq -r '.Browser'
-          echo "Chrome ready. Open about:blank#stop-session to stop (limit ${max} minutes)."
+          echo "Chrome ready. Runs until the browser is closed, or nothing is connected for ${idle_min} minutes."
 
-          VNC_DISCONNECT_MINUTES="${VNC_DISCONNECT_MINUTES%%.*}"
-          [[ "$VNC_DISCONNECT_MINUTES" =~ ^[0-9]+$ ]] || VNC_DISCONNECT_MINUTES=0
-          vnc_grace=$(( VNC_DISCONNECT_MINUTES * 60 ))
-          vnc_seen=false
-          vnc_gone_at=""
-          deadline=$((SECONDS + max * 60))
-          while [ "$SECONDS" -lt "$deadline" ]; do
+          # Active = any open connection to VNC (5900) or CDP (9222). Both
+          # arrive through Tailscale serve, so they show up as established
+          # connections to localhost. Our own curl polls have closed by now.
+          active() {
+            [ "$(ss -Htn state established '( sport = :5900 or sport = :9222 )' | wc -l)" -gt 0 ]
+          }
+
+          last_active=$SECONDS
+          was_active=false
+          while :; do
             if curl -fs http://127.0.0.1:9222/json/list 2>/dev/null | jq -e 'any(.[]; .url | endswith("#stop-session"))' >/dev/null; then
               echo "Stop tab found."
               # Close it so the restored session does not stop the next run.
@@ -374,25 +375,7 @@ jobs:
               sleep 2
               break
             fi
-            # Once someone has watched over VNC, leaving (every viewer gone for
-            # the grace period) ends the session. Viewers arrive through
-            # Tailscale serve, so they show up as connections to localhost:5900.
-            if [ "$vnc_grace" -gt 0 ]; then
-              viewers="$(ss -Htn state established '( sport = :5900 )' | wc -l)"
-              if [ "$viewers" -gt 0 ]; then
-                [ "$vnc_seen" = true ] || echo "VNC viewer connected."
-                vnc_seen=true
-                vnc_gone_at=""
-              elif [ "$vnc_seen" = true ]; then
-                if [ -z "$vnc_gone_at" ]; then
-                  echo "VNC viewer left; stopping in ${VNC_DISCONNECT_MINUTES} minutes unless one reconnects."
-                  vnc_gone_at=$SECONDS
-                elif [ $((SECONDS - vnc_gone_at)) -ge "$vnc_grace" ]; then
-                  echo "No VNC viewer for ${VNC_DISCONNECT_MINUTES} minutes."
-                  break
-                fi
-              fi
-            fi
+
             # Closing the browser (last window over VNC, or Browser.close over
             # CDP) ends the session. Chrome marks the profile "Crashed" while it
             # runs and "Normal" on a clean exit, so only a crash is restarted.
@@ -405,6 +388,30 @@ jobs:
                 echo "Browser closed."
                 break
               fi
+            fi
+
+            if active; then
+              [ "$was_active" = true ] || echo "Client connected."
+              was_active=true
+              last_active=$SECONDS
+            else
+              [ "$was_active" = false ] || echo "No clients connected; stopping after ${idle_min} idle minutes."
+              was_active=false
+              if [ $((SECONDS - last_active)) -ge $((idle_min * 60)) ]; then
+                echo "Nothing connected for ${idle_min} minutes."
+                break
+              fi
+            fi
+
+            # GitHub kills the job at 360 minutes. Stop in time to save, and let
+            # a follow-up run take over if someone is still using the browser.
+            if [ "$SECONDS" -ge $((cap_min * 60)) ]; then
+              echo "Reached the ${cap_min} minute limit of one run."
+              if [ $((SECONDS - last_active)) -lt $((idle_min * 60)) ]; then
+                echo "continue=true" >> "$GITHUB_OUTPUT"
+                echo "Still in use; a new run continues after this one saves."
+              fi
+              break
             fi
             sleep 10
           done
@@ -481,6 +488,26 @@ jobs:
                 gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
               done
           echo "Profile saved."
+
+      # Same inputs, so the next run picks up where this one left off. The
+      # concurrency group holds it until this run has finished saving.
+      - name: Continue in a new run
+        if: ${{ success() && steps.chrome.outputs.continue == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          USE_EXIT_NODE: ${{ inputs.use_exit_node }}
+          TIMEZONE: ${{ inputs.timezone }}
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          set -euo pipefail
+          gh workflow run chrome-cdp-session.yaml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f idle_minutes="$IDLE_MINUTES" \
+            -f fresh=false \
+            -f use_exit_node="$USE_EXIT_NODE" \
+            -f timezone="$TIMEZONE" \
+            -f locale="$LOCALE"
+          echo "Follow-up run dispatched."
 
       # `down`, not `logout`: logout would expire the saved identity and the
       # next run would come back as a new machine with a new IP.
