@@ -15,7 +15,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_)
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
 on:
   workflow_dispatch:
     inputs:
@@ -35,6 +35,7 @@ on:
           - init-bitping
           - init-dozzle
           - init-zilong-router
+          - init-kongming
           - reset-containers
           # add new script names here as you create them
       debug:
@@ -166,7 +167,9 @@ jobs:
                      REPOCKET_TOKEN REPOCKET_DEVICE PAWNS_EMAIL PAWNS_PASSWORD PAWNS_DEVICE
                      PACKETSTREAM_CID PACKETSTREAM_DEVICE BITPING_API_KEY BITPING_DEVICE
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
-                     MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET);
+                     MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
+                     KONGMING_TURSO_TOKEN KONGMING_TURSO_URL KONGMING_PASSWORD KONGMING_SECRET
+                     KONGMING_LLM_API_KEY KONGMING_LLM_BASE_URL KONGMING_TELEGRAM_TOKEN KONGMING_TELEGRAM_USERS KONGMING_PUBLIC_URL);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
             for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
@@ -261,7 +264,7 @@ jobs:
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
           # MINI_ROUTER_ secrets are exported under the ZILONG_ROUTER_ names the script reads.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,DOZZLE_,MINI_ROUTER_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,DOZZLE_,MINI_ROUTER_,KONGMING_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
           HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
@@ -283,6 +286,19 @@ jobs:
           MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
           MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
           MINI_ROUTER_JWT_SECRET: ${{ secrets.MINI_ROUTER_JWT_SECRET }}
+          KONGMING_TURSO_TOKEN: ${{ secrets.KONGMING_TURSO_TOKEN }}
+          KONGMING_TURSO_URL: ${{ secrets.KONGMING_TURSO_URL }}
+          KONGMING_PASSWORD: ${{ secrets.KONGMING_PASSWORD }}
+          KONGMING_SECRET: ${{ secrets.KONGMING_SECRET }}
+          KONGMING_PUBLIC_URL: ${{ secrets.KONGMING_PUBLIC_URL }}
+          KONGMING_LLM_PROVIDER: ${{ secrets.KONGMING_LLM_PROVIDER }}
+          KONGMING_LLM_BASE_URL: ${{ secrets.KONGMING_LLM_BASE_URL }}
+          KONGMING_LLM_API_KEY: ${{ secrets.KONGMING_LLM_API_KEY }}
+          KONGMING_LLM_MODEL: ${{ secrets.KONGMING_LLM_MODEL }}
+          KONGMING_TELEGRAM_TOKEN: ${{ secrets.KONGMING_TELEGRAM_TOKEN }}
+          KONGMING_TELEGRAM_USERS: ${{ secrets.KONGMING_TELEGRAM_USERS }}
+          KONGMING_BIND: ${{ secrets.KONGMING_BIND }}
+          KONGMING_NETWORK: ${{ secrets.KONGMING_NETWORK }}
         run: |
           set +e
           SECONDS=0

@@ -37,6 +37,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── init-n8n.sh                   # Deploy n8n workflow automation, tuned for free tier
 │   ├── init-tailscale.sh             # Install, update & configure Tailscale (idempotent)
 │   ├── reset-containers.sh           # Stop & remove all running containers, keep volumes
+│   ├── init-kongming.sh              # Deploy & maintain kongming (Rust agentic AI daemon, state on Turso, read-only image)
 │   └── init-portainer.sh             # Deploy latest Portainer only
 ├── terraform_free_tier_gcp/
 │   ├── cloud-init.yaml.tftpl         # Cloud-config for COS startup, Tailscale & Portainer setup

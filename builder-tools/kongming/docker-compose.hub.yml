@@ -1,0 +1,24 @@
+# Published image: docker compose -f docker-compose.hub.yml up -d
+# UI: http://<host>:18800
+services:
+  kongming:
+    image: sudtanj/kongming:latest
+    container_name: kongming
+    restart: unless-stopped
+    ports:
+      # Loopback only. Use "<tailscale-ip>:18800:18800" to reach it remotely.
+      - "127.0.0.1:18800:18800"
+    env_file: .env   # TURSO_DATABASE_URL, TURSO_AUTH_TOKEN, KONGMING_PASSWORD, LLM_*, TELEGRAM_*
+    environment:
+      KONGMING_WORKERS: "1"
+      LOG_LEVEL: info
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: 1.0
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: 1m, max-file: "1" }

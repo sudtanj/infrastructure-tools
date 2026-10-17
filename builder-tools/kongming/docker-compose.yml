@@ -1,0 +1,19 @@
+# Local build: docker compose up -d --build
+services:
+  kongming:
+    build:
+      context: .
+      args:
+        KONGMING_REF: ""   # tag/branch/commit of sudtanj/kongming, empty = main
+    container_name: kongming
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18800:18800"
+    env_file: .env
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: 1.0
+    pids_limit: 64
