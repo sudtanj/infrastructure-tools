@@ -22,12 +22,12 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #                 A guard step refuses to continue unless Tailscale reports
 #                 BackendState=Running AND the exit node is reachable on the
 #                 tailnet, so a script can never silently run un-VPNed.
-#                 Then CloakBrowser starts as a stealth Chromium CDP server,
-#                 and every script runs, in sorted order, sequentially, in the
-#                 same job -- one Tailscale node, one exit-node route, stable
-#                 egress IP for the whole run.
-#   3. teardown - remove the browser container and log out of the tailnet, so
-#                 neither a container nor a registered node lingers.
+#                 Then the shared Chrome from chrome-cdp-session.yaml is
+#                 checked over the tailnet, and every script runs, in sorted
+#                 order, sequentially, in the same job -- one Tailscale node,
+#                 one exit-node route, stable egress IP for the whole run.
+#   3. teardown - stop the shared Chrome session (it saves its profile) and
+#                 log out of the tailnet, so no registered node lingers.
 #
 # WHY SEQUENTIAL AND NOT A MATRIX
 #   A matrix would bring Tailscale up once per script: N auth keys burned,
@@ -81,62 +81,21 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   When NODE_VERSION is pinned below 23.6, the flag is passed explicitly so
 #   the fallback still works instead of failing on a syntax error.
 #
-# BROWSER (CloakBrowser)
-#   A stealth Chromium is started as a container and served over the Chrome
-#   DevTools Protocol on port 9222. Scripts connect to it from the runner:
+# BROWSER (shared Chrome over CDP)
+#   No browser is started here. The scripts use the logged-in Google Chrome
+#   that chrome-cdp-session.yaml keeps on the tailnet, so start that session
+#   first. Its tailnet IP is the CHROME_CDP_IP secret; the run checks
+#   http://<CHROME_CDP_IP>:9222/json/version after the exit-node guard and
+#   exports, for connectOverCDP():
+#     CHROME_CDP_URL  http://<CHROME_CDP_IP>:9222
+#     CDP_URL         same value, for a generic client
 #
-#     import { chromium } from 'playwright-core';
-#     const browser = await chromium.connectOverCDP(
-#       process.env.CLOAKBROWSER_CDP_URL!);
+#   The tailnet ACL must let this runner's TAILSCALE_TAGS reach the Chrome
+#   node on port 9222.
 #
-#   Three variables are exported into the scripts' environment:
-#     CLOAKBROWSER_CDP_URL  http://127.0.0.1:9222   for connectOverCDP()
-#     CDP_URL               same value, for a generic client
-#     CLOAKBROWSER_WS       the browser-level WebSocket URL, for a client that
-#                           speaks CDP directly rather than through Playwright.
-#                           Often EMPTY: cloakserve spawns a browser per
-#                           connection seed, so no browser exists yet and
-#                           there is no WebSocket URL to hand out. That is
-#                           normal, and connectOverCDP() does not need it.
-#
-#   Append ?fingerprint=<seed> to the URL for an isolated browser identity;
-#   the container's own startup banner recommends exactly that.
-#
-#   The container is NOT declared under `services:`. GitHub Actions service
-#   containers have no `command` key, so `cloakserve` and its flags cannot be
-#   passed that way; a plain `docker run` reproduces the compose service exactly
-#   and, unlike `services:`, lets a failure print the container's own logs.
-#
-#   THE COMMAND MATCHES A KNOWN-WORKING SETUP: `cloakserve --no-sandbox
-#   --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0`, published
-#   as 9222:9222, probed on /json/version. (Older note, now superseded: do NOT add
-#   --remote-debugging-port here. cloakserve IS the CDP endpoint: it opens its
-#   own multiplexer on 9222 and hands out browser endpoints from it. Passing a
-#   Chromium --remote-debugging-port makes Chrome open a SECOND CDP listener
-#   on the same port, which the vendor documents as breaking the browser --
-#   the container starts, prints its banner, and then never answers
-#   /json/version. The same goes for --remote-debugging-address: it only
-#   affects that second listener, which must not exist. `--no-sandbox` is kept
-#   because Chromium's own sandbox is not usable in most container runtimes.
-#
-#   Three deliberate differences from the compose snippet:
-#     * The port is published as 127.0.0.1:9222, not 0.0.0.0:9222. The
-#       vendor's own docs bind it to loopback and warn that CDP is full control
-#       of the browser. On a hosted runner the two are equally reachable from
-#       the scripts and neither is reachable from outside, so this is the same
-#       access with less exposure.
-#     * The container is only started AFTER the exit-node guard passes, so a
-#       broken VPN fails the run before the browser is launched, and the
-#       browser's own traffic goes out through the exit node like everything
-#       else on the runner.
-#     * The ~600 MB IMAGE is pulled early, in the background, and the start
-#       step waits for it. Pulling lazily made the pull the slowest thing in
-#       the run (~3 min) with the runner idle; overlapping it with dependency
-#       install and the Tailscale steps removes that from the critical path.
-#
-#   Uncheck `browser` when dispatching to skip it entirely, which is the escape
-#   hatch if the image cannot be pulled (Docker Hub rate-limits shared runner
-#   IPs) and you only want the scripts to run.
+#   Teardown opens about:blank#stop-session on that Chrome, which makes the
+#   session workflow save its profile and finish. Uncheck `browser` when
+#   dispatching to skip the check and the stop.
 #
 # EXIT NODE TARGET
 #   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
@@ -172,6 +131,11 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #                                 otherwise every hostname lookup in the
 #                                 scripts fails. "false" still routes all IP
 #                                 traffic through the exit node.
+#   secret CHROME_CDP_IP          tailnet IPv4 of the chrome-cdp-session Chrome
+#                                 (required unless `browser` is unchecked).
+#                                 Use the 100.x IP, not the MagicDNS name:
+#                                 Chrome rejects CDP requests whose Host is not
+#                                 an IP. Masked like the exit node.
 #   secret NODE_VERSION           OPTIONAL, default "24". Needs to be >= 23.6
 #                                 for the bare `node file.ts` fallback to work
 #                                 without a flag; lower versions still run,
@@ -193,8 +157,8 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #       host name. A jq rollup (state, peer count, exit-node-capable peers)
 #       answers the same questions without identifying anything.
 #     * Everything a script writes is passed through redact(), which replaces
-#       IPv4, IPv6 and *.ts.net host names. Loopback is kept, because
-#       127.0.0.1 is the CDP endpoint the scripts connect to.
+#       IPv4, IPv6 and *.ts.net host names (loopback is kept). That includes
+#       the Chrome CDP address, which is also masked as CHROME_CDP_IP.
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo: visible to everyone, and forkable.
@@ -216,7 +180,7 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #     file and runs no lifecycle scripts, so a pushed dependency cannot execute
 #     code before the VPN is even up.
 #   * Teardown runs even when a script fails, so a failed run does not leave a
-#     container or a registered node behind.
+#     Chrome session or a registered node behind.
 # ---------------------------------------------------------------------------
 
 on:
@@ -243,7 +207,7 @@ on:
         default: false
         type: boolean
       browser:
-        description: "Start the CloakBrowser CDP server for the scripts to use"
+        description: "Use the shared Chrome CDP session (CHROME_CDP_IP) and stop it afterwards"
         required: false
         default: true
         type: boolean
@@ -262,9 +226,6 @@ concurrency:
 env:
   NODE_VERSION: ${{ secrets.NODE_VERSION || '24' }}
   TSWORKER_DIR: 'typescript-worker'
-  # One place for the tag, so the prefetch step and the start step can never
-  # disagree about which image is being used.
-  CLOAK_IMAGE: 'cloakhq/cloakbrowser:latest'
   NPM_CONFIG_FUND: 'false'
   NPM_CONFIG_AUDIT: 'false'
   NPM_CONFIG_UPDATE_NOTIFIER: 'false'
@@ -589,6 +550,8 @@ jobs:
       TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
       HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
       HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
+      CHROME_CDP_IP: ${{ secrets.CHROME_CDP_IP }}
+      USE_BROWSER: ${{ inputs.browser != false }}
 
     steps:
       - name: Checkout private repo
@@ -599,18 +562,6 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
-
-      - name: Prefetch CloakBrowser image
-        if: ${{ inputs.browser != 'false' }}
-        run: |
-          set -euo pipefail
-          # ~600 MB, and it was by far the slowest step in the run because the
-          # runner sat idle while it downloaded. Started in the background so
-          # it overlaps dependency install and the Tailscale steps; the start
-          # step below waits for it and falls back to a foreground pull.
-          docker pull "$CLOAK_IMAGE" > /tmp/cloak-pull.log 2>&1 &
-          echo $! > /tmp/cloak-pull.pid
-          echo "Pulling ${CLOAK_IMAGE} in the background."
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -656,6 +607,7 @@ jobs:
           for v in TAILSCALE_EXIT_NODE HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
+          if [ "$USE_BROWSER" = "true" ] && [ -z "${CHROME_CDP_IP:-}" ]; then missing+=("CHROME_CDP_IP"); fi
           # One VPN credential is enough: the non-expiring OAuth client secret
           # (which needs tags) wins, the 90-day auth key is the fallback.
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
@@ -692,6 +644,7 @@ jobs:
           # in a PUBLIC repo -- so it is masked like a secret even though it
           # is not one. See LOG REDACTION in the header.
           echo "::add-mask::${TAILSCALE_EXIT_NODE}"
+          if [ -n "${CHROME_CDP_IP:-}" ]; then echo "::add-mask::${CHROME_CDP_IP}"; fi
 
           # A one-way fingerprint of the exit node. The log can then prove
           # WHICH node was used -- useful when a run fails -- without ever
@@ -702,8 +655,8 @@ jobs:
           # Redaction helper for anything echoed back from a script or from a
           # command. Written to a file because every step is its own shell.
           cat > /tmp/redact.sh <<'REDACT'
-          # Loopback is preserved on purpose: 127.0.0.1 is the CDP endpoint
-          # the scripts connect to, and hiding it only makes the log harder
+          # Loopback is preserved on purpose: local services the scripts use
+          # live there, and hiding it only makes the log harder
           # to read. Everything else that looks like an address or a tailnet
           # host name is replaced.
           redact() {
@@ -936,168 +889,29 @@ jobs:
             echo "DNS: resolved by the runner, not the exit node (TAILSCALE_ACCEPT_DNS=false)."
           fi
 
-      # --------------------- CloakBrowser (CDP) ---------------------
+      # ---------------------- shared Chrome (CDP) ----------------------
 
-      - name: Start CloakBrowser
-        if: ${{ inputs.browser != 'false' }}
+      - name: Check the shared Chrome CDP session
+        if: ${{ env.USE_BROWSER == 'true' }}
         run: |
           set -euo pipefail
-
-          if ! command -v docker >/dev/null 2>&1; then
-            echo "::error::docker is not available on this runner; cannot start CloakBrowser."
-            exit 1
-          fi
-
-          # The prefetch step pulled this in the background. Wait for it here so
-          # the pull overlaps everything else instead of sitting on the
-          # critical path.
-          if [ -s /tmp/cloak-pull.pid ]; then
-            pid="$(cat /tmp/cloak-pull.pid)"
-            echo "Waiting for the background image pull to finish..."
-            while kill -0 "$pid" 2>/dev/null; do sleep 2; done
-          fi
-          if ! docker image inspect "$CLOAK_IMAGE" >/dev/null 2>&1; then
-            # Either the pull failed, or a background process did not survive
-            # into this step. Either way, retry in the foreground.
-            echo "::warning::Image not present; pulling ${CLOAK_IMAGE} in the foreground."
-            docker pull "$CLOAK_IMAGE" || {
-              echo "::error::Could not pull ${CLOAK_IMAGE}. Tail of the pull log:"
-              tail -n 20 /tmp/cloak-pull.log 2>/dev/null || true
-              exit 1
-            }
-          fi
-
-          # Idempotent: a leftover container from an earlier step or an earlier
-          # attempt on a reused runner would make the name collide.
-          docker rm -f cloakbrowser >/dev/null 2>&1 || true
-
-          # cloakserve IS the CDP endpoint and serves 9222 itself. See
-          # BROWSER (CloakBrowser) above for why --remote-debugging-port must
-          # NOT be added here.
-          # Binding the mapping to 127.0.0.1 keeps CDP off every other
-          # interface on the runner. If that mapping turns out not to forward,
-          # the next step detects it and restarts on the host network.
-          docker run -d \
-            --name cloakbrowser \
-            -p 9222:9222 \
-            --cap-add=SYS_ADMIN \
-            --shm-size=2gb \
-            --init \
-            "$CLOAK_IMAGE" \
-            cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
-
-      - name: Wait for CloakBrowser to accept CDP connections
-        if: ${{ inputs.browser != 'false' }}
-        run: |
-          set -euo pipefail
-          URL="http://127.0.0.1:9222"
-
-          container_running() {
-            [ "$(docker inspect -f '{{.State.Running}}' cloakbrowser 2>/dev/null || echo false)" = "true" ]
-          }
-
-          # `GET /` is cloakserve's OWN status endpoint (bin/cloakserve:
-          # handle_root) and answers as soon as the multiplexer is listening.
-          # Do NOT probe /json/version here: that document is produced by a
-          # browser process, and cloakserve spawns one PER CONNECTION SEED --
-          # so with no client connected there is no browser to describe it and
-          # the request never completes. Waiting on it deadlocks and always
-          # times out.
-          wait_for_published_port() {
-            local budget="$1"
-            local until=$(( SECONDS + budget ))
-            rm -f /tmp/cloak-status.json
-            while [ "$SECONDS" -lt "$until" ]; do
-              # Stop waiting the moment the container dies; a crash in the
-              # first seconds should not burn the whole budget.
-              if ! container_running; then
-                echo "::error::The CloakBrowser container exited during startup."
-                docker logs --tail 50 cloakbrowser 2>&1 || true
-                exit 1
-              fi
-              if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-status.json 2>/dev/null; then
-                return 0
-              fi
-              sleep 1
-            done
-            return 1
-          }
-
-          # First give the published port a normal startup budget.
-          if ! wait_for_published_port 120; then
-            # It stayed silent, so find out whether cloakserve is up at all or
-            # whether Docker is simply not forwarding. These have different
-            # causes and only one of them is fixable here.
-            echo "::warning::127.0.0.1:9222 has not answered; asking the container itself."
-            if docker exec cloakbrowser curl -fsS --max-time 5 http://127.0.0.1:9222/ > /dev/null 2>&1; then
-              echo "cloakserve answers on its own loopback, so Docker's published port is what is broken."
-              echo "Retrying on the host network, where the CDP URL is reachable without any port mapping."
-              # Note: cloakserve binds 0.0.0.0 when it sees /.dockerenv, so on
-              # the host network this is a listener on the runner's own address
-              # with no authentication. That is acceptable on a GitHub-hosted
-              # runner -- a single-tenant VM destroyed when the job ends -- and
-              # it is the vendor's own binding, not a choice made here.
-              docker rm -f cloakbrowser >/dev/null 2>&1 || true
-              docker run -d \
-                --name cloakbrowser \
-                --network host \
-                --cap-add=SYS_ADMIN \
-                --shm-size=2gb \
-                --init \
-                "$CLOAK_IMAGE" \
-                cloakserve --no-sandbox --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 >/dev/null
-              # Failure falls through to the diagnostics below, which say
-              # which of the two paths was tried.
-              wait_for_published_port 120 || true
+          # Checked after the exit-node guard, so a broken VPN fails first.
+          URL="http://${CHROME_CDP_IP}:9222"
+          for _ in $(seq 1 12); do
+            if curl -fsS --max-time 5 "$URL/json/version" > /dev/null 2>&1; then
+              # Sourced by the script step: every step is its own shell.
+              {
+                printf 'export CHROME_CDP_URL=%q\n' "$URL"
+                printf 'export CDP_URL=%q\n' "$URL"
+              } > /tmp/chrome-cdp.env
+              chmod 600 /tmp/chrome-cdp.env
+              echo "Shared Chrome answers on CDP (address masked)."
+              exit 0
             fi
-          fi
-
-          if [ ! -s /tmp/cloak-status.json ]; then
-            echo "::error::CloakBrowser did not answer its status endpoint."
-            echo "--- published ports ---"
-            docker port cloakbrowser 2>&1 || true
-            echo "--- listening sockets inside the container (9222 is 0x240A) ---"
-            docker exec cloakbrowser sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' 2>&1 \
-              | awk 'NR<=2 || $2 ~ /:240A$/' || true
-            echo "--- what the runner sees ---"
-            curl -v --max-time 5 "$URL/" 2>&1 | tail -n 15 || true
-            echo "--- container logs ---"
-            docker logs --tail 50 cloakbrowser 2>&1 || true
-            exit 1
-          fi
-          echo "CloakBrowser multiplexer is up on ${URL}."
-          echo "Browser processes: $(jq -r 'if type=="array" then length elif .processes then (.processes|length) else 0 end' /tmp/cloak-status.json 2>/dev/null || echo unknown)"
-
-          # The browser-level WebSocket URL is a nicety, not a gate: it only
-          # exists once a browser process does. connect_over_cdp(CDP_URL) is
-          # what the vendor documents and does not need it.
-          ws=""
-          # Written to a scratch name first: `curl > file` truncates the target
-          # before it can fail, which would leave a misleading empty document
-          # behind on every run.
-          rm -f /tmp/cloak-version.json /tmp/cloak-version.tmp
-          if curl -fsS --max-time 5 "$URL/json/version" > /tmp/cloak-version.tmp 2>/dev/null \
-             && jq -e '.webSocketDebuggerUrl' /tmp/cloak-version.tmp >/dev/null 2>&1; then
-            mv /tmp/cloak-version.tmp /tmp/cloak-version.json
-            ws="$(jq -r '.webSocketDebuggerUrl' /tmp/cloak-version.json)"
-            echo "Browser CDP endpoint: ${ws}"
-          else
-            echo "Browser CDP endpoint: not spawned yet (cloakserve starts one on first connect)."
-          fi
-
-          # Written once, sourced by the script step: every step is its own
-          # shell, so these cannot be carried in variables from here.
-          {
-            printf 'export CLOAKBROWSER_CDP_URL=%q\n' "$URL"
-            printf 'export CDP_URL=%q\n' "$URL"
-            printf 'export BROWSER_WS_ENDPOINT=%q\n' "$URL"
-            printf 'export CLOAKBROWSER_WS=%q\n' "$ws"
-          } > /tmp/cloak-cdp.env
-          chmod 600 /tmp/cloak-cdp.env
-
-          echo "Scripts should connect with:"
-          echo "  chromium.connectOverCDP(process.env.CLOAKBROWSER_CDP_URL)"
-          echo "Append ?fingerprint=<seed> for an isolated browser identity."
+            sleep 5
+          done
+          echo "::error::Shared Chrome did not answer on CHROME_CDP_IP:9222. Start chrome-cdp-session.yaml first and check the tailnet ACL."
+          exit 1
 
       # ------------------------- the scripts -------------------------
 
@@ -1257,14 +1071,14 @@ jobs:
           . /tmp/ts-env.sh
           rm -f /tmp/ts-env.sh
 
-          # The CDP endpoint, when the browser was started. Written by the
-          # readiness step and absent when `browser` was unchecked.
-          if [ -s /tmp/cloak-cdp.env ]; then
+          # The shared Chrome's CDP URL. Written by the check step and absent
+          # when `browser` was unchecked.
+          if [ -s /tmp/chrome-cdp.env ]; then
             # shellcheck disable=SC1091
-            . /tmp/cloak-cdp.env
-            echo "CloakBrowser: ${CLOAKBROWSER_CDP_URL}"
+            . /tmp/chrome-cdp.env
+            echo "Shared Chrome: CHROME_CDP_URL set (address masked)"
           else
-            echo "CloakBrowser: not started for this run."
+            echo "Shared Chrome: not used for this run."
           fi
 
           # Redaction helper from the mask step. Anything a script prints --
@@ -1345,21 +1159,22 @@ jobs:
           fi
           echo "All ${#scripts[@]} script(s) completed under the exit node."
 
-      - name: Remove CloakBrowser and leave the tailnet
+      - name: Stop the shared Chrome and leave the tailnet
         if: always()
         run: |
-          # Always, even after a failed script: the browser holds a Chromium
-          # process and ~600 MB, and a node left joined keeps burning auth key
-          # uses and holds an exit-node route.
-          if docker inspect cloakbrowser >/dev/null 2>&1; then
-            # Browser-side errors (crashes, blocked navigations) never reach
-            # the script's own output, so show them here, redacted.
-            echo "::group::CloakBrowser container logs (last 200 lines)"
+          # Always, even after a failed script: the Chrome session keeps
+          # spending runner minutes until stopped, and a node left joined keeps
+          # burning auth key uses and holds an exit-node route.
+          if [ -s /tmp/chrome-cdp.env ]; then
             # shellcheck disable=SC1091
-            . /tmp/redact.sh 2>/dev/null && docker logs --tail 200 cloakbrowser 2>&1 | redact || true
-            echo "::endgroup::"
-            docker rm -f cloakbrowser >/dev/null 2>&1 || true
-            echo "CloakBrowser container removed."
+            . /tmp/chrome-cdp.env
+            # chrome-cdp-session.yaml watches for this tab, then closes Chrome,
+            # saves the profile and ends its run.
+            if curl -fsS --max-time 10 -X PUT "${CHROME_CDP_URL}/json/new?about:blank%23stop-session" > /dev/null 2>&1; then
+              echo "Asked the shared Chrome session to stop and save."
+            else
+              echo "::warning::Could not reach the shared Chrome to stop it; it ends at its own max_minutes."
+            fi
           fi
           sudo tailscale logout 2>&1 | tail -3 || true
 
@@ -1371,14 +1186,13 @@ jobs:
             echo
             echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
             echo "- Exit node: \`$(cat /tmp/exit-node-fp.txt 2>/dev/null || echo '<never connected>') (fingerprint, address withheld)\`"
-            # Assigned first: `cat missing | sed` still exits 0, so an `||`
-            # fallback chained onto the pipeline would never fire.
-            if [ -s /tmp/cloak-cdp.env ]; then
-              browser="$(sed -n 's/^export CLOAKBROWSER_CDP_URL=//p' /tmp/cloak-cdp.env)"
+            # The address stays out of the public summary.
+            if [ -s /tmp/chrome-cdp.env ]; then
+              browser='reachable, stopped after the scripts'
             else
-              browser='<not started>'
+              browser='<not used>'
             fi
-            echo "- CloakBrowser: \`${browser}\`"
+            echo "- Shared Chrome: \`${browser}\`"
             echo
             if [ -s /tmp/ts-results.txt ]; then
               echo "| Script | Result |"
