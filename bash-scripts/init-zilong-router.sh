@@ -28,6 +28,7 @@
 #   ZILONG_ROUTER_IMAGE             default sudtanj/zilong-router:latest
 #   ZILONG_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
 #   ZILONG_ROUTER_MEMORY_LIMIT      default 96m (swap disabled)
+# The Orange Pi runner fills these from the MINI_ROUTER_* repo secrets (same suffix).
 
 set -euo pipefail
 
