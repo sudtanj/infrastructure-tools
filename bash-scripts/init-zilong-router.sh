@@ -28,19 +28,10 @@
 #   ZILONG_ROUTER_IMAGE             default sudtanj/zilong-router:latest
 #   ZILONG_ROUTER_CPU_LIMIT         default 1.0 (of 4 cores)
 #   ZILONG_ROUTER_MEMORY_LIMIT      default 96m (swap disabled)
-# Each also accepts its pre-rename MINI_ROUTER_* name (the existing repo secrets),
-# used when the ZILONG_ROUTER_* one is unset.
 
 set -euo pipefail
 
-# Renamed from mini-router: fall back to the old variable names.
-while IFS= read -r old; do
-  new="ZILONG_ROUTER_${old#MINI_ROUTER_}"
-  [ -n "${!new+x}" ] || export "${new}=${!old}"
-done < <(compgen -e | grep '^MINI_ROUTER_' || true)
-
 CONTAINER_NAME="zilong-router"
-LEGACY_NAME="mini-router"   # container, volume and image name before the rename
 VOLUME_NAME="zilong-router-data"
 IMAGE="${ZILONG_ROUTER_IMAGE:-sudtanj/zilong-router:latest}"
 PORT="${ZILONG_ROUTER_PORT:-20129}"   # host side
@@ -96,15 +87,8 @@ if [ -z "$INITIAL_PASSWORD" ]; then
   warn "ZILONG_ROUTER_INITIAL_PASSWORD unset: dashboard password is the 9router default until changed"
 fi
 if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
-   && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1 \
-   && ! "${DOCKER[@]}" inspect "$LEGACY_NAME" >/dev/null 2>&1; then
+   && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   fail "port ${PORT} is already in use on the host"
-fi
-# Keep using the pre-rename data volume rather than starting empty.
-if ! "${DOCKER[@]}" volume inspect "$VOLUME_NAME" >/dev/null 2>&1 \
-   && "${DOCKER[@]}" volume inspect "${LEGACY_NAME}-data" >/dev/null 2>&1; then
-  VOLUME_NAME="${LEGACY_NAME}-data"
-  debug "using the pre-rename volume ${VOLUME_NAME}"
 fi
 MEM_AVAIL="$(free -m | awk '/^Mem:/{print $7}')"
 debug "turso: url=$(present "$TURSO_URL") token=$(present "$TURSO_TOKEN") only=${TURSO_ONLY} | password=$(present "$INITIAL_PASSWORD") jwt=$(present "$JWT_SECRET") | mem_avail=${MEM_AVAIL}MB"
@@ -180,11 +164,6 @@ else
   # SIGTERM first: with Turso, zilong-router does a final push on clean shutdown.
   "${DOCKER[@]}" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
   "${DOCKER[@]}" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  if "${DOCKER[@]}" inspect "$LEGACY_NAME" >/dev/null 2>&1; then
-    step "removing the pre-rename ${LEGACY_NAME} container"
-    "${DOCKER[@]}" stop -t 15 "$LEGACY_NAME" >/dev/null 2>&1 || true
-    "${DOCKER[@]}" rm -f "$LEGACY_NAME" >/dev/null 2>&1 || true
-  fi
   ok "old container gone"
 
   step "starting ${CONTAINER_NAME} (data: ${MEDIA})"
@@ -210,7 +189,6 @@ unset TURSO_TOKEN INITIAL_PASSWORD JWT_SECRET
 if [ -n "$OLD_IMAGE_ID" ] && [ "$OLD_IMAGE_ID" != "$IMAGE_ID" ]; then
   "${DOCKER[@]}" rmi "$OLD_IMAGE_ID" >/dev/null 2>&1 && debug "removed previous image" || true
 fi
-"${DOCKER[@]}" rmi "sudtanj/${LEGACY_NAME}:latest" >/dev/null 2>&1 && debug "removed the pre-rename image" || true
 
 # ---------------------------------------------------------------------------
 # 4. Verify: running, not restart-looping, and answering HTTP
