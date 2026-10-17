@@ -1,0 +1,55 @@
+# Bitping on distroless, built from this folder.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d --build
+
+services:
+  bitping:
+    build: .
+    image: sudtanj/bitping:local
+    restart: unless-stopped
+    hostname: ${BITPING_DEVICE:-bitping}
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. init-bitping.sh also blocks DNS to any other server and all
+    # traffic to the LAN; compose cannot.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
+    # The self-updater would download a new binary it cannot install on a
+    # read-only rootfs; updates come from rebuilding this image instead.
+    extra_hosts:
+      - releases.bitping.com:127.0.0.1
+
+    environment:
+      BITPING_API_KEY: ${BITPING_API_KEY:?set BITPING_API_KEY in .env}
+      # Uncomment to cap concurrent proxy sessions.
+      # BITPING_MAX_PROXY_SESSIONS: ${BITPING_MAX_PROXY_SESSIONS}
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 64
+
+    # The home tmpfs holds ~/.bitpingd (tokens and SQLite) and counts
+    # against the memory limit.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+      - /home/nonroot:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

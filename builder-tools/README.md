@@ -89,6 +89,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`repocket/`](repocket/) | [`sudtanj/repocket`](https://hub.docker.com/r/sudtanj/repocket) | Official Repocket client on distroless cc, non-root instead of forced root (amd64 + arm64); API key from `.env` - see its own [README](repocket/README.md) |
 | [`pawns/`](pawns/) | [`sudtanj/pawns`](https://hub.docker.com/r/sudtanj/pawns) | Official Pawns (IPRoyal) client on distroless static, non-root (amd64 + arm64); login from `.env`, Sentry reporter disabled - see its own [README](pawns/README.md) |
 | [`packetstream/`](packetstream/) | [`sudtanj/packetstream`](https://hub.docker.com/r/sudtanj/packetstream) | Official PacketStream client on distroless static, non-root (amd64 + arm64); runs the native binary instead of the launcher's 32-bit ARM build, self-update off - see its own [README](packetstream/README.md) |
+| [`bitping/`](bitping/) | [`sudtanj/bitping`](https://hub.docker.com/r/sudtanj/bitping) | Official Bitping node on distroless static, non-root (amd64 + arm64); no relaunch script, self-update off, state in tmpfs - see its own [README](bitping/README.md) |
 
 ## Non-Docker projects
 
