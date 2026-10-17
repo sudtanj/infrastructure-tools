@@ -1,0 +1,54 @@
+# Pawns on distroless, pulled from Docker Hub (linux/amd64 + linux/arm64).
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f docker-compose.hub.yml up -d
+
+services:
+  pawns:
+    image: sudtanj/pawns:latest
+    pull_policy: always
+    restart: unless-stopped
+    hostname: ${PAWNS_DEVICE:-pawns}
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. init-pawns.sh also blocks DNS to any other server and all
+    # traffic to the LAN; compose cannot.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.14.16 # AdGuard Family Protection IPv4
+
+    # The client ships a Sentry crash reporter; send it nowhere.
+    extra_hosts:
+      - sentry.iproyal.com:127.0.0.1
+
+    # The client only takes flags (-accept-tos is in the image entrypoint).
+    command:
+      - -email=${PAWNS_EMAIL:?set PAWNS_EMAIL in .env}
+      - -password=${PAWNS_PASSWORD:?set PAWNS_PASSWORD in .env}
+      - -device-name=${PAWNS_DEVICE:-pawns}
+      - -device-id=${PAWNS_DEVICE:-pawns}
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure. The image sets GOMEMLIMIT=48MiB.
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 64m
+    memswap_limit: 64m
+    oom_score_adj: 500
+    pids_limit: 64
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+      - /home/nonroot:rw,noexec,nosuid,nodev,size=1m,uid=65532,gid=65532,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

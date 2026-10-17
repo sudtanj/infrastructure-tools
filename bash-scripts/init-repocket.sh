@@ -38,6 +38,7 @@ DEVICE="${REPOCKET_DEVICE:-$(hostname)}"
 CPU_LIMIT="${REPOCKET_CPU_LIMIT:-0.25}"
 MEMORY_LIMIT="${REPOCKET_MEMORY_LIMIT:-64m}"
 DNS_SERVERS=(94.140.14.15 94.140.14.16)   # AdGuard Family Protection
+
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
 ok()     { printf '%s\n' "[+] $*"; }

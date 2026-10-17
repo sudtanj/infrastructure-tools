@@ -87,6 +87,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`traffmonetizer/`](traffmonetizer/) | [`sudtanj/traffmonetizer`](https://hub.docker.com/r/sudtanj/traffmonetizer) | Official Traffmonetizer client on distroless static, non-root, real multi-arch (amd64 + arm64); token from `.env` - see its own [README](traffmonetizer/README.md) |
 | [`earnfm/`](earnfm/) | [`sudtanj/earnfm`](https://hub.docker.com/r/sudtanj/earnfm) | Official EarnFM client on distroless static, non-root, Go runtime capped to the container (amd64 + arm64); token from `.env` - see its own [README](earnfm/README.md) |
 | [`repocket/`](repocket/) | [`sudtanj/repocket`](https://hub.docker.com/r/sudtanj/repocket) | Official Repocket client on distroless cc, non-root instead of forced root (amd64 + arm64); API key from `.env` - see its own [README](repocket/README.md) |
+| [`pawns/`](pawns/) | [`sudtanj/pawns`](https://hub.docker.com/r/sudtanj/pawns) | Official Pawns (IPRoyal) client on distroless static, non-root (amd64 + arm64); login from `.env`, Sentry reporter disabled - see its own [README](pawns/README.md) |
 
 ## Non-Docker projects
 
