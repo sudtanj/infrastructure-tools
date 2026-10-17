@@ -16,7 +16,8 @@
 #   KONGMING_TURSO_TOKEN          Turso auth token                       (required)
 #   KONGMING_PASSWORD             web UI password                        (recommended)
 #   KONGMING_SECRET               cookie signing secret                  (recommended)
-#   KONGMING_PUBLIC_URL           public base URL for MCP OAuth redirects
+#   KONGMING_PUBLIC_URL           optional public HTTPS URL; leave empty behind a firewall
+#                                 (MCP OAuth then uses the localhost redirect + paste flow)
 #   KONGMING_LLM_PROVIDER         openai | anthropic (default openai)
 #   KONGMING_LLM_BASE_URL         e.g. http://127.0.0.1:20129/v1 for zilong-router (with host networking)
 #   KONGMING_LLM_API_KEY
