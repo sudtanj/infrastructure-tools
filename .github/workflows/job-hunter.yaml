@@ -23,7 +23,12 @@ name: "Job hunter: remote jobs matched to a CV"
 #
 # SETUP
 #   In the private repo: commit your CV as `job-hunt/cv.md` (plain text or
-#   Markdown; paste it from LinkedIn or your PDF).
+#   Markdown; paste it from LinkedIn or your PDF), or dispatch with
+#   `refresh_cv` checked: the run then starts Chrome with the saved
+#   chrome-cdp-session profile (logged in to LinkedIn over VNC there), reads
+#   the LinkedIn profile through the exit node and commits it as cv.md. The
+#   profile is only read, never saved back, so a session open meanwhile keeps
+#   its own.
 #
 #   secret PRIVATE_REPO          "owner/name" of the private repo holding the
 #                                script, the CV and the reports, as in the
@@ -50,6 +55,8 @@ name: "Job hunter: remote jobs matched to a CV"
 #                                workflows. The tag must be allowed to reach
 #                                9router's host and port in the tailnet ACL.
 #   secret TAILSCALE_EXIT_NODE   OPTIONAL exit node, as in the worker workflows
+#   secret STATE_KEY             passphrase of the saved Chrome profile, as in
+#                                chrome-cdp-session.yaml; only for refresh_cv
 #
 # THIS REPO IS PUBLIC: the `query` input and this run's log are visible to
 # anyone. The script prints counts only, never the CV, a job or a model reply;
@@ -63,6 +70,10 @@ on:
         description: 'Search terms, comma-separated (visible to anyone: this repo is public). Empty: JOB_SEARCH_QUERY, else derived from the CV'
         type: string
         default: ''
+      refresh_cv:
+        description: 'Rewrite job-hunt/cv.md from the LinkedIn profile in the saved chrome-cdp-session Chrome first'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -81,6 +92,9 @@ jobs:
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
       TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
       TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      REFRESH_CV: ${{ inputs.refresh_cv }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
 
     steps:
       - name: Checkout private repo
@@ -104,12 +118,14 @@ jobs:
         env:
           NINEROUTER_BASE_URL: ${{ secrets.NINEROUTER_BASE_URL }}
           NINEROUTER_MODEL: ${{ secrets.NINEROUTER_MODEL }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
           for v in NINEROUTER_BASE_URL NINEROUTER_MODEL; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
+          if [ "$REFRESH_CV" = "true" ] && [ -z "${STATE_KEY:-}" ]; then missing+=("STATE_KEY"); fi
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
             if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
           elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
@@ -152,6 +168,56 @@ jobs:
           echo "::error::SearXNG did not start."
           docker logs searxng 2>&1 | tail -20
           exit 1
+
+      # Same encrypted profile and format as chrome-cdp-session.yaml, restored
+      # the same way as typescript-worker-run.yaml (before the VPN: faster).
+      - name: Restore the Chrome profile
+        if: ${{ inputs.refresh_cv }}
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "::error::No saved Chrome profile. Run chrome-cdp-session and log in to LinkedIn over VNC first."
+            exit 1
+          fi
+          mkdir -p "$PROFILE_DIR" /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages as chrome-cdp-session.yaml, so LinkedIn sees the
+      # browser it saw at login (real GL, audio device, desktop fonts).
+      - name: Install Chrome and a virtual display
+        if: ${{ inputs.refresh_cv }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Install Tailscale
         run: |
@@ -227,6 +293,61 @@ jobs:
           fi
           echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
 
+      # After the tailnet, so LinkedIn sees the exit node's IP, never this
+      # datacenter one. Flags as in typescript-worker-run.yaml.
+      - name: Start Chrome
+        if: ${{ inputs.refresh_cv }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAILSCALE_EXIT_NODE:-}" ]; then
+            echo "::error::refresh_cv needs TAILSCALE_EXIT_NODE: LinkedIn would see a datacenter IP on a logged-in account."
+            exit 1
+          fi
+          # Not printed: the zone narrows down where the exit node is.
+          TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+          if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+            echo "::warning::Could not detect the time zone; using UTC."
+            TZ=UTC
+          fi
+          export TZ LANG=en_US.UTF-8 LANGUAGE=en_US
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          # Open a new tab, not the tabs the session left open.
+          jq '.session.restore_on_startup = 5
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+          setsid nohup google-chrome \
+            --user-data-dir="$PROFILE_DIR" \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
+            --lang=en-US \
+            --accept-lang=en-US \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-dev-shm-usage \
+            --start-maximized \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            >/tmp/chrome.log 2>&1 &
+          echo $! > /tmp/chrome.pid
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+              echo "Chrome ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Chrome did not open CDP within 30s."
+          exit 1
+
       - name: Find, score and report jobs
         env:
           SEARXNG_URL: http://127.0.0.1:8080
@@ -239,11 +360,14 @@ jobs:
           JOB_HUNTER_BRANCH: ${{ secrets.BUILD_REF || 'main' }}
           JOB_HUNTER_PROFILE: ${{ secrets.JOB_HUNTER_PROFILE }}
           JOB_SEARCH_QUERY: ${{ inputs.query || secrets.JOB_SEARCH_QUERY }}
+          CHROME_CDP_URL: http://127.0.0.1:9222
         run: node private/job-hunter/job_hunter.ts
 
-      - name: Stop SearXNG and leave the tailnet
+      - name: Stop Chrome and SearXNG, leave the tailnet
         if: always()
         run: |
+          # Nothing to save (the profile is not uploaded); just stop it.
+          pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
           docker rm -f searxng >/dev/null 2>&1 || true
           # A node left joined keeps an exit-node route and a tailnet slot.
           sudo tailscale logout 2>&1 | tail -3 || true
