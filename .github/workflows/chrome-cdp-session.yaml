@@ -356,6 +356,11 @@ jobs:
           start_chrome
           curl -fs http://127.0.0.1:9222/json/version | jq -r '.Browser'
           echo "Chrome ready. Runs until the browser is closed, or nothing is connected for ${idle_min} minutes."
+          # A stop tab from the last session can come back with the restored tabs
+          # (closing it right before exit does not always reach the saved session).
+          sleep 5
+          curl -fs http://127.0.0.1:9222/json/list | jq -r '.[] | select(.url | endswith("#stop-session")) | .id' \
+            | while read -r tid; do curl -fs "http://127.0.0.1:9222/json/close/${tid}" >/dev/null || true; done
 
           # Active = any open connection to VNC (5900) or CDP (9222). Both
           # arrive through Tailscale serve, so they show up as established
