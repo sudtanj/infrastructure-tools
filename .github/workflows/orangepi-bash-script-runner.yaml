@@ -15,7 +15,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_)
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_)
 on:
   workflow_dispatch:
     inputs:
@@ -31,6 +31,7 @@ on:
           - init-earnfm
           - init-repocket
           - init-pawns
+          - init-packetstream
           - init-dozzle
           - init-zilong-router
           - reset-containers
@@ -162,6 +163,7 @@ jobs:
             map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE
                      TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE EARNFM_TOKEN EARNFM_DEVICE
                      REPOCKET_TOKEN REPOCKET_DEVICE PAWNS_EMAIL PAWNS_PASSWORD PAWNS_DEVICE
+                     PACKETSTREAM_CID PACKETSTREAM_DEVICE
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
                      MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET);
           my $h = '[0-9A-Fa-f]{1,4}';
@@ -258,7 +260,7 @@ jobs:
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
           # MINI_ROUTER_ secrets are exported under the ZILONG_ROUTER_ names the script reads.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,DOZZLE_,MINI_ROUTER_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,DOZZLE_,MINI_ROUTER_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
           HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
           HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
@@ -271,6 +273,8 @@ jobs:
           PAWNS_EMAIL: ${{ secrets.PAWNS_EMAIL }}
           PAWNS_PASSWORD: ${{ secrets.PAWNS_PASSWORD }}
           PAWNS_DEVICE: ${{ secrets.PAWNS_DEVICE }}
+          PACKETSTREAM_CID: ${{ secrets.PACKETSTREAM_CID }}
+          PACKETSTREAM_DEVICE: ${{ secrets.PACKETSTREAM_DEVICE }}
           MINI_ROUTER_TURSO_TOKEN: ${{ secrets.MINI_ROUTER_TURSO_TOKEN }}
           MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
           MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
