@@ -171,7 +171,19 @@ api_call() { # path json -> response body
   curl -fsS -m 30 -X POST -H @"$API_HDR" -H 'Content-Type: application/json' \
     --data-binary "$2" "${API}$1" 2>/dev/null
 }
-api_post() { api_call "$@" >/dev/null; }
+# Like api_call, but keeps the body to itself and leaves "HTTP <code>: <API message>" in API_ERR
+API_ERR=""
+api_post() { # path json
+  local out code msg
+  out="$(curl -sS -m 30 -X POST -H @"$API_HDR" -H 'Content-Type: application/json' \
+    --data-binary "$2" -w '\n%{http_code}' "${API}$1" 2>/dev/null)" || true
+  code="${out##*$'\n'}"
+  [[ "$code" =~ ^[0-9]{3}$ ]] || { API_ERR="no answer from the Tailscale API"; return 1; }
+  [[ "$code" == 2?? ]] && return 0
+  msg="$(printf '%s' "${out%$'\n'*}" | sed -n 's/.*"message" *: *"\([^"]*\)".*/\1/p' | head -c 200)"
+  API_ERR="HTTP ${code}${msg:+: ${msg}}"
+  return 1
+}
 
 # One-off auth key from the OAuth client: single use, not ephemeral (the node must survive
 # restarts), pre-approved, tagged (an OAuth client can only create tagged keys), valid 1 hour.
@@ -535,7 +547,7 @@ if [ -n "$OAUTH_SECRET" ] && [ "$BACKEND" = "Running" ]; then
         ROUTES_RESULT="approved: ${#ROUTES[@]} subnet route(s)$([ "$EXIT_NODE" = 1 ] && echo " + exit node")"
         ok "routes ${ROUTES_RESULT}"
       else
-        warn "route approval failed (the OAuth client needs the devices:routes scope)"
+        warn "route approval failed: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client lacks the devices:routes scope)")"
         ROUTES_RESULT="approval failed"
       fi
     fi
@@ -565,7 +577,7 @@ echo "[*] memory: ${MEM:-unknown}"
 if [ "$IP_RESULT" = "change requested" ]; then
   step "moving the node to the requested tailnet IP; an SSH session on the old IP will drop now"
   api_post "/device/${NODE_ID}/ip" "{\"ipv4\": \"${WANT_IP}\"}" \
-    || fail "setting the IP failed (the OAuth client needs the devices:core scope, and the IP must be free in the tailnet)"
+    || fail "setting the IP failed: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client lacks the devices:core scope)" || echo " (is the IP free in the tailnet and inside 100.64.0.0/10?)")"
   for _ in $(seq 1 15); do
     [ "$(ts_ip4)" = "$WANT_IP" ] && { ok "tailnet IP changed"; break; }
     sleep 2
