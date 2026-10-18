@@ -11,6 +11,9 @@
 #     kongming refuses file writes from it (Landlock where the kernel has it), and the container
 #     has no writable mount at all (no /tmp tmpfs, --ipc none: no /dev/shm); it is for the
 #     network and commands such as cdp (skills give it the addresses it needs)
+#   - its own bridge network (br-kongming) that cannot open connections into the tailnet
+#     (100.64.0.0/10 and the subnets Tailscale routes here), except KONGMING_TAILNET_ALLOW;
+#     iptables mangle rules from /usr/local/sbin/kongming-egress, reapplied at boot
 #
 # Security model (this repo and its Actions logs are public): secret values are never
 # printed and never put on a command line; they reach docker through a 0600 env file
@@ -32,6 +35,10 @@
 #   KONGMING_CPU_LIMIT            default 1.0
 #   KONGMING_MEMORY_LIMIT         default 96m (swap disabled)
 #   KONGMING_NETWORK              "host" to reach loopback services on the board (then BIND/PORT are ignored)
+#                                 (and the tailnet is not blocked: the container shares the host network)
+#   KONGMING_TAILNET_ALLOW        tailnet destinations the container may connect to, comma-separated
+#                                 IPv4 addresses or CIDRs with an optional TCP port, e.g. 100.101.102.103:9222
+#                                 (a Chrome for cdp); default none
 # The Orange Pi runner fills these from the KONGMING_* repo secrets (same suffix).
 
 set -euo pipefail
@@ -49,7 +56,9 @@ PUBLIC_URL="${KONGMING_PUBLIC_URL:-}"
 CPU_LIMIT="${KONGMING_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${KONGMING_MEMORY_LIMIT:-96m}"
 NETWORK="${KONGMING_NETWORK:-bridge}"
-CONFIG_REV="6"   # bump when the docker run flags below change
+NET_NAME="kongming"
+NET_BRIDGE="br-kongming"
+CONFIG_REV="7"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -112,6 +121,92 @@ IMAGE_ID="$("${DOCKER[@]}" image inspect -f '{{.Id}}' "$IMAGE")"
 ok "image ready"
 
 # ---------------------------------------------------------------------------
+# 2b. Network: kongming's own bridge, kept out of the tailnet
+# ---------------------------------------------------------------------------
+# A bridged container's traffic is forwarded by the host, so it reaches whatever
+# the host reaches, the tailnet included. Connections the container opens into
+# the tailnet are dropped (100.64.0.0/10 plus the subnets Tailscale routes here),
+# except KONGMING_TAILNET_ALLOW. Replies to connections that came in (the
+# dashboard over the tailnet) still pass. The rules live in the mangle table:
+# Tailscale's own FORWARD chain accepts everything bound for tailscale0, and it
+# can sit above DOCKER-USER, so filter-table rules would be skipped.
+TAILNET_ALLOW="${KONGMING_TAILNET_ALLOW:-}"
+if [ "$NETWORK" = "host" ]; then
+  warn "KONGMING_NETWORK=host: kongming shares the host's network, the tailnet is not blocked"
+else
+  if [ "$(id -u)" -eq 0 ]; then ROOT=(); elif sudo -n true 2>/dev/null; then ROOT=(sudo -n); else
+    fail "keeping kongming out of the tailnet needs root (iptables); run as root or give the user passwordless sudo"
+  fi
+  command -v iptables >/dev/null 2>&1 || fail "iptables not found (needed to keep kongming out of the tailnet)"
+
+  step "network ${NET_NAME} (bridge ${NET_BRIDGE})"
+  if ! "${DOCKER[@]}" network inspect "$NET_NAME" >/dev/null 2>&1; then
+    "${DOCKER[@]}" network create -d bridge -o "com.docker.network.bridge.name=${NET_BRIDGE}" "$NET_NAME" >/dev/null \
+      || fail "failed to create the docker network ${NET_NAME}"
+  fi
+  [ "$("${DOCKER[@]}" network inspect -f '{{index .Options "com.docker.network.bridge.name"}}' "$NET_NAME")" = "$NET_BRIDGE" ] \
+    || fail "docker network ${NET_NAME} exists without bridge name ${NET_BRIDGE}; remove it and rerun"
+
+  # Entries are IPv4 addresses or CIDRs, optionally with a TCP port: 100.101.102.103:9222
+  ALLOW_RULES=""
+  n=0
+  for e in ${TAILNET_ALLOW//,/ }; do
+    n=$((n + 1))
+    [[ "$e" =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?)(:([0-9]{1,5}))?$ ]] \
+      || fail "KONGMING_TAILNET_ALLOW entry ${n} is not ip, ip:port, cidr or cidr:port"
+    if [ -n "${BASH_REMATCH[5]}" ]; then
+      ALLOW_RULES+="ipt -A \"\$CH\" -d ${BASH_REMATCH[1]} -p tcp --dport ${BASH_REMATCH[5]} -j RETURN"$'\n'
+    else
+      ALLOW_RULES+="ipt -A \"\$CH\" -d ${BASH_REMATCH[1]} -j RETURN"$'\n'
+    fi
+  done
+
+  # Written to the host and run at boot too: iptables rules do not survive a reboot.
+  EGRESS_SCRIPT="#!/bin/sh
+set -e
+# Written by init-kongming.sh: connections opened by kongming's container
+# (bridge ${NET_BRIDGE}) into the tailnet are dropped, except the allowed ones.
+BR=${NET_BRIDGE}
+CH=KONGMING-TAILNET
+ipt() { iptables -w -t mangle \"\$@\"; }
+ipt -N \"\$CH\" 2>/dev/null || ipt -F \"\$CH\" || exit 1
+ipt -A \"\$CH\" -m conntrack ! --ctstate NEW -j RETURN
+${ALLOW_RULES}ipt -A \"\$CH\" -d 100.64.0.0/10 -j DROP
+for r in \$(ip -4 route show table 52 2>/dev/null | awk '\$1 != \"default\" && / dev tailscale0/ {print \$1}'); do
+  ipt -A \"\$CH\" -d \"\$r\" -j DROP
+done
+while ipt -D PREROUTING -i \"\$BR\" -j \"\$CH\" 2>/dev/null; do :; done
+ipt -I PREROUTING -i \"\$BR\" -j \"\$CH\"
+"
+  EGRESS_UNIT="[Unit]
+Description=Keep the kongming container out of the tailnet
+After=docker.service tailscaled.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kongming-egress
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"
+  printf '%s' "$EGRESS_SCRIPT" | ${ROOT[@]+"${ROOT[@]}"} tee /usr/local/sbin/kongming-egress >/dev/null \
+    && ${ROOT[@]+"${ROOT[@]}"} chmod 0755 /usr/local/sbin/kongming-egress \
+    || fail "failed to write /usr/local/sbin/kongming-egress"
+  ${ROOT[@]+"${ROOT[@]}"} /usr/local/sbin/kongming-egress || fail "failed to install the tailnet block"
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    printf '%s' "$EGRESS_UNIT" | ${ROOT[@]+"${ROOT[@]}"} tee /etc/systemd/system/kongming-egress.service >/dev/null \
+      && ${ROOT[@]+"${ROOT[@]}"} systemctl daemon-reload \
+      && ${ROOT[@]+"${ROOT[@]}"} systemctl enable -q kongming-egress.service \
+      || warn "could not enable kongming-egress.service: the tailnet block is lost on reboot until the next deploy"
+  else
+    warn "no systemd: the tailnet block is lost on reboot until the next deploy"
+  fi
+  ok "tailnet blocked for kongming ($([ "$n" -gt 0 ] && echo "${n} allowed entr$([ "$n" -eq 1 ] && echo y || echo ies)" || echo "nothing allowed"))"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Skip the restart when nothing changed
 # ---------------------------------------------------------------------------
 WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$BIND" "$NETWORK" "$TURSO_URL" "$TURSO_TOKEN" "$PASSWORD" "$SECRET" "$PUBLIC_URL" \
@@ -143,7 +238,7 @@ else
   if [ "$NETWORK" = "host" ]; then
     NET_OPTS=(--network host)
   else
-    NET_OPTS=(-p "${BIND}:${PORT}:${CPORT}")
+    NET_OPTS=(--network "$NET_NAME" -p "${BIND}:${PORT}:${CPORT}")
   fi
 
   step "removing existing ${CONTAINER_NAME} container"
@@ -221,11 +316,32 @@ else
   warn "writable in the container: ${WRITABLE}"
 fi
 
+# Proof the block works: from the container, try a listening port on this host's tailnet address.
+if [ "$NETWORK" = "bridge" ] && command -v tailscale >/dev/null 2>&1; then
+  TS_IP="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+  TS_PORT=""
+  if [ -n "$TS_IP" ] && command -v ss >/dev/null 2>&1; then
+    TS_PORT="$(ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E "^(0\.0\.0\.0|\*|\[::\]|${TS_IP//./\\.}):[0-9]+$" \
+      | sed 's/.*://' | grep -vx "$PORT" | head -n 1 || true)"
+  fi
+  if [ -n "$TS_PORT" ]; then
+    TS_OUT="$(timeout 15 "${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/wget -q -T 5 -O /dev/null "http://${TS_IP}:${TS_PORT}/" 2>&1; echo "rc=$?")"
+    if printf '%s' "$TS_OUT" | grep -qiE 'timed out|unreachable|no route|rc=124'; then
+      ok "the container cannot open connections into the tailnet (probe of this host's tailnet address dropped)"
+    else
+      warn "the container reached this host's tailnet address: the tailnet block is not working"
+    fi
+  else
+    debug "no tailnet address or listening port on the host to probe"
+  fi
+fi
+
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 echo "[>] summary"
 echo "[*] image: ${IMAGE}"
 echo "[*] published: $([ "$NETWORK" = "host" ] && echo "host network, port ${CPORT}" || echo "${BIND}:${PORT} (container port ${CPORT})") | ui: / | api: /api"
 echo "[*] storage: none (Turso is the only copy)"
+[ "$NETWORK" = "bridge" ] && echo "[*] tailnet: blocked for the container ($([ -n "$TAILNET_ALLOW" ] && echo "KONGMING_TAILNET_ALLOW set" || echo "nothing allowed"))"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids 64"
 echo "[*] memory: ${MEM:-unknown}"
 ok "init kongming done"
