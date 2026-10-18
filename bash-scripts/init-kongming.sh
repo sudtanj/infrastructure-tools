@@ -10,7 +10,7 @@
 #   - the agents' `shell` tool (bundled BusyBox) is read-only: no working tmpfs, and
 #     kongming refuses file writes from it (Landlock where the kernel has it), and the container
 #     has no writable mount at all (no /tmp tmpfs, --ipc none: no /dev/shm); it is for the
-#     browser (cdp) and the network
+#     network and commands such as cdp (skills give it the addresses it needs)
 #
 # Security model (this repo and its Actions logs are public): secret values are never
 # printed and never put on a command line; they reach docker through a 0600 env file
@@ -32,11 +32,6 @@
 #   KONGMING_CPU_LIMIT            default 1.0
 #   KONGMING_MEMORY_LIMIT         default 96m (swap disabled)
 #   KONGMING_NETWORK              "host" to reach loopback services on the board (then BIND/PORT are ignored)
-#   KONGMING_CDP_URL              Chrome DevTools endpoint for the agents' `cdp` command (shell tool),
-#                                 e.g. http://100.x.y.z:9222; the Orange Pi runner fills it in from its own
-#                                 tailnet view, else the board's tailscale CLI looks up KONGMING_CDP_HOST
-#   KONGMING_CDP_HOST             tailnet machine running Chrome, default chrome-cdp (the
-#                                 chrome-cdp-session workflow); "none" turns the lookup off
 # The Orange Pi runner fills these from the KONGMING_* repo secrets (same suffix).
 
 set -euo pipefail
@@ -54,8 +49,6 @@ PUBLIC_URL="${KONGMING_PUBLIC_URL:-}"
 CPU_LIMIT="${KONGMING_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${KONGMING_MEMORY_LIMIT:-96m}"
 NETWORK="${KONGMING_NETWORK:-bridge}"
-CDP_URL="${KONGMING_CDP_URL:-}"
-CDP_HOST="${KONGMING_CDP_HOST:-chrome-cdp}"
 CONFIG_REV="6"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
@@ -99,22 +92,6 @@ MEM_AVAIL="$(free -m | awk '/^Mem:/{print $7}')"
 debug "turso: url=$(present "$TURSO_URL") token=$(present "$TURSO_TOKEN") | password=$(present "$PASSWORD") secret=$(present "$SECRET") | network=${NETWORK} | mem_avail=${MEM_AVAIL}MB"
 ok "docker ready"
 
-# The agents' browser: Chrome on the tailnet (chrome-cdp-session), found by its machine name.
-# `tailscale ip` knows the peer even while its session is not running; its IP is stable.
-if [ -z "$CDP_URL" ] && [ "$CDP_HOST" != "none" ] && command -v tailscale >/dev/null 2>&1; then
-  CDP_IP="$(tailscale ip -4 "$CDP_HOST" 2>/dev/null || sudo -n tailscale ip -4 "$CDP_HOST" 2>/dev/null || true)"
-  CDP_IP="$(printf '%s\n' "$CDP_IP" | grep -Eo '^100\.[0-9.]+$' | head -n1 || true)"
-  if [ -n "$CDP_IP" ]; then CDP_URL="http://${CDP_IP}:9222"; fi
-fi
-if [ -z "$CDP_URL" ] && [ "$CDP_HOST" != "none" ] && [ "${INIT_DEBUG:-0}" = "1" ]; then
-  if ! command -v tailscale >/dev/null 2>&1; then
-    debug "browser lookup: no tailscale CLI on the board"
-  else
-    debug "browser lookup: $( { tailscale ip -4 "$CDP_HOST" 2>&1 || sudo -n tailscale ip -4 "$CDP_HOST" 2>&1; } | tail -n1 | cut -c1-200)"
-    debug "tailnet peers seen: $(tailscale status 2>&1 | awk '{print $2}' | tr '\n' ' ' | cut -c1-300)"
-  fi
-fi
-if [ -n "$CDP_URL" ]; then ok "browser for the agents: ${CDP_HOST} on the tailnet"; else status "no browser address configured; agents can still use one given in a skill (cdp --url)"; fi
 
 # ---------------------------------------------------------------------------
 # 2. Image
@@ -138,7 +115,7 @@ ok "image ready"
 # 3. Skip the restart when nothing changed
 # ---------------------------------------------------------------------------
 WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$BIND" "$NETWORK" "$TURSO_URL" "$TURSO_TOKEN" "$PASSWORD" "$SECRET" "$PUBLIC_URL" \
-  "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" "$CDP_URL" \
+  "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" \
   | sha256sum | awk '{print $1}')"
 HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "kongming.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
@@ -160,7 +137,6 @@ else
     [ -n "$PASSWORD" ] && echo "KONGMING_PASSWORD=${PASSWORD}"
     [ -n "$SECRET" ] && echo "KONGMING_SECRET=${SECRET}"
     [ -n "$PUBLIC_URL" ] && echo "KONGMING_PUBLIC_URL=${PUBLIC_URL}"
-    [ -n "$CDP_URL" ] && echo "KONGMING_CDP_URL=${CDP_URL}"
   } > "$ENV_FILE"
 
   NET_OPTS=()
@@ -236,25 +212,6 @@ else
   warn "no curl/wget on the host, skipped the HTTP probe"
 fi
 [ "${INIT_DEBUG:-0}" = "1" ] && show_logs 10 '[d]  '
-
-# Can the container (not just the board) reach the browser? Bridge traffic to 100.x goes out
-# through the board's tailscale0, or its LAN gateway when a subnet router puts it on the tailnet.
-# The browser session runs on demand, so this only warns.
-if [ -n "$CDP_URL" ]; then
-  if "${DOCKER[@]}" exec "$CONTAINER_NAME" /usr/local/bin/kongming cdp --url "$CDP_URL" version >/dev/null 2>&1; then
-    ok "agents can reach the browser on the tailnet (cdp)"
-  elif curl -fsS -m 5 "${CDP_URL}/json/version" >/dev/null 2>&1 || wget -q -T 5 -O /dev/null "${CDP_URL}/json/version" 2>/dev/null; then
-    warn "the board reaches the browser but the container does not: check forwarding from docker0 to tailscale0, or use KONGMING_NETWORK=host"
-    CDP_HOSTPORT="${CDP_URL#*://}"; CDP_HOSTPORT="${CDP_HOSTPORT%%/*}"
-    debug "route to the browser: $(ip route get "${CDP_HOSTPORT%%:*}" 2>&1 | head -n1 | sed 's/ uid .*//')"
-    debug "default route: $(ip route show default 2>&1 | head -n1)"
-  else
-    warn "browser not reachable right now (start the chrome-cdp-session workflow; the tailnet ACL must let this board reach ${CDP_HOST}:9222)"
-    CDP_HOSTPORT="${CDP_URL#*://}"; CDP_HOSTPORT="${CDP_HOSTPORT%%/*}"
-    debug "route to the browser: $(ip route get "${CDP_HOSTPORT%%:*}" 2>&1 | head -n1 | sed 's/ uid .*//')"
-    debug "default route: $(ip route show default 2>&1 | head -n1)"
-  fi
-fi
 
 # The agents' shell is for interacting, not storage: nothing in the container may be writable.
 WRITABLE="$("${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/sh -c 'for d in / /tmp /var/tmp /run /dev /dev/shm /dev/mqueue /opt /usr/local/bin; do [ -d "$d" ] && touch "$d/.kongming-w" 2>/dev/null && rm -f "$d/.kongming-w" && echo "$d"; done; true' 2>/dev/null | tr '\n' ' ' || true)"
