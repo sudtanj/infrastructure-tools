@@ -25,4 +25,4 @@ Or on the board: `bash-scripts/init-kongming.sh` (idempotent; used by the Orange
 
 ## Environment
 
-See the [kongming README](https://github.com/sudtanj/kongming#run) for the full table. Required: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`. Strongly recommended: `KONGMING_PASSWORD`, `KONGMING_SECRET`.
+See the [kongming README](https://github.com/sudtanj/kongming#run) for the full table. Required: `KONGMING_TURSO_DATABASE_URL`, `KONGMING_TURSO_AUTH_TOKEN`. Strongly recommended: `KONGMING_PASSWORD`, `KONGMING_SECRET`. The LLM provider and Telegram are set up in the dashboard.

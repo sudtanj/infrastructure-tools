@@ -12,18 +12,15 @@
 # that is deleted right after `docker run`.
 #
 # Env:
-#   KONGMING_TURSO_URL            libsql://<db>-<org>.turso.io           (required)
-#   KONGMING_TURSO_TOKEN          Turso auth token                       (required)
+#   KONGMING_TURSO_DATABASE_URL   libsql://<db>-<org>.turso.io           (required)
+#   KONGMING_TURSO_AUTH_TOKEN     Turso auth token                       (required)
+#                                 (the older KONGMING_TURSO_URL / KONGMING_TURSO_TOKEN still work)
 #   KONGMING_PASSWORD             web UI password                        (recommended)
 #   KONGMING_SECRET               cookie signing secret                  (recommended)
 #   KONGMING_PUBLIC_URL           optional public HTTPS URL; leave empty behind a firewall
-#                                 (MCP OAuth then uses the localhost redirect + paste flow)
-#   KONGMING_LLM_PROVIDER         openai | anthropic (default openai)
-#   KONGMING_LLM_BASE_URL         e.g. http://127.0.0.1:20129/v1 for zilong-router (with host networking)
-#   KONGMING_LLM_API_KEY
-#   KONGMING_LLM_MODEL
-#   KONGMING_TELEGRAM_TOKEN
-#   KONGMING_TELEGRAM_USERS       comma-separated Telegram user ids
+#                                 (MCP OAuth then uses the localhost redirect + paste flow and
+#                                 Telegram uses long polling; with it, a Telegram webhook)
+#   The LLM provider and Telegram are set up later in the dashboard (stored on Turso).
 #   KONGMING_BIND                 host address to publish on, default 127.0.0.1
 #   KONGMING_PORT                 host port, default 18800 (container listens on 18800)
 #   KONGMING_IMAGE                default sudtanj/kongming:latest
@@ -39,21 +36,15 @@ IMAGE="${KONGMING_IMAGE:-sudtanj/kongming:latest}"
 PORT="${KONGMING_PORT:-18800}"
 CPORT=18800
 BIND="${KONGMING_BIND:-127.0.0.1}"
-TURSO_URL="${KONGMING_TURSO_URL:-}"
-TURSO_TOKEN="${KONGMING_TURSO_TOKEN:-}"
+TURSO_URL="${KONGMING_TURSO_DATABASE_URL:-${KONGMING_TURSO_URL:-}}"
+TURSO_TOKEN="${KONGMING_TURSO_AUTH_TOKEN:-${KONGMING_TURSO_TOKEN:-}}"
 PASSWORD="${KONGMING_PASSWORD:-}"
 SECRET="${KONGMING_SECRET:-}"
 PUBLIC_URL="${KONGMING_PUBLIC_URL:-}"
-LLM_PROVIDER="${KONGMING_LLM_PROVIDER:-openai}"
-LLM_BASE_URL="${KONGMING_LLM_BASE_URL:-}"
-LLM_API_KEY="${KONGMING_LLM_API_KEY:-}"
-LLM_MODEL="${KONGMING_LLM_MODEL:-}"
-TG_TOKEN="${KONGMING_TELEGRAM_TOKEN:-}"
-TG_USERS="${KONGMING_TELEGRAM_USERS:-}"
 CPU_LIMIT="${KONGMING_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${KONGMING_MEMORY_LIMIT:-96m}"
 NETWORK="${KONGMING_NETWORK:-bridge}"
-CONFIG_REV="1"   # bump when the docker run flags below change
+CONFIG_REV="2"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -79,14 +70,13 @@ case "$(uname -m)" in
   x86_64|aarch64|arm64) ;;
   *) fail "unsupported arch $(uname -m); the image is built for amd64 and arm64 only" ;;
 esac
-[ -n "$TURSO_URL" ] && [ -n "$TURSO_TOKEN" ] || fail "KONGMING_TURSO_URL and KONGMING_TURSO_TOKEN are required (kongming keeps no local data)"
+[ -n "$TURSO_URL" ] && [ -n "$TURSO_TOKEN" ] || fail "KONGMING_TURSO_DATABASE_URL and KONGMING_TURSO_AUTH_TOKEN are required (kongming keeps no local data)"
 [[ "$PORT" =~ ^[0-9]{2,5}$ ]] || fail "KONGMING_PORT must be a number"
 [[ "$BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "KONGMING_BIND must be an IPv4 address"
 if [ "$BIND" = "0.0.0.0" ] && [ "${KONGMING_ALLOW_ANY:-0}" != "1" ]; then
   fail "KONGMING_BIND=0.0.0.0 exposes the UI on every interface; set KONGMING_ALLOW_ANY=1 if that is intended"
 fi
 case "$NETWORK" in bridge|host) ;; *) fail "KONGMING_NETWORK must be bridge or host" ;; esac
-case "$LLM_PROVIDER" in openai|anthropic) ;; *) fail "KONGMING_LLM_PROVIDER must be openai or anthropic" ;; esac
 [ -z "$PASSWORD" ] && warn "KONGMING_PASSWORD unset: the web UI has no login (keep it on loopback/tailnet only)"
 [ -z "$SECRET" ] && warn "KONGMING_SECRET unset: UI logins reset on every restart"
 if [ "$NETWORK" = "bridge" ] && command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
@@ -94,7 +84,7 @@ if [ "$NETWORK" = "bridge" ] && command -v ss >/dev/null 2>&1 && ss -ltnH "sport
   fail "port ${PORT} is already in use on the host"
 fi
 MEM_AVAIL="$(free -m | awk '/^Mem:/{print $7}')"
-debug "turso: url=$(present "$TURSO_URL") token=$(present "$TURSO_TOKEN") | password=$(present "$PASSWORD") secret=$(present "$SECRET") | llm=${LLM_PROVIDER} key=$(present "$LLM_API_KEY") model=$(present "$LLM_MODEL") | telegram=$(present "$TG_TOKEN") | network=${NETWORK} | mem_avail=${MEM_AVAIL}MB"
+debug "turso: url=$(present "$TURSO_URL") token=$(present "$TURSO_TOKEN") | password=$(present "$PASSWORD") secret=$(present "$SECRET") | network=${NETWORK} | mem_avail=${MEM_AVAIL}MB"
 ok "docker ready"
 
 # ---------------------------------------------------------------------------
@@ -119,7 +109,7 @@ ok "image ready"
 # 3. Skip the restart when nothing changed
 # ---------------------------------------------------------------------------
 WANT_SUM="$(printf '%s\n' "$IMAGE_ID" "$PORT" "$BIND" "$NETWORK" "$TURSO_URL" "$TURSO_TOKEN" "$PASSWORD" "$SECRET" "$PUBLIC_URL" \
-  "$LLM_PROVIDER" "$LLM_BASE_URL" "$LLM_API_KEY" "$LLM_MODEL" "$TG_TOKEN" "$TG_USERS" "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" \
+  "$CPU_LIMIT" "$MEMORY_LIMIT" "$CONFIG_REV" \
   | sha256sum | awk '{print $1}')"
 HAVE_SUM="$("${DOCKER[@]}" inspect -f '{{index .Config.Labels "kongming.config"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
@@ -136,17 +126,11 @@ else
     echo "KONGMING_HOST=$([ "$NETWORK" = "host" ] && echo "$BIND" || echo 0.0.0.0)"
     echo "KONGMING_WORKERS=1"
     echo "LOG_LEVEL=info"
-    echo "TURSO_DATABASE_URL=${TURSO_URL}"
-    echo "TURSO_AUTH_TOKEN=${TURSO_TOKEN}"
+    echo "KONGMING_TURSO_DATABASE_URL=${TURSO_URL}"
+    echo "KONGMING_TURSO_AUTH_TOKEN=${TURSO_TOKEN}"
     [ -n "$PASSWORD" ] && echo "KONGMING_PASSWORD=${PASSWORD}"
     [ -n "$SECRET" ] && echo "KONGMING_SECRET=${SECRET}"
     [ -n "$PUBLIC_URL" ] && echo "KONGMING_PUBLIC_URL=${PUBLIC_URL}"
-    echo "LLM_PROVIDER=${LLM_PROVIDER}"
-    [ -n "$LLM_BASE_URL" ] && echo "LLM_BASE_URL=${LLM_BASE_URL}"
-    [ -n "$LLM_API_KEY" ] && echo "LLM_API_KEY=${LLM_API_KEY}"
-    [ -n "$LLM_MODEL" ] && echo "LLM_MODEL=${LLM_MODEL}"
-    [ -n "$TG_TOKEN" ] && echo "TELEGRAM_BOT_TOKEN=${TG_TOKEN}"
-    [ -n "$TG_USERS" ] && echo "TELEGRAM_ALLOWED_USERS=${TG_USERS}"
   } > "$ENV_FILE"
 
   NET_OPTS=()
@@ -178,7 +162,7 @@ else
     "$IMAGE" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
   rm -f "$ENV_FILE"
 fi
-unset TURSO_TOKEN PASSWORD SECRET LLM_API_KEY TG_TOKEN
+unset TURSO_TOKEN PASSWORD SECRET
 
 if [ -n "$OLD_IMAGE_ID" ] && [ "$OLD_IMAGE_ID" != "$IMAGE_ID" ]; then
   "${DOCKER[@]}" rmi "$OLD_IMAGE_ID" >/dev/null 2>&1 && debug "removed previous image" || true
