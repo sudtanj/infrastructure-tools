@@ -513,7 +513,7 @@ jobs:
           echo "Pulling ${CLOAK_IMAGE} in the background."
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           # `cache` is the PACKAGE MANAGER NAME, not a boolean. Both
