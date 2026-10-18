@@ -8,7 +8,9 @@
 #     hard RAM cap without swap, low CPU weight
 #   - 1 tokio worker, logs capped at 1 MB
 #   - the agents' `shell` tool (bundled BusyBox) is read-only: no working tmpfs, and
-#     kongming refuses file writes from it (Landlock); it is for the browser (cdp) and the network
+#     kongming refuses file writes from it (Landlock where the kernel has it), and the container
+#     has no writable mount at all (no /tmp tmpfs, --ipc none: no /dev/shm); it is for the
+#     browser (cdp) and the network
 #
 # Security model (this repo and its Actions logs are public): secret values are never
 # printed and never put on a command line; they reach docker through a 0600 env file
@@ -54,7 +56,7 @@ MEMORY_LIMIT="${KONGMING_MEMORY_LIMIT:-96m}"
 NETWORK="${KONGMING_NETWORK:-bridge}"
 CDP_URL="${KONGMING_CDP_URL:-}"
 CDP_HOST="${KONGMING_CDP_HOST:-chrome-cdp}"
-CONFIG_REV="5"   # bump when the docker run flags below change
+CONFIG_REV="6"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -180,7 +182,7 @@ else
     --env-file "$ENV_FILE" \
     --label "kongming.config=${WANT_SUM}" \
     --read-only \
-    --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532,mode=0700" \
+    --ipc none \
     --cpus "$CPU_LIMIT" --cpu-shares 512 \
     --memory "$MEMORY_LIMIT" --memory-swap "$MEMORY_LIMIT" \
     --oom-score-adj 300 \
@@ -252,6 +254,14 @@ if [ -n "$CDP_URL" ]; then
     debug "route to the browser: $(ip route get "${CDP_HOSTPORT%%:*}" 2>&1 | head -n1 | sed 's/ uid .*//')"
     debug "default route: $(ip route show default 2>&1 | head -n1)"
   fi
+fi
+
+# The agents' shell is for interacting, not storage: nothing in the container may be writable.
+WRITABLE="$("${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/sh -c 'for d in / /tmp /var/tmp /run /dev /dev/shm /dev/mqueue /opt /usr/local/bin; do [ -d "$d" ] && touch "$d/.kongming-w" 2>/dev/null && rm -f "$d/.kongming-w" && echo "$d"; done' 2>/dev/null | tr '\n' ' ')"
+if [ -z "$WRITABLE" ]; then
+  ok "no writable storage in the container (the agents' shell can only interact)"
+else
+  warn "writable in the container: ${WRITABLE}"
 fi
 
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"

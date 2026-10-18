@@ -19,8 +19,7 @@ services:
     memswap_limit: 96m
     cpus: 1.0
     pids_limit: 64
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532,mode=0700
+    ipc: none
     logging:
       driver: json-file
       options: { max-size: 1m, max-file: "1" }
