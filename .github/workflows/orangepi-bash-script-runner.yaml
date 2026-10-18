@@ -268,46 +268,116 @@ jobs:
       - name: Run script via Tailscale SSH
         env:
           SCRIPT_PATH: ${{ matrix.script }}
-          ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here (opi-init-tailscale-docker.sh
           # alone gets OPI_TS_ and the TAILSCALE_ OAuth client, below).
           # MINI_ROUTER_ secrets are exported under the ZILONG_ROUTER_ names the script reads.
+          # Secrets are named one by one below (not toJSON(secrets)) so the runner only ever holds
+          # the ones the scripts read; a secret a script starts reading must be added to the list.
           SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,DOZZLE_,MINI_ROUTER_,KONGMING_"
-          HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
-          HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
-          HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
-          TRAFFMONETIZER_TOKEN: ${{ secrets.TRAFFMONETIZER_TOKEN }}
-          TRAFFMONETIZER_DEVICE: ${{ secrets.TRAFFMONETIZER_DEVICE }}
-          EARNFM_TOKEN: ${{ secrets.EARNFM_TOKEN }}
-          EARNFM_DEVICE: ${{ secrets.EARNFM_DEVICE }}
-          REPOCKET_TOKEN: ${{ secrets.REPOCKET_TOKEN }}
-          REPOCKET_DEVICE: ${{ secrets.REPOCKET_DEVICE }}
-          PAWNS_EMAIL: ${{ secrets.PAWNS_EMAIL }}
-          PAWNS_PASSWORD: ${{ secrets.PAWNS_PASSWORD }}
-          PAWNS_DEVICE: ${{ secrets.PAWNS_DEVICE }}
-          PACKETSTREAM_CID: ${{ secrets.PACKETSTREAM_CID }}
-          PACKETSTREAM_DEVICE: ${{ secrets.PACKETSTREAM_DEVICE }}
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
+          BITPING_CPU_LIMIT: ${{ secrets.BITPING_CPU_LIMIT }}
           BITPING_DEVICE: ${{ secrets.BITPING_DEVICE }}
+          BITPING_IMAGE: ${{ secrets.BITPING_IMAGE }}
           BITPING_MAX_PROXY_SESSIONS: ${{ secrets.BITPING_MAX_PROXY_SESSIONS }}
-          MINI_ROUTER_TURSO_TOKEN: ${{ secrets.MINI_ROUTER_TURSO_TOKEN }}
-          MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
-          MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
-          MINI_ROUTER_JWT_SECRET: ${{ secrets.MINI_ROUTER_JWT_SECRET }}
+          BITPING_MEMORY_LIMIT: ${{ secrets.BITPING_MEMORY_LIMIT }}
+          DOZZLE_ADDR: ${{ secrets.DOZZLE_ADDR }}
+          DOZZLE_AUTH_PROVIDER: ${{ secrets.DOZZLE_AUTH_PROVIDER }}
+          DOZZLE_AUTH_TTL: ${{ secrets.DOZZLE_AUTH_TTL }}
+          DOZZLE_AUTO_UPDATE: ${{ secrets.DOZZLE_AUTO_UPDATE }}
+          DOZZLE_BIND: ${{ secrets.DOZZLE_BIND }}
+          DOZZLE_CPU_LIMIT: ${{ secrets.DOZZLE_CPU_LIMIT }}
+          DOZZLE_DATA_DIR: ${{ secrets.DOZZLE_DATA_DIR }}
+          DOZZLE_DISABLE_AVATARS: ${{ secrets.DOZZLE_DISABLE_AVATARS }}
+          DOZZLE_DISABLE_SETUP_WIZARD: ${{ secrets.DOZZLE_DISABLE_SETUP_WIZARD }}
+          DOZZLE_ENABLE_ACTIONS: ${{ secrets.DOZZLE_ENABLE_ACTIONS }}
+          DOZZLE_ENABLE_MCP: ${{ secrets.DOZZLE_ENABLE_MCP }}
+          DOZZLE_ENABLE_SHELL: ${{ secrets.DOZZLE_ENABLE_SHELL }}
+          DOZZLE_HOSTNAME: ${{ secrets.DOZZLE_HOSTNAME }}
+          DOZZLE_IMAGE: ${{ secrets.DOZZLE_IMAGE }}
+          DOZZLE_IMAGE_CHECK_MODE: ${{ secrets.DOZZLE_IMAGE_CHECK_MODE }}
+          DOZZLE_LEVEL: ${{ secrets.DOZZLE_LEVEL }}
+          DOZZLE_MEMORY_LIMIT: ${{ secrets.DOZZLE_MEMORY_LIMIT }}
+          DOZZLE_NO_ANALYTICS: ${{ secrets.DOZZLE_NO_ANALYTICS }}
+          DOZZLE_PASSWORD: ${{ secrets.DOZZLE_PASSWORD }}
+          DOZZLE_PASSWORD_FILE: ${{ secrets.DOZZLE_PASSWORD_FILE }}
+          DOZZLE_PORT: ${{ secrets.DOZZLE_PORT }}
+          DOZZLE_RELEASE_CHECK_MODE: ${{ secrets.DOZZLE_RELEASE_CHECK_MODE }}
+          DOZZLE_REPLACE_PORTAINER: ${{ secrets.DOZZLE_REPLACE_PORTAINER }}
+          DOZZLE_SHELL: ${{ secrets.DOZZLE_SHELL }}
+          DOZZLE_USER: ${{ secrets.DOZZLE_USER }}
+          EARNFM_CPU_LIMIT: ${{ secrets.EARNFM_CPU_LIMIT }}
+          EARNFM_DEVICE: ${{ secrets.EARNFM_DEVICE }}
+          EARNFM_IMAGE: ${{ secrets.EARNFM_IMAGE }}
+          EARNFM_MEMORY_LIMIT: ${{ secrets.EARNFM_MEMORY_LIMIT }}
+          EARNFM_TOKEN: ${{ secrets.EARNFM_TOKEN }}
+          HONEYGAIN_CPU_LIMIT: ${{ secrets.HONEYGAIN_CPU_LIMIT }}
+          HONEYGAIN_DEVICE: ${{ secrets.HONEYGAIN_DEVICE }}
+          HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
+          HONEYGAIN_IMAGE: ${{ secrets.HONEYGAIN_IMAGE }}
+          HONEYGAIN_MEMORY_LIMIT: ${{ secrets.HONEYGAIN_MEMORY_LIMIT }}
+          HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
+          KONGMING_BIND: ${{ secrets.KONGMING_BIND }}
+          KONGMING_CPU_LIMIT: ${{ secrets.KONGMING_CPU_LIMIT }}
+          KONGMING_HOST: ${{ secrets.KONGMING_HOST }}
+          KONGMING_IMAGE: ${{ secrets.KONGMING_IMAGE }}
+          KONGMING_MEMORY_LIMIT: ${{ secrets.KONGMING_MEMORY_LIMIT }}
+          KONGMING_NETWORK: ${{ secrets.KONGMING_NETWORK }}
+          KONGMING_PASSWORD: ${{ secrets.KONGMING_PASSWORD }}
+          KONGMING_PORT: ${{ secrets.KONGMING_PORT }}
+          KONGMING_PUBLIC_URL: ${{ secrets.KONGMING_PUBLIC_URL }}
+          KONGMING_SECRET: ${{ secrets.KONGMING_SECRET }}
           KONGMING_TURSO_AUTH_TOKEN: ${{ secrets.KONGMING_TURSO_AUTH_TOKEN }}
           KONGMING_TURSO_DATABASE_URL: ${{ secrets.KONGMING_TURSO_DATABASE_URL }}
           KONGMING_TURSO_TOKEN: ${{ secrets.KONGMING_TURSO_TOKEN }}
           KONGMING_TURSO_URL: ${{ secrets.KONGMING_TURSO_URL }}
-          KONGMING_PASSWORD: ${{ secrets.KONGMING_PASSWORD }}
-          KONGMING_SECRET: ${{ secrets.KONGMING_SECRET }}
-          KONGMING_PUBLIC_URL: ${{ secrets.KONGMING_PUBLIC_URL }}
-          KONGMING_BIND: ${{ secrets.KONGMING_BIND }}
-          KONGMING_NETWORK: ${{ secrets.KONGMING_NETWORK }}
+          KONGMING_WORKERS: ${{ secrets.KONGMING_WORKERS }}
+          MINI_ROUTER_ALLOW_ANY: ${{ secrets.MINI_ROUTER_ALLOW_ANY }}
+          MINI_ROUTER_BIND: ${{ secrets.MINI_ROUTER_BIND }}
+          MINI_ROUTER_CPU_LIMIT: ${{ secrets.MINI_ROUTER_CPU_LIMIT }}
+          MINI_ROUTER_IMAGE: ${{ secrets.MINI_ROUTER_IMAGE }}
+          MINI_ROUTER_INITIAL_PASSWORD: ${{ secrets.MINI_ROUTER_INITIAL_PASSWORD }}
+          MINI_ROUTER_JWT_SECRET: ${{ secrets.MINI_ROUTER_JWT_SECRET }}
+          MINI_ROUTER_MEMORY_LIMIT: ${{ secrets.MINI_ROUTER_MEMORY_LIMIT }}
+          MINI_ROUTER_PORT: ${{ secrets.MINI_ROUTER_PORT }}
+          MINI_ROUTER_REQUIRE_API_KEY: ${{ secrets.MINI_ROUTER_REQUIRE_API_KEY }}
+          MINI_ROUTER_TURSO_ONLY: ${{ secrets.MINI_ROUTER_TURSO_ONLY }}
+          MINI_ROUTER_TURSO_SYNC_SECS: ${{ secrets.MINI_ROUTER_TURSO_SYNC_SECS }}
+          MINI_ROUTER_TURSO_TOKEN: ${{ secrets.MINI_ROUTER_TURSO_TOKEN }}
+          MINI_ROUTER_TURSO_URL: ${{ secrets.MINI_ROUTER_TURSO_URL }}
+          MINI_ROUTER_WORKERS: ${{ secrets.MINI_ROUTER_WORKERS }}
+          OPI_TS_EXIT_NODE: ${{ secrets.OPI_TS_EXIT_NODE }}
           OPI_TS_HOSTNAME: ${{ secrets.OPI_TS_HOSTNAME }}
+          OPI_TS_HOST_STATE: ${{ secrets.OPI_TS_HOST_STATE }}
+          OPI_TS_IMAGE: ${{ secrets.OPI_TS_IMAGE }}
           OPI_TS_IP: ${{ secrets.OPI_TS_IP }}
+          OPI_TS_MEMORY_LIMIT: ${{ secrets.OPI_TS_MEMORY_LIMIT }}
+          OPI_TS_MIGRATE: ${{ secrets.OPI_TS_MIGRATE }}
+          OPI_TS_PORT: ${{ secrets.OPI_TS_PORT }}
           OPI_TS_ROUTES: ${{ secrets.OPI_TS_ROUTES }}
           OPI_TS_TAGS: ${{ secrets.OPI_TS_TAGS }}
+          OPI_TS_TAILSCALED_EXTRA_ARGS: ${{ secrets.OPI_TS_TAILSCALED_EXTRA_ARGS }}
+          PACKETSTREAM_CID: ${{ secrets.PACKETSTREAM_CID }}
+          PACKETSTREAM_CPU_LIMIT: ${{ secrets.PACKETSTREAM_CPU_LIMIT }}
+          PACKETSTREAM_DEVICE: ${{ secrets.PACKETSTREAM_DEVICE }}
+          PACKETSTREAM_IMAGE: ${{ secrets.PACKETSTREAM_IMAGE }}
+          PACKETSTREAM_MEMORY_LIMIT: ${{ secrets.PACKETSTREAM_MEMORY_LIMIT }}
+          PAWNS_CPU_LIMIT: ${{ secrets.PAWNS_CPU_LIMIT }}
+          PAWNS_DEVICE: ${{ secrets.PAWNS_DEVICE }}
+          PAWNS_EMAIL: ${{ secrets.PAWNS_EMAIL }}
+          PAWNS_IMAGE: ${{ secrets.PAWNS_IMAGE }}
+          PAWNS_MEMORY_LIMIT: ${{ secrets.PAWNS_MEMORY_LIMIT }}
+          PAWNS_PASSWORD: ${{ secrets.PAWNS_PASSWORD }}
+          REPOCKET_CPU_LIMIT: ${{ secrets.REPOCKET_CPU_LIMIT }}
+          REPOCKET_DEVICE: ${{ secrets.REPOCKET_DEVICE }}
+          REPOCKET_IMAGE: ${{ secrets.REPOCKET_IMAGE }}
+          REPOCKET_MEMORY_LIMIT: ${{ secrets.REPOCKET_MEMORY_LIMIT }}
+          REPOCKET_TOKEN: ${{ secrets.REPOCKET_TOKEN }}
+          TRAFFMONETIZER_CPU_LIMIT: ${{ secrets.TRAFFMONETIZER_CPU_LIMIT }}
+          TRAFFMONETIZER_DEVICE: ${{ secrets.TRAFFMONETIZER_DEVICE }}
+          TRAFFMONETIZER_IMAGE: ${{ secrets.TRAFFMONETIZER_IMAGE }}
+          TRAFFMONETIZER_MEMORY_LIMIT: ${{ secrets.TRAFFMONETIZER_MEMORY_LIMIT }}
+          TRAFFMONETIZER_TOKEN: ${{ secrets.TRAFFMONETIZER_TOKEN }}
         run: |
           set +e
           SECONDS=0
@@ -319,24 +389,29 @@ jobs:
           PAYLOAD=$(mktemp)
           trap 'rm -f "$LOG" "$PAYLOAD" "${PAYLOAD}.attach"' EXIT
 
+          # `export KEY='value'` for every set env var starting with $1. An unset secret
+          # arrives as an empty string, which is skipped.
+          export_prefix() {
+            local v n
+            while IFS= read -r v; do
+              [ -n "${!v}" ] || continue
+              n="$v"; [[ "$v" == MINI_ROUTER_* ]] && n="ZILONG_ROUTER_${v#MINI_ROUTER_}"
+              printf 'export %s=%q\n' "$n" "${!v}"
+            done < <(compgen -e | grep "^$1" || true)
+          }
+
           # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
           {
-            # zilong-router defaults (not secrets, so ALL_SECRETS never carries them); any
-            # MINI_ROUTER_ repo secret exported below overrides them.
+            # zilong-router defaults (not secrets); any MINI_ROUTER_ repo secret exported
+            # below overrides them.
             printf 'export ZILONG_ROUTER_BIND=0.0.0.0\nexport ZILONG_ROUTER_ALLOW_ANY=1\n'
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
-            for p in "${PREFIXES[@]}"; do
-              echo "$ALL_SECRETS" | jq -r --arg p "$p" \
-                'to_entries[] | select(.key | startswith($p))
-                 | .key |= (if startswith("MINI_ROUTER_") then "ZILONG_ROUTER_" + .[12:] else . end)
-                 | "export \(.key)=\(.value|@sh)"'
-            done
+            for p in "${PREFIXES[@]}"; do export_prefix "$p"; done
             # The device's own Tailscale reuses the runner's OAuth client, so only
             # opi-init-tailscale-docker.sh gets it (plus its OPI_TS_ settings); no other script
             # ever sees TAILSCALE_ values.
             if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
-              echo "$ALL_SECRETS" | jq -r 'to_entries[] | select(.key | startswith("OPI_TS_"))
-                | "export \(.key)=\(.value|@sh)"'
+              export_prefix OPI_TS_
               for v in TAILSCALE_OAUTH_CLIENT_SECRET; do
                 [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
               done

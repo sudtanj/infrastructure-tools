@@ -1135,6 +1135,9 @@ jobs:
           # shellcheck disable=SC1091
           . /tmp/py-env.sh
           rm -f /tmp/py-env.sh
+          # The full secrets JSON and the job-level VPN keys are still in this
+          # step's environment, and the scripts would inherit them.
+          unset ALL_SECRETS TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
 
           # The CDP endpoint, when the browser was started. Written by the
           # readiness step and absent when `browser` was unchecked.

@@ -261,9 +261,10 @@ jobs:
       - name: Run script via IAP SSH
         env:
           SCRIPT_PATH: ${{ matrix.script }}
-          ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
-          # Optional: comma-separated prefixes to filter. Empty = export everything.
+          # Comma-separated prefixes; only env vars starting with one of them reach the VM.
+          # Secrets are named one by one below (not toJSON(secrets)) so the runner only ever holds
+          # the ones the scripts read; a secret a script starts reading must be added to the list.
           # N8N_ lets a secret N8N_ENCRYPTION_KEY override the key the script generates
           # and persists in /etc/n8n/n8n.env. The script refuses to start if the supplied
           # key differs from the one already on disk, since that would orphan credentials.
@@ -273,6 +274,86 @@ jobs:
           # GH_USERNAME / GH_EMAIL set the global git identity inside the paseo-lite container.
           # DOZZLE_ forwards DOZZLE_PASSWORD (and optional overrides) to init-dozzle.sh.
           SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: ${{ secrets.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC }}
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ secrets.CLAUDE_CODE_MAX_OUTPUT_TOKENS }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_IDLE_SECS: ${{ secrets.CODEX_IDLE_SECS }}
+          CODEX_MAX_TOKEN: ${{ secrets.CODEX_MAX_TOKEN }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          DOZZLE_ADDR: ${{ secrets.DOZZLE_ADDR }}
+          DOZZLE_AUTH_PROVIDER: ${{ secrets.DOZZLE_AUTH_PROVIDER }}
+          DOZZLE_AUTH_TTL: ${{ secrets.DOZZLE_AUTH_TTL }}
+          DOZZLE_AUTO_UPDATE: ${{ secrets.DOZZLE_AUTO_UPDATE }}
+          DOZZLE_BIND: ${{ secrets.DOZZLE_BIND }}
+          DOZZLE_CPU_LIMIT: ${{ secrets.DOZZLE_CPU_LIMIT }}
+          DOZZLE_DATA_DIR: ${{ secrets.DOZZLE_DATA_DIR }}
+          DOZZLE_DISABLE_AVATARS: ${{ secrets.DOZZLE_DISABLE_AVATARS }}
+          DOZZLE_DISABLE_SETUP_WIZARD: ${{ secrets.DOZZLE_DISABLE_SETUP_WIZARD }}
+          DOZZLE_ENABLE_ACTIONS: ${{ secrets.DOZZLE_ENABLE_ACTIONS }}
+          DOZZLE_ENABLE_MCP: ${{ secrets.DOZZLE_ENABLE_MCP }}
+          DOZZLE_ENABLE_SHELL: ${{ secrets.DOZZLE_ENABLE_SHELL }}
+          DOZZLE_HOSTNAME: ${{ secrets.DOZZLE_HOSTNAME }}
+          DOZZLE_IMAGE: ${{ secrets.DOZZLE_IMAGE }}
+          DOZZLE_IMAGE_CHECK_MODE: ${{ secrets.DOZZLE_IMAGE_CHECK_MODE }}
+          DOZZLE_LEVEL: ${{ secrets.DOZZLE_LEVEL }}
+          DOZZLE_MEMORY_LIMIT: ${{ secrets.DOZZLE_MEMORY_LIMIT }}
+          DOZZLE_NO_ANALYTICS: ${{ secrets.DOZZLE_NO_ANALYTICS }}
+          DOZZLE_PASSWORD: ${{ secrets.DOZZLE_PASSWORD }}
+          DOZZLE_PASSWORD_FILE: ${{ secrets.DOZZLE_PASSWORD_FILE }}
+          DOZZLE_PORT: ${{ secrets.DOZZLE_PORT }}
+          DOZZLE_RELEASE_CHECK_MODE: ${{ secrets.DOZZLE_RELEASE_CHECK_MODE }}
+          DOZZLE_REPLACE_PORTAINER: ${{ secrets.DOZZLE_REPLACE_PORTAINER }}
+          DOZZLE_SHELL: ${{ secrets.DOZZLE_SHELL }}
+          DOZZLE_USER: ${{ secrets.DOZZLE_USER }}
+          GH_EMAIL: ${{ secrets.GH_EMAIL }}
+          GH_RUNNER_CONTAINER_NAME: ${{ secrets.GH_RUNNER_CONTAINER_NAME }}
+          GH_RUNNER_DISABLE_AUTO_UPDATE: ${{ secrets.GH_RUNNER_DISABLE_AUTO_UPDATE }}
+          GH_RUNNER_EPHEMERAL: ${{ secrets.GH_RUNNER_EPHEMERAL }}
+          GH_RUNNER_LABELS: ${{ secrets.GH_RUNNER_LABELS }}
+          GH_RUNNER_NAME: ${{ secrets.GH_RUNNER_NAME }}
+          GH_RUNNER_REG_TOKEN: ${{ secrets.GH_RUNNER_REG_TOKEN }}
+          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO }}
+          GH_RUNNER_WORK_DIR: ${{ secrets.GH_RUNNER_WORK_DIR }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          N8N_BACKUP_DIR: ${{ secrets.N8N_BACKUP_DIR }}
+          N8N_BACKUP_ENABLED: ${{ secrets.N8N_BACKUP_ENABLED }}
+          N8N_BACKUP_KEEP: ${{ secrets.N8N_BACKUP_KEEP }}
+          N8N_BACKUP_SCRIPT: ${{ secrets.N8N_BACKUP_SCRIPT }}
+          N8N_CONFIG_DIR: ${{ secrets.N8N_CONFIG_DIR }}
+          N8N_CONTAINER_NAME: ${{ secrets.N8N_CONTAINER_NAME }}
+          N8N_CPU_LIMIT: ${{ secrets.N8N_CPU_LIMIT }}
+          N8N_DEFAULT_BINARY_DATA_MODE: ${{ secrets.N8N_DEFAULT_BINARY_DATA_MODE }}
+          N8N_DIAGNOSTICS_ENABLED: ${{ secrets.N8N_DIAGNOSTICS_ENABLED }}
+          N8N_EDITOR_BASE_URL: ${{ secrets.N8N_EDITOR_BASE_URL }}
+          N8N_ENCRYPTION_KEY: ${{ secrets.N8N_ENCRYPTION_KEY }}
+          N8N_EXECUTIONS_TIMEOUT: ${{ secrets.N8N_EXECUTIONS_TIMEOUT }}
+          N8N_HEALTH_TIMEOUT: ${{ secrets.N8N_HEALTH_TIMEOUT }}
+          N8N_HIRING_BANNER_ENABLED: ${{ secrets.N8N_HIRING_BANNER_ENABLED }}
+          N8N_HOST: ${{ secrets.N8N_HOST }}
+          N8N_IMAGE: ${{ secrets.N8N_IMAGE }}
+          N8N_LISTEN_ADDRESS: ${{ secrets.N8N_LISTEN_ADDRESS }}
+          N8N_MAX_OLD_SPACE_MB: ${{ secrets.N8N_MAX_OLD_SPACE_MB }}
+          N8N_MEMORY_LIMIT: ${{ secrets.N8N_MEMORY_LIMIT }}
+          N8N_PORT: ${{ secrets.N8N_PORT }}
+          N8N_PROTOCOL: ${{ secrets.N8N_PROTOCOL }}
+          N8N_PUBLIC_URL: ${{ secrets.N8N_PUBLIC_URL }}
+          N8N_REQ_MB: ${{ secrets.N8N_REQ_MB }}
+          N8N_RESERVED_MEMORY_MB: ${{ secrets.N8N_RESERVED_MEMORY_MB }}
+          N8N_SAMESITE_COOKIE: ${{ secrets.N8N_SAMESITE_COOKIE }}
+          N8N_SECURE_COOKIE: ${{ secrets.N8N_SECURE_COOKIE }}
+          N8N_SYSTEMD_DIR: ${{ secrets.N8N_SYSTEMD_DIR }}
+          N8N_TEMPLATES_ENABLED: ${{ secrets.N8N_TEMPLATES_ENABLED }}
+          N8N_TIMEZONE: ${{ secrets.N8N_TIMEZONE }}
+          N8N_VERSION_NOTIFICATIONS_ENABLED: ${{ secrets.N8N_VERSION_NOTIFICATIONS_ENABLED }}
+          N8N_VOLUME_NAME: ${{ secrets.N8N_VOLUME_NAME }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           set +e
           SECONDS=0
@@ -284,18 +365,15 @@ jobs:
           trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
 
           # Build the payload: `export KEY='value'` lines + the script itself.
-          # @sh does shell-safe quoting so values with spaces / quotes / newlines survive.
-          # Filter by prefix list (or pass everything if SECRET_FILTER is empty).
+          # %q does shell-safe quoting so values with spaces / quotes / newlines survive.
+          # An unset secret arrives as an empty string, which is skipped.
           {
-            if [ -z "${SECRET_FILTER:-}" ]; then
-              echo "$ALL_SECRETS" | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"'
-            else
-              IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
-              for p in "${PREFIXES[@]}"; do
-                echo "$ALL_SECRETS" | jq -r --arg p "$p" \
-                  'to_entries[] | select(.key | startswith($p)) | "export \(.key)=\(.value|@sh)"'
-              done
-            fi
+            IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
+            for p in "${PREFIXES[@]}"; do
+              while IFS= read -r v; do
+                [ -n "${!v}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+              done < <(compgen -e | grep "^$p" || true)
+            done
             printf 'export TS_HOSTNAME=%q\n' "${GCP_VM_NAME}"
             printf 'export VERBOSE=0\n'
             if [ "$DEBUG_LOGS" = "true" ]; then printf 'export INIT_DEBUG=1\n'; else printf 'export INIT_DEBUG=0\n'; fi

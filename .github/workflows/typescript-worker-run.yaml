@@ -1183,6 +1183,9 @@ jobs:
           # shellcheck disable=SC1091
           . /tmp/ts-env.sh
           rm -f /tmp/ts-env.sh
+          # The full secrets JSON and the job-level VPN keys are still in this
+          # step's environment, and the scripts would inherit them.
+          unset ALL_SECRETS TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
 
           # The local Chrome's CDP URL. Written by the start step and absent
           # when `browser` was unchecked.
