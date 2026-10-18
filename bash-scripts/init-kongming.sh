@@ -134,8 +134,9 @@ TAILNET_ALLOW="${KONGMING_TAILNET_ALLOW:-}"
 if [ "$NETWORK" = "host" ]; then
   warn "KONGMING_NETWORK=host: kongming shares the host's network, the tailnet is not blocked"
 else
-  if [ "$(id -u)" -eq 0 ]; then ROOT=(); elif sudo -n true 2>/dev/null; then ROOT=(sudo -n); else
-    fail "keeping kongming out of the tailnet needs root (iptables); run as root or give the user passwordless sudo"
+  # Plain sudo: the Orange Pi runner wraps it to answer with the SSH password.
+  if [ "$(id -u)" -eq 0 ]; then ROOT=(); elif sudo true 2>/dev/null; then ROOT=(sudo); else
+    fail "keeping kongming out of the tailnet needs root (iptables); run as root or let the user sudo"
   fi
   command -v iptables >/dev/null 2>&1 || fail "iptables not found (needed to keep kongming out of the tailnet)"
 
