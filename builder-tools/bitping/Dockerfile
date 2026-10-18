@@ -11,7 +11,7 @@ FROM bitping/bitpingd:latest AS upstream
 # 0xb7 for aarch64, and the binary must be static (no musl loader to load it
 # on distroless). It is never executed at build time; it connects out as soon
 # as it starts.
-FROM --platform=$BUILDPLATFORM busybox:1.37-musl AS check
+FROM --platform=$BUILDPLATFORM busybox:1.38-musl AS check
 ARG TARGETARCH
 COPY --from=upstream /app/bitpingd /bitpingd
 RUN case "$TARGETARCH" in \
