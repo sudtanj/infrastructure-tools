@@ -1,0 +1,306 @@
+name: "Shopee: cheapest listings from Star and Mall sellers"
+
+# ---------------------------------------------------------------------------
+# Searches Shopee for the `query` input in the logged-in Chrome profile
+# that chrome-cdp-session.yaml saves, keeps the 10 cheapest listings from
+# Star, Star+ and Mall sellers with a product rating of 4.8+ (10+ ratings), and commits
+# them to the PRIVATE repo as `shopee_data/<query>.md`. Manual runs only.
+#
+# HOW THIS WORKS
+#   1. The saved Chrome profile (release tag `chrome-cdp-state` on the private
+#      repo) is restored and Chrome starts with CDP on loopback, as in
+#      job-hunter.yaml's refresh_cv. The profile is only read, never saved
+#      back, so a session open meanwhile keeps its own.
+#   2. The runner joins the tailnet through TAILSCALE_EXIT_NODE, so Shopee
+#      sees the home IP the profile logged in from, never a datacenter one.
+#   3. `shopee_data/shopee.ts`, checked out from the PRIVATE repo
+#      (with `job-hunter/lib.ts` for the GitHub API), drives that Chrome with
+#      patchright (Playwright without its CDP tell) like a person: types the
+#      query, scrolls, sorts by price and pages with human pauses, reads the
+#      results from Shopee's own search answers (no product pages), and
+#      commits the report through the GitHub API.
+#      A captcha fails the run: solve it over VNC in chrome-cdp-session, rerun.
+#   4. Chrome stops and the runner leaves the tailnet, even on failure.
+#
+# SETUP
+#   Log in to Shopee over VNC once in chrome-cdp-session, then:
+#
+#   secret PRIVATE_REPO          "owner/name" of the private repo
+#   secret PRIVATE_REPO_TOKEN    Contents: Read and write on it. Clones the
+#                                script, downloads the profile and commits
+#                                the report.
+#   secret BUILD_REF             OPTIONAL branch to run from and commit to,
+#                                default main
+#   secret STATE_KEY             passphrase of the saved Chrome profile, as in
+#                                chrome-cdp-session.yaml
+#   secret TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, or TAILSCALE_AUTH_KEY
+#                                the same tailnet credentials as the worker
+#                                workflows
+#   secret TAILSCALE_EXIT_NODE   exit node, as in the worker workflows
+#
+# THIS REPO IS PUBLIC: the `query` input and this run's log are visible to
+# anyone. The script prints counts only; the listings go to the private repo.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'What to search for on Shopee (visible to anyone: this repo is public)'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # One Chrome on the saved profile at a time.
+  group: shopee-search
+  cancel-in-progress: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # The script talks to GitHub through the API, not git; no token in .git/config.
+          persist-credentials: false
+          sparse-checkout: |
+            shopee_data
+            job-hunter
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
+          node-version: 24
+
+      - name: Verify required secrets
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in STATE_KEY TAILSCALE_EXIT_NODE; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          # Not a secret, but a real address in a public log.
+          echo "::add-mask::${TAILSCALE_EXIT_NODE}"
+          echo "Secrets present."
+
+      # Same encrypted profile and format as chrome-cdp-session.yaml, restored
+      # the same way as typescript-worker-run.yaml (before the VPN: faster).
+      - name: Restore the Chrome profile
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "::error::No saved Chrome profile. Run chrome-cdp-session and log in to Shopee over VNC first."
+            exit 1
+          fi
+          mkdir -p "$PROFILE_DIR" /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages as chrome-cdp-session.yaml, so Shopee sees the
+      # browser it saw at login (real GL, audio device, desktop fonts).
+      - name: Install Chrome and a virtual display
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # Same credential handling as typescript-worker-run.yaml: the OAuth
+      # client secret is exchanged for a single-use, ephemeral, 10-minute auth
+      # key; only HTTP statuses are ever printed.
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      # After the tailnet, so Shopee sees the exit node's IP, never this
+      # datacenter one. Flags as in typescript-worker-run.yaml.
+      - name: Start Chrome
+        run: |
+          set -euo pipefail
+          # Not printed: the zone narrows down where the exit node is.
+          TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+          if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+            echo "::warning::Could not detect the time zone; using UTC."
+            TZ=UTC
+          fi
+          export TZ LANG=en_US.UTF-8 LANGUAGE=en_US
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          # Open a new tab, not the tabs the session left open.
+          jq '.session.restore_on_startup = 5
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+          setsid nohup google-chrome \
+            --user-data-dir="$PROFILE_DIR" \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
+            --lang=en-US \
+            --accept-lang=en-US \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-dev-shm-usage \
+            --start-maximized \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            >/tmp/chrome.log 2>&1 &
+          echo $! > /tmp/chrome.pid
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+              echo "Chrome ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Chrome did not open CDP within 30s."
+          exit 1
+
+
+      - name: Search Shopee and report
+        env:
+          # The clone token doubles as the API token for the report.
+          JOB_HUNTER_GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          JOB_HUNTER_REPO: ${{ secrets.PRIVATE_REPO }}
+          JOB_HUNTER_BRANCH: ${{ secrets.BUILD_REF || 'main' }}
+          SEARCH_QUERY: ${{ inputs.query }}
+          CHROME_CDP_URL: http://127.0.0.1:9222
+        run: |
+          npm ci --prefix private/shopee_data --no-audit --no-fund
+          node private/shopee_data/shopee.ts
+
+      - name: Stop Chrome, leave the tailnet
+        if: always()
+        run: |
+          # Nothing to save (the profile is not uploaded); just stop it.
+          pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
+          # A node left joined keeps an exit-node route and a tailnet slot.
+          sudo tailscale logout 2>&1 | tail -3 || true
