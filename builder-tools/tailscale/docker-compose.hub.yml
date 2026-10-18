@@ -42,6 +42,8 @@ services:
     # GOMEMLIMIT makes Go collect garbage before the cgroup limit is hit.
     environment:
       GOMEMLIMIT: 96MiB
+      # Extra tailscaled flags, e.g. "--port 8806"; added after the ones above.
+      TS_TAILSCALED_EXTRA_ARGS: ${TS_TAILSCALED_EXTRA_ARGS:-}
     cpu_shares: 512
     mem_limit: 128m
     memswap_limit: 128m

@@ -8,11 +8,20 @@
 # (--config), so containerboot and a shell are not needed, and it programs the
 # firewall through nftables netlink, so no iptables userland.
 #
-# The tag is written out (no ARG) so Dependabot can bump it.
+# The tags are written out (no ARG) so Dependabot can bump them.
 FROM tailscale/tailscale:v1.104.1 AS upstream
+
+# Tiny static entrypoint that adds TS_TAILSCALED_EXTRA_ARGS (see
+# entrypoint/main.go). Cross-compiled on the build platform, no QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS entrypoint
+ARG TARGETOS TARGETARCH
+COPY entrypoint/main.go /src/main.go
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /entrypoint /src/main.go
 
 FROM gcr.io/distroless/static-debian13:latest
 COPY --from=upstream /usr/local/bin/tailscaled /usr/local/bin/tailscale /usr/local/bin/
+COPY --from=entrypoint /entrypoint /usr/local/bin/entrypoint
 
 # Runs as root: kernel networking (TUN device, routes, nftables) needs
 # NET_ADMIN and NET_RAW, and Docker grants added capabilities only to root.
@@ -35,7 +44,10 @@ ENV TS_NO_LOGS_NO_SUPPORT=true \
 # the build stops here instead of the container on the Pi.
 RUN ["/usr/local/bin/tailscaled", "--version"]
 RUN ["/usr/local/bin/tailscale", "version"]
+# Also checks that the entrypoint execs tailscaled.
+RUN ["/usr/local/bin/entrypoint", "--version"]
 
 # Same socket path as the CLI default, so `docker exec <ctr> tailscale status`
-# needs no --socket flag.
-ENTRYPOINT ["/usr/local/bin/tailscaled", "--statedir=/var/lib/tailscale", "--socket=/var/run/tailscale/tailscaled.sock"]
+# needs no --socket flag. The entrypoint adds --statedir and --socket, then
+# the container arguments, then TS_TAILSCALED_EXTRA_ARGS (e.g. "--port 8806").
+ENTRYPOINT ["/usr/local/bin/entrypoint"]

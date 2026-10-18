@@ -44,6 +44,8 @@
 #   OPI_TS_ROUTES       subnet routes to advertise, comma separated, e.g. 192.168.1.0/24
 #   OPI_TS_EXIT_NODE    1 (default) = advertise as exit node | 0
 #   OPI_TS_PORT         WireGuard UDP port (default 41641)
+#   OPI_TS_TAILSCALED_EXTRA_ARGS  extra tailscaled flags, split on spaces and added last, so they
+#                       win, e.g. "--port 8806" (passed as the image's TS_TAILSCALED_EXTRA_ARGS)
 #   OPI_TS_IMAGE        default sudtanj/tailscale:latest
 #   OPI_TS_MEMORY_LIMIT default 128m (the Go heap target is 3/4 of it)
 #   OPI_TS_MIGRATE      1 (default) = take over a running host tailscaled | 0 = stop instead
@@ -62,6 +64,7 @@ EXIT_NODE="${OPI_TS_EXIT_NODE:-1}"
 OAUTH_SECRET="$(printf '%s' "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" | tr -d '[:space:]')"
 TAGS_RAW="$(printf '%s' "${OPI_TS_TAGS:-}" | tr -d '[:space:]')"
 PORT="${OPI_TS_PORT:-41641}"
+EXTRA_ARGS="${OPI_TS_TAILSCALED_EXTRA_ARGS:-}"
 MEMORY_LIMIT="${OPI_TS_MEMORY_LIMIT:-128m}"
 MIGRATE="${OPI_TS_MIGRATE:-1}"
 HOST_STATE="${OPI_TS_HOST_STATE:-/var/lib/tailscale/tailscaled.state}"
@@ -331,6 +334,7 @@ put "${ROOT}/settings" 600 <<EOF || true
 IMAGE=$(printf '%q' "$IMAGE")
 CONTAINER=$(printf '%q' "$CONTAINER_NAME")
 PORT=$(printf '%q' "$PORT")
+EXTRA_ARGS=$(printf '%q' "$EXTRA_ARGS")
 LIMITS=$(printf '%q' "$LIMITS")
 LOG_OPTS=$(printf '%q' "$LOG_OPTS")
 GO_MEM_LIMIT=$(printf '%q' "$GO_MEM_LIMIT")
@@ -381,6 +385,7 @@ start() {
     --oom-score-adj -500 --cpu-shares 512 $LIMITS \
     --log-driver json-file $LOG_OPTS \
     -e GOMEMLIMIT="$GO_MEM_LIMIT" \
+    -e TS_TAILSCALED_EXTRA_ARGS="${EXTRA_ARGS:-}" \
     "$IMAGE" --config=/etc/tailscale/tailscaled.json --port="$PORT" >/dev/null
 }
 

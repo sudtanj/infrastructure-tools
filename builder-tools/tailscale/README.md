@@ -24,6 +24,7 @@ docker exec tailscale tailscale status
 | `TS_HOSTNAME` | no (default `opi-zero3`) | Name in the admin console and MagicDNS. |
 | `TS_EXIT_NODE` | no (default `true`) | `true` or `false`. Advertises the board as an exit node. |
 | `TS_PORT` | no (default `41641`) | WireGuard UDP port. Forward it on the router for direct connections. |
+| `TS_TAILSCALED_EXTRA_ARGS` | no | Extra `tailscaled` flags, split on spaces and added last so they win, e.g. `--port 8806`. Same name as in the official image. |
 
 Settings go into tailscaled's own config file (`--config`), which Compose
 writes from `.env`. Recreate with `docker compose up -d` after you change
@@ -100,6 +101,8 @@ runs this image without Compose and adds:
 - Taking over a host-installed Tailscale, keeping the same node identity.
 - IP forwarding on the host.
 - Subnet routes (`OPI_TS_ROUTES`).
+- Extra `tailscaled` flags (`OPI_TS_TAILSCALED_EXTRA_ARGS`, e.g. `--port 8806`
+  for a fixed, port-forwarded WireGuard port and direct connections).
 - One credential, the repo's existing `TAILSCALE_OAUTH_CLIENT_SECRET` OAuth
   client, used to:
   - log a new node in with a one-off auth key tagged `OPI_TS_TAGS`, and keep
