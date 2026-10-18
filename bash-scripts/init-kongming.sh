@@ -114,7 +114,7 @@ if [ -z "$CDP_URL" ] && [ "$CDP_HOST" != "none" ] && [ "${INIT_DEBUG:-0}" = "1" 
     debug "tailnet peers seen: $(tailscale status 2>&1 | awk '{print $2}' | tr '\n' ' ' | cut -c1-300)"
   fi
 fi
-if [ -n "$CDP_URL" ]; then ok "browser for the agents: ${CDP_HOST} on the tailnet"; else warn "no browser for the agents (no tailnet machine ${CDP_HOST}; set KONGMING_CDP_URL)"; fi
+if [ -n "$CDP_URL" ]; then ok "browser for the agents: ${CDP_HOST} on the tailnet"; else status "no browser address configured; agents can still use one given in a skill (cdp --url)"; fi
 
 # ---------------------------------------------------------------------------
 # 2. Image
