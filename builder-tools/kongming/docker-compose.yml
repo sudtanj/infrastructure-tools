@@ -19,4 +19,3 @@ services:
     pids_limit: 64
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532,mode=0700
-      - /work:rw,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700
