@@ -461,7 +461,8 @@ fi
 # 6. Container
 # ---------------------------------------------------------------------------
 WANT_READY=""
-[ "$HAVE_STATE" = 1 ] || [ -n "$AUTHKEY" ] && WANT_READY=Running
+# Saved state that is logged out on the server settles in NeedsLogin; that is handled below
+[ -n "$AUTHKEY" ] && WANT_READY=Running
 OLD_IMAGE_ID="$("${DOCKER[@]}" inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 
 if [ "$HOST_ACTIVE" = 1 ]; then
@@ -499,6 +500,35 @@ else
 fi
 
 BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
+
+# Saved state but logged out on the server (machine deleted in the admin console, key revoked):
+# log in again with a fresh key from the OAuth client. tailscaled reads the key from its config
+# at start, and put() rewrites the bind-mounted file in place, so a restart is enough.
+if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ -n "$OAUTH_SECRET" ]; then
+  warn "node state is there but Tailscale wants a new login (was the machine removed from the admin console?)"
+  if [ "${#TAGS[@]}" -eq 0 ]; then
+    warn "OPI_TS_TAGS is empty: an OAuth client can only create tagged keys, so it can't log this node in"
+  else
+    AUTHKEY="$(mint_authkey || true)"
+    if [ -z "$AUTHKEY" ]; then
+      warn "could not create an auth key from the OAuth client (it needs the auth_keys scope and must own ${TAGS_RAW})"
+    elif ! [[ "$AUTHKEY" =~ ^tskey-auth-[A-Za-z0-9-]+$ ]]; then
+      fail "the minted auth key does not look like tskey-auth-..."
+    else
+      ok "one-off auth key created from the OAuth client (tags: ${TAGS_RAW})"
+      config with-key | put "${ROOT}/tailscaled.json" 600 || true
+      step "restarting ${CONTAINER_NAME} to log in"
+      "${DOCKER[@]}" restart "$CONTAINER_NAME" >/dev/null || fail "failed to restart ${CONTAINER_NAME}"
+      if ! "${SUDO[@]}" bash "$HELPER" wait Running; then
+        "${DOCKER[@]}" logs --tail 20 "$CONTAINER_NAME" 2>&1 | sed 's/^/[!]   /' >&2 || true
+        config | put "${ROOT}/tailscaled.json" 600 || true
+        fail "tailscaled did not log in with the new key"
+      fi
+      BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
+    fi
+  fi
+fi
+
 if [ "$BACKEND" = "Running" ] && "${SUDO[@]}" grep -q '"AuthKey"' "${ROOT}/tailscaled.json"; then
   config | put "${ROOT}/tailscaled.json" 600 && ok "auth key removed from disk (node is logged in)"
 fi
