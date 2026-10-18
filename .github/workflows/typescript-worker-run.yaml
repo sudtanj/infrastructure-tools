@@ -164,12 +164,11 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #     who can push to the private repo controls what runs here, and anyone who
 #     can push to THIS repo can change what gets executed. Keep push access to
 #     trusted people on both.
-#   * The scripts receive the repository's other secrets as environment
-#     variables, because they are the ones that need to call real services --
-#     but they do NOT get PRIVATE_REPO_TOKEN (the clone credential) or
-#     TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET (the VPN
-#     credentials). GITHUB_TOKEN is not exposed
-#     either. Values are JSON-quoted and sourced, not eval'd.
+#   * The scripts receive only the secrets they read (HONEYGAIN_EMAIL /
+#     HONEYGAIN_PASSWORD), as environment variables. Add a secret to the job
+#     env when a script starts needing it. They do NOT get PRIVATE_REPO_TOKEN
+#     (the clone credential), TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET
+#     (the VPN credentials), STATE_KEY or GITHUB_TOKEN.
 #   * A successful script's output is NOT printed: it goes to a log file and
 #     only a one-line pass is shown, because this run's log is public. On
 #     failure the last 60 lines are printed so the stack trace is debuggable.
@@ -1035,9 +1034,9 @@ jobs:
           KEEP_GOING: ${{ inputs.keep_going || 'false' }}
           INSTALL: ${{ needs.discover.outputs.install }}
           STRIP_FLAG: ${{ needs.discover.outputs.strip_flag }}
-          # The scripts get the repo's secrets, but not the two credentials
-          # this workflow itself uses to clone the repo and join the VPN.
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          # The scripts only get the secrets they read: HONEYGAIN_EMAIL /
+          # HONEYGAIN_PASSWORD, set on the job. A script that needs another
+          # secret must have it added here.
         run: |
           set -uo pipefail
           cd "private/$TSWORKER_DIR"
@@ -1172,20 +1171,13 @@ jobs:
           fi
           echo "Executing ${#scripts[@]} script(s) with: ${RUNNER}"
 
-          # @sh quoting means a secret containing spaces, quotes or newlines
-          # survives being sourced. Credentials are removed on purpose: the
-          # clone token, the VPN keys and the profile key have no business
-          # being visible to the scripts.
-          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY, .TAILSCALE_OAUTH_CLIENT_SECRET, .STATE_KEY)
-                 | to_entries[]
-                 | "export \(.key)=\(.value | @sh)"' <<< "$ALL_SECRETS" > /tmp/ts-env.sh
-          chmod 600 /tmp/ts-env.sh
-          # shellcheck disable=SC1091
-          . /tmp/ts-env.sh
-          rm -f /tmp/ts-env.sh
-          # The full secrets JSON and the job-level VPN keys are still in this
-          # step's environment, and the scripts would inherit them.
-          unset ALL_SECRETS TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
+          # The VPN keys are job-level env; the scripts have no business
+          # inheriting them. An unset secret arrives as an empty string, so
+          # drop those to keep "not configured" meaning unset.
+          unset TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
+          for v in HONEYGAIN_EMAIL HONEYGAIN_PASSWORD; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
 
           # The local Chrome's CDP URL. Written by the start step and absent
           # when `browser` was unchecked.

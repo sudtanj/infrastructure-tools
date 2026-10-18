@@ -178,12 +178,12 @@ name: "Run private repo python-worker scripts over Tailscale"
 #     can push to the private repo controls what runs here, and anyone who can
 #     push to THIS repo can change what gets executed. Keep push access to
 #     trusted people on both.
-#   * The scripts receive the repository's other secrets as environment
-#     variables, because they are the ones that need to call real services --
-#     but they do NOT get PRIVATE_REPO_TOKEN (the clone credential) or
-#     TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET (the VPN
-#     credentials). GITHUB_TOKEN is not exposed
-#     either. Values are JSON-quoted and sourced, not eval'd.
+#   * The scripts receive only the secrets they read (SUPABASE_URL,
+#     SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY), as environment variables.
+#     Add a secret to the "Run every python script" step env when a script
+#     starts needing it. They do NOT get PRIVATE_REPO_TOKEN (the clone
+#     credential), TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET (the VPN
+#     credentials) or GITHUB_TOKEN.
 #   * A successful script's output is NOT printed: it goes to a log file and
 #     only a one-line pass is shown, because this run's log is public. On
 #     failure the last 60 lines are printed so the traceback is debuggable.
@@ -995,9 +995,11 @@ jobs:
           REQUESTED: ${{ inputs.script || 'all' }}
           VERBOSE: ${{ inputs.verbose || 'false' }}
           KEEP_GOING: ${{ inputs.keep_going || 'false' }}
-          # The scripts get the repo's secrets, but not the two credentials
-          # this workflow itself uses to clone the repo and join the VPN.
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          # The scripts only get the secrets they read. A script that needs
+          # another secret must have it added here.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -uo pipefail
           cd "private/$PYTHONWORKER_DIR"
@@ -1124,20 +1126,13 @@ jobs:
             echo "Single-script mode: ${#scripts[@]} selected."
           fi
 
-          # @sh quoting means a secret containing spaces, quotes or newlines
-          # survives being sourced. Credentials are removed on purpose: the
-          # clone token and the VPN keys have no business being visible to
-          # the scripts.
-          jq -r 'del(.PRIVATE_REPO_TOKEN, .TAILSCALE_AUTH_KEY, .TAILSCALE_OAUTH_CLIENT_SECRET)
-                 | to_entries[]
-                 | "export \(.key)=\(.value | @sh)"' <<< "$ALL_SECRETS" > /tmp/py-env.sh
-          chmod 600 /tmp/py-env.sh
-          # shellcheck disable=SC1091
-          . /tmp/py-env.sh
-          rm -f /tmp/py-env.sh
-          # The full secrets JSON and the job-level VPN keys are still in this
-          # step's environment, and the scripts would inherit them.
-          unset ALL_SECRETS TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
+          # The VPN keys are job-level env; the scripts have no business
+          # inheriting them. An unset secret arrives as an empty string, so
+          # drop those to keep "not configured" meaning unset.
+          unset TAILSCALE_AUTH_KEY TAILSCALE_OAUTH_CLIENT_SECRET
+          for v in SUPABASE_URL SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
 
           # The CDP endpoint, when the browser was started. Written by the
           # readiness step and absent when `browser` was unchecked.
