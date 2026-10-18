@@ -66,7 +66,7 @@ RUN set -eux; \
 # so the distroless runtime gets sh, ls, grep, sed, awk, wget, nc, tar, ... and
 # nothing else (kongming lets it read and use the network, not write files);
 # `cdp` is kongming itself (its Chrome DevTools client, for a browser on the tailnet).
-FROM busybox:1.37-musl AS busybox
+FROM busybox:1.38-musl AS busybox
 RUN set -eux; \
     mkdir -p /opt/busybox/bin; \
     cp /bin/busybox /opt/busybox/busybox; \
