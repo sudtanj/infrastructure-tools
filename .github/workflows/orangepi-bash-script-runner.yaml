@@ -311,11 +311,6 @@ jobs:
             # zilong-router defaults (not secrets, so ALL_SECRETS never carries them); any
             # MINI_ROUTER_ repo secret exported below overrides them.
             printf 'export ZILONG_ROUTER_BIND=0.0.0.0\nexport ZILONG_ROUTER_ALLOW_ANY=1\n'
-            # kongming's browser: the tailnet IP of the chrome-cdp machine, looked up here because
-            # the device may sit behind a subnet router without a tailscale CLI of its own. A
-            # KONGMING_CDP_URL repo secret, exported below, takes precedence.
-            CDP_IP=$(sudo tailscale ip -4 chrome-cdp 2>/dev/null | head -n1)
-            if [ -n "$CDP_IP" ]; then printf 'export KONGMING_CDP_URL=%q\n' "http://${CDP_IP}:9222"; fi
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
             for p in "${PREFIXES[@]}"; do
               echo "$ALL_SECRETS" | jq -r --arg p "$p" \
