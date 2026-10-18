@@ -26,7 +26,8 @@
 # stopped and masked, its node identity is copied into the container's state, so the tailnet IP,
 # name and tags stay the same. The switch runs as its own systemd unit, so it finishes even when
 # this script came in over SSH through that same tailnet. If the container does not come up, the
-# host tailscaled is restored.
+# host tailscaled is restored. A stopped host install is reused the same way: its node identity
+# is copied in (also over a container node that got logged out), so the machine keeps its IP.
 #
 # Env:
 #   TAILSCALE_OAUTH_CLIENT_SECRET  OAuth client secret (tskey-client-...). Scopes: auth_keys to log
@@ -270,6 +271,22 @@ HAVE_STATE=0
 "${SUDO[@]}" test -s "${ROOT}/state/tailscaled.state" && HAVE_STATE=1
 [ "$HOST_ACTIVE" = 1 ] && "${SUDO[@]}" test -s "$HOST_STATE" && HAVE_STATE=1
 
+# A stopped host install still has its node identity on disk. Reusing it keeps the machine as it
+# was (same tailnet IP, name, tags, approved routes, key expiry setting): no new node, no new IP.
+HOST_IDLE_STATE=0
+ADOPTED=0
+[ "$HOST_ACTIVE" = 0 ] && "${SUDO[@]}" test -s "$HOST_STATE" && HOST_IDLE_STATE=1
+adopt_host_state() {
+  "${SUDO[@]}" cp -p "$HOST_STATE" "${ROOT}/state/tailscaled.state"
+  "${SUDO[@]}" chmod 600 "${ROOT}/state/tailscaled.state"
+  ADOPTED=1
+}
+if [ "$HAVE_STATE" = 0 ] && [ "$HOST_IDLE_STATE" = 1 ]; then
+  adopt_host_state
+  HAVE_STATE=1
+  ok "reusing the stopped host install's node identity (same tailnet IP, name and tags)"
+fi
+
 # Login key, only for a new node: minted from the OAuth client
 AUTHKEY=""
 if [ "$HAVE_STATE" = 0 ] && [ -n "$OAUTH_SECRET" ]; then
@@ -504,6 +521,28 @@ BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
 # Saved state but logged out on the server (machine deleted in the admin console, key revoked):
 # log in again with a fresh key from the OAuth client. tailscaled reads the key from its config
 # at start, and put() rewrites the bind-mounted file in place, so a restart is enough.
+# First choice: the stopped host install's identity, which keeps its IP. The logged-out container
+# state is kept next to it, and put back if the host identity doesn't log in either.
+if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ "$HOST_IDLE_STATE" = 1 ] && [ "$ADOPTED" = 0 ]; then
+  warn "the container's node is logged out on the server; switching to the host install's node identity"
+  LOGGED_OUT="${ROOT}/state/tailscaled.state.logged-out-$(date +%s)"
+  "${DOCKER[@]}" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  "${SUDO[@]}" mv -f "${ROOT}/state/tailscaled.state" "$LOGGED_OUT"
+  adopt_host_state
+  "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
+  if "${SUDO[@]}" bash "$HELPER" wait Running; then
+    ok "back on the host install's node (same tailnet IP, name and tags)"
+  else
+    warn "the host install's node identity is logged out too; going back to the container's"
+    "${DOCKER[@]}" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    "${SUDO[@]}" mv -f "$LOGGED_OUT" "${ROOT}/state/tailscaled.state"
+    ADOPTED=0
+    "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
+    "${SUDO[@]}" bash "$HELPER" wait || true
+  fi
+  BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
+fi
+
 if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ -n "$OAUTH_SECRET" ]; then
   warn "node state is there but Tailscale wants a new login (was the machine removed from the admin console?)"
   if [ "${#TAGS[@]}" -eq 0 ]; then
@@ -529,6 +568,16 @@ if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ -n "$OAUTH_SECRET" ];
   fi
 fi
 
+if [ "$BACKEND" = "Running" ] && [ "$ADOPTED" = 1 ]; then
+  # The old file would be a second copy of the same node key; a host tailscaled started at boot
+  # would fight the container for tailscale0
+  "${SUDO[@]}" mv -f "$HOST_STATE" "${HOST_STATE}.moved-to-docker" || true
+  if [ "$HAS_SYSTEMD" = 1 ] && systemctl cat tailscaled >/dev/null 2>&1; then
+    "${SUDO[@]}" systemctl disable tailscaled >/dev/null 2>&1 || true
+    "${SUDO[@]}" systemctl mask tailscaled >/dev/null 2>&1 || true
+  fi
+  ok "host install retired (state renamed to $(basename "$HOST_STATE").moved-to-docker, service masked)"
+fi
 if [ "$BACKEND" = "Running" ] && "${SUDO[@]}" grep -q '"AuthKey"' "${ROOT}/tailscaled.json"; then
   config | put "${ROOT}/tailscaled.json" 600 && ok "auth key removed from disk (node is logged in)"
 fi
