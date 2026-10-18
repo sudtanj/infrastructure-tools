@@ -1,8 +1,13 @@
 name: 'Delete old workflow runs'
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight
+    - cron: '*/30 * * * *' # Every 30 minutes
   workflow_dispatch:
+
+# Never let two cleanup runs overlap (they would cancel each other)
+concurrency:
+  group: workflow-cleanup
+  cancel-in-progress: false
 
 jobs:
   del_runs:
@@ -17,11 +22,19 @@ jobs:
           REPO: ${{ github.repository }}
           CURRENT_RUN: ${{ github.run_id }}
         run: |
+          # Active runs are left alone (a later tick deletes them once they
+          # finish) unless they've been around longer than STALE_SECS, i.e. stuck.
+          STALE_SECS=$((6 * 60 * 60))
+          now=$(date +%s)
           # Skip this cleanup run itself; it can't be deleted while in progress
           gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
-            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | \"\(.id) \(.status)\"" |
-          while read -r id status; do
+            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | \"\(.id) \(.status) \((.run_started_at // .created_at) | fromdateiso8601)\"" |
+          while read -r id status created; do
             if [ "$status" != "completed" ]; then
+              if [ $((now - created)) -lt "$STALE_SECS" ]; then
+                echo "Skipping active run $id ($status)"
+                continue
+              fi
               # waiting / queued / in_progress runs must be cancelled before deletion
               gh api -X POST "repos/$REPO/actions/runs/$id/force-cancel" >/dev/null 2>&1 || true
               for _ in $(seq 1 12); do
