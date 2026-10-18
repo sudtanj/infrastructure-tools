@@ -366,7 +366,7 @@ jobs:
       # Caches Gradle and its dependencies. Unlike setup-java's `cache:
       # gradle`, it does not fail when android/ does not exist yet.
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Output from npm, Capacitor and Gradle names private files, so every
       # command runs through run_quiet: pass/fail plus a short, path-stripped
