@@ -163,7 +163,7 @@ fi
 # Tailscale API. The bearer token sits in a 0600 temp file passed as `-H @file`, never in argv
 # (visible in ps).
 API_HDR=""
-cleanup() { [ -n "$API_HDR" ] && rm -f "$API_HDR"; }
+cleanup() { if [ -n "$API_HDR" ]; then rm -f "$API_HDR"; fi; }
 trap cleanup EXIT
 
 api_login() {
@@ -235,15 +235,15 @@ attach() { # print the deployment log from the start, wait for its result, retur
       n=$(( n + $(printf '%s\n' "$new" | wc -l) ))
     fi
     if [[ "$res" =~ ^[0-9]+$ ]]; then return "$res"; fi
-    if ! deploy_unit_active && [ "$t" -gt 5 ]; then
+    if ! deploy_unit_active && [ "$t" -gt 3 ]; then
       res="$("${SUDO[@]}" cat "${RUN_DIR}/result" 2>/dev/null || true)"
       [[ "$res" =~ ^[0-9]+$ ]] && continue
       warn "the deployment unit ended without a result (journalctl -u '$("${SUDO[@]}" cat "${RUN_DIR}/unit" 2>/dev/null)')"
       return 1
     fi
     t=$(( t + 1 ))
-    [ "$t" -lt 1200 ] || { warn "still deploying after 20 min; rerun with OPI_TS_ATTACH=1"; return 1; }
-    sleep 1
+    [ "$t" -lt 600 ] || { warn "still deploying after 20 min; rerun with OPI_TS_ATTACH=1"; return 1; }
+    sleep 2
   done
 }
 if [ "${OPI_TS_DETACHED:-0}" != 1 ] && [ "$HAS_SYSTEMD" = 1 ]; then
@@ -273,7 +273,7 @@ if [ "${OPI_TS_DETACHED:-0}" != 1 ] && [ "$HAS_SYSTEMD" = 1 ]; then
     printf '%s\n' "$UNIT" | put "${RUN_DIR}/unit" 600 || true
     # shellcheck disable=SC2016
     "${SUDO[@]}" systemd-run --quiet --collect --unit "$UNIT" /bin/bash -c \
-      '. "$1/env"; rm -f "$1/env"; bash "$1/run.sh" >> "$1/log" 2>&1; echo $? > "$1/result"' _ "$RUN_DIR" \
+      'export HOME="${HOME:-/root}"; . "$1/env"; rm -f "$1/env"; bash "$1/run.sh" >> "$1/log" 2>&1; echo $? > "$1/result"' _ "$RUN_DIR" \
       || fail "could not start the deployment unit"
     status "deploying as systemd unit ${UNIT}; this SSH session only follows it and may drop while the container is replaced"
     attach && exit 0 || exit $?
@@ -851,16 +851,23 @@ free_ip() {
   return 1
 }
 
-# Last on purpose: a new IP drops every connection to the old one, this SSH session included
+# Last on purpose: a new IP drops every connection to the old one, this SSH session included.
+# Best effort: the node is up and reachable either way, so a missing API scope or a taken IP is a
+# warning, not a failed deployment.
 if [ "$IP_RESULT" = "change requested" ]; then
-  free_ip || fail "OPI_TS_IP is still taken; free it in the admin console (Machines) and rerun"
-  step "moving the node to the requested tailnet IP; an SSH session on the old IP will drop now"
-  api_post "/device/${NODE_ID}/ip" "{\"ipv4\": \"${WANT_IP}\"}" \
-    || fail "setting the IP failed: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client lacks the devices:core scope)" || echo " (is the IP free in the tailnet and inside 100.64.0.0/10?)")"
-  for _ in $(seq 1 15); do
-    [ "$(ts_ip4)" = "$WANT_IP" ] && { ok "tailnet IP changed"; break; }
-    sleep 2
-  done
-  [ "$(ts_ip4)" = "$WANT_IP" ] || warn "the IP change was accepted but has not reached the node yet"
+  if ! free_ip; then
+    warn "OPI_TS_IP is still taken, so the node stays on its current tailnet IP; free it in the admin console (Machines) and rerun"
+  else
+    step "moving the node to the requested tailnet IP; an SSH session on the old IP will drop now"
+    if api_post "/device/${NODE_ID}/ip" "{\"ipv4\": \"${WANT_IP}\"}"; then
+      for _ in $(seq 1 15); do
+        [ "$(ts_ip4)" = "$WANT_IP" ] && { ok "tailnet IP changed"; break; }
+        sleep 2
+      done
+      [ "$(ts_ip4)" = "$WANT_IP" ] || warn "the IP change was accepted but has not reached the node yet"
+    else
+      warn "setting the IP failed, the node stays on its current tailnet IP: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client lacks the devices:core scope)" || echo " (is the IP free in the tailnet and inside 100.64.0.0/10?)")"
+    fi
+  fi
 fi
 ok "init tailscale-docker done"
