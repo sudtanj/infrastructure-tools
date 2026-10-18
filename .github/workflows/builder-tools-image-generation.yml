@@ -67,7 +67,7 @@ jobs:
           img.save("out.png")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: generated-image
           path: out.png
