@@ -1,17 +1,25 @@
 version: 2
 updates:
+  # Every builder-tools image; PRs from here are auto-merged once
+  # "Validate Dockerfiles" passes (builder-tools-dependabot-auto-merge.yml).
   - package-ecosystem: docker
-    directory: /builder-tools/zilong-router
+    directories:
+      - /builder-tools/bitping
+      - /builder-tools/earnfm
+      - /builder-tools/honeygain
+      - /builder-tools/kongming
+      - /builder-tools/oci-freetier-creator
+      - /builder-tools/oracle-cloud-free-tier-claimer
+      - /builder-tools/packetstream
+      - /builder-tools/paseo-codex
+      - /builder-tools/paseo-lite
+      - /builder-tools/pawns
+      - /builder-tools/repocket
+      - /builder-tools/tailscale
+      - /builder-tools/traffmonetizer
+      - /builder-tools/zilong-router
     schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /builder-tools/oci-freetier-creator
-    schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /builder-tools/oracle-cloud-free-tier-claimer
-    schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /builder-tools/paseo-codex
-    schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /builder-tools/tailscale
+  # Actions used by the workflows. Not auto-merged: review these by hand.
+  - package-ecosystem: github-actions
+    directory: /
     schedule: { interval: weekly }

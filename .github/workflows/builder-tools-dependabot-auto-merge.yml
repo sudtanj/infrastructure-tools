@@ -7,7 +7,9 @@ permissions:
   pull-requests: write
 jobs:
   merge:
-    if: github.actor == 'dependabot[bot]' && startsWith(github.event.pull_request.head.ref, 'dependabot/docker/builder-tools/')
+    # The PR must be opened by Dependabot, and the event that triggered this run (e.g. a push to
+    # its branch) must come from Dependabot too.
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && startsWith(github.event.pull_request.head.ref, 'dependabot/docker/builder-tools/')
     runs-on: ubuntu-latest
     steps:
       - env:
