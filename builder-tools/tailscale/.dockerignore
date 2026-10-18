@@ -1,4 +1,5 @@
-# The build copies everything from the upstream image, so nothing from
-# this folder needs to reach the build context.
+# The binaries come from the upstream image; only the entrypoint source
+# needs to reach the build context.
 *
 !Dockerfile
+!entrypoint/main.go
