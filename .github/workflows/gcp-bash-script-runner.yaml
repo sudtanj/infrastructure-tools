@@ -55,8 +55,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
-            # reset-*.sh are destructive (they stop what the init scripts start): only run when picked by name
-            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
+            # reset-*.sh are destructive (they stop what the init scripts start): only run when picked by name.
+            # opi-*.sh are for the Orange Pi only (see orangepi-bash-script-runner.yaml).
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-*.sh' | sort)
           else
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")

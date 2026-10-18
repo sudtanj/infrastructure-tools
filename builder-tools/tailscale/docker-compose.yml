@@ -1,0 +1,85 @@
+# Tailscale on distroless, built locally from the Dockerfile here.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#
+# Use docker-compose.hub.yml to pull the published image instead.
+# Needs Docker Compose 2.23.1 or newer (configs with inline content).
+
+services:
+  tailscale:
+    build: .
+    image: tailscale-distroless
+    restart: unless-stopped
+
+    # Kernel networking on the host's network stack: a real tailscale0
+    # interface, so the host and its LAN are reachable over the tailnet and
+    # exit-node traffic is routed by the kernel, not a userspace stack.
+    network_mode: host
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    # No shell in the image, so settings come in as tailscaled's own config
+    # file, which Compose fills in from .env. tailscaled reads it at start:
+    # recreate (docker compose up -d) after editing .env.
+    command:
+      - --config=/etc/tailscale/tailscaled.json
+      - --port=${TS_PORT:-41641}
+    configs:
+      - source: tailscaled
+        target: /etc/tailscale/tailscaled.json
+
+    volumes:
+      # Node identity. Written rarely (logins, key renewals, setting changes).
+      - tailscale-state:/var/lib/tailscale
+
+    # Small limits, but this is the way into the box, so it is the last
+    # container the kernel kills under memory pressure rather than the first.
+    # GOMEMLIMIT makes Go collect garbage before the cgroup limit is hit.
+    environment:
+      GOMEMLIMIT: 96MiB
+    cpu_shares: 512
+    mem_limit: 128m
+    memswap_limit: 128m
+    oom_score_adj: -500
+    pids_limit: 64
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+      # LocalAPI socket (/var/run/tailscale/tailscaled.sock).
+      - /var/run:rw,noexec,nosuid,nodev,size=1m
+    security_opt:
+      - no-new-privileges:true
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+configs:
+  tailscaled:
+    # acceptRoutes is off so another subnet router's routes never override
+    # the board's own LAN; acceptDNS is off so the host resolver is left alone.
+    # Locked=false lets `docker exec tailscale tailscale set ...` change
+    # settings until the next restart.
+    content: |
+      {
+        "Version": "alpha0",
+        "Locked": false,
+        "AuthKey": "${TS_AUTHKEY:-}",
+        "Hostname": "${TS_HOSTNAME:-opi-zero3}",
+        "AdvertiseExitNode": ${TS_EXIT_NODE:-true},
+        "acceptRoutes": false,
+        "acceptDNS": false
+      }
+
+volumes:
+  tailscale-state:

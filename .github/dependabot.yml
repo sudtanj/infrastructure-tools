@@ -12,3 +12,6 @@ updates:
   - package-ecosystem: docker
     directory: /builder-tools/paseo-codex
     schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /builder-tools/tailscale
+    schedule: { interval: weekly }

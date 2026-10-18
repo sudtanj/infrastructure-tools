@@ -16,6 +16,9 @@ name: "Run Bash Scripts on Orange Pi"
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
 #   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
+#   opi-init-tailscale-docker.sh alone also gets OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_HOSTNAME and
+#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, its only credential (the OAuth client needs auth_keys
+#   to log a new node in, plus devices:core / devices:routes to pin OPI_TS_IP and approve routes)
 on:
   workflow_dispatch:
     inputs:
@@ -36,6 +39,7 @@ on:
           - init-dozzle
           - init-zilong-router
           - init-kongming
+          - opi-init-tailscale-docker
           - reset-containers
           # add new script names here as you create them
       debug:
@@ -74,8 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
-            # reset-*.sh are destructive: only run when picked by name
-            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' | sort)
+            # reset-*.sh are destructive and opi-init-tailscale-docker.sh swaps the device's own Tailscale:
+            # only run them when picked by name
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-init-tailscale-docker.sh' | sort)
           else
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
@@ -169,7 +174,9 @@ jobs:
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
                      MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
                      KONGMING_TURSO_AUTH_TOKEN KONGMING_TURSO_DATABASE_URL KONGMING_TURSO_TOKEN KONGMING_TURSO_URL
-                     KONGMING_PASSWORD KONGMING_SECRET KONGMING_PUBLIC_URL);
+                     KONGMING_PASSWORD KONGMING_SECRET KONGMING_PUBLIC_URL
+                     OPI_TS_HOSTNAME OPI_TS_IP OPI_TS_ROUTES
+                     TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_AUTH_KEY);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
             for my $v (@lit) { $l =~ s/\Q$v\E/<redacted>/g; }
@@ -262,7 +269,8 @@ jobs:
           SCRIPT_PATH: ${{ matrix.script }}
           ALL_SECRETS: ${{ toJSON(secrets) }}
           DEBUG_LOGS: ${{ inputs.debug }}
-          # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here.
+          # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here (opi-init-tailscale-docker.sh
+          # alone gets OPI_TS_ and the TAILSCALE_ OAuth client, below).
           # MINI_ROUTER_ secrets are exported under the ZILONG_ROUTER_ names the script reads.
           SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,DOZZLE_,MINI_ROUTER_,KONGMING_"
           HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
@@ -295,6 +303,9 @@ jobs:
           KONGMING_PUBLIC_URL: ${{ secrets.KONGMING_PUBLIC_URL }}
           KONGMING_BIND: ${{ secrets.KONGMING_BIND }}
           KONGMING_NETWORK: ${{ secrets.KONGMING_NETWORK }}
+          OPI_TS_HOSTNAME: ${{ secrets.OPI_TS_HOSTNAME }}
+          OPI_TS_IP: ${{ secrets.OPI_TS_IP }}
+          OPI_TS_ROUTES: ${{ secrets.OPI_TS_ROUTES }}
         run: |
           set +e
           SECONDS=0
@@ -318,6 +329,16 @@ jobs:
                  | .key |= (if startswith("MINI_ROUTER_") then "ZILONG_ROUTER_" + .[12:] else . end)
                  | "export \(.key)=\(.value|@sh)"'
             done
+            # The device's own Tailscale reuses the runner's OAuth client, so only
+            # opi-init-tailscale-docker.sh gets it (plus TAILSCALE_TAGS and its OPI_TS_ settings); no other script
+            # ever sees TAILSCALE_ values.
+            if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
+              echo "$ALL_SECRETS" | jq -r 'to_entries[] | select(.key | startswith("OPI_TS_"))
+                | "export \(.key)=\(.value|@sh)"'
+              for v in TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS; do
+                [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+              done
+            fi
             printf 'export VERBOSE=0\n'
             if [ "$DEBUG_LOGS" = "true" ]; then printf 'export INIT_DEBUG=1\n'; else printf 'export INIT_DEBUG=0\n'; fi
             # sudo without a tty: an askpass helper reads the SSH password from a 0600 file that
