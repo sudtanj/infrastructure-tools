@@ -547,7 +547,8 @@ jobs:
       TAILSCALE_ACCEPT_DNS: ${{ secrets.TAILSCALE_ACCEPT_DNS || 'false' }}
       HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
       HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
-      USE_BROWSER: ${{ inputs.browser != false }}
+      # Schedules have no inputs, and GitHub's loose compare makes null != false false, so test the event.
+      USE_BROWSER: ${{ github.event_name != 'workflow_dispatch' || inputs.browser }}
       STATE_TAG: chrome-cdp-state
       PROFILE_DIR: /home/runner/chrome-profile
 
