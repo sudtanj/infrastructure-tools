@@ -103,6 +103,14 @@ if [ -z "$CDP_URL" ] && [ "$CDP_HOST" != "none" ] && command -v tailscale >/dev/
   CDP_IP="$(printf '%s\n' "$CDP_IP" | grep -Eo '^100\.[0-9.]+$' | head -n1 || true)"
   if [ -n "$CDP_IP" ]; then CDP_URL="http://${CDP_IP}:9222"; fi
 fi
+if [ -z "$CDP_URL" ] && [ "$CDP_HOST" != "none" ] && [ "${INIT_DEBUG:-0}" = "1" ]; then
+  if ! command -v tailscale >/dev/null 2>&1; then
+    debug "browser lookup: no tailscale CLI on the board"
+  else
+    debug "browser lookup: $( { tailscale ip -4 "$CDP_HOST" 2>&1 || sudo -n tailscale ip -4 "$CDP_HOST" 2>&1; } | tail -n1 | cut -c1-200)"
+    debug "tailnet peers seen: $(tailscale status 2>&1 | awk '{print $2}' | tr '\n' ' ' | cut -c1-300)"
+  fi
+fi
 if [ -n "$CDP_URL" ]; then ok "browser for the agents: ${CDP_HOST} on the tailnet"; else warn "no browser for the agents (no tailnet machine ${CDP_HOST}; set KONGMING_CDP_URL)"; fi
 
 # ---------------------------------------------------------------------------
