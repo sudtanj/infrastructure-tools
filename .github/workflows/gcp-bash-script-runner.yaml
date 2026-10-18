@@ -12,6 +12,7 @@ on:
           - all
           - init-n8n
           - init-portainer
+          - init-dozzle
           - init-paseo-codex
           - init-paseo-lite
           - init-tailscale
@@ -269,7 +270,8 @@ jobs:
           # (CLAUDE_CODE_OAUTH_TOKEN for subscription, ANTHROPIC_API_KEY for usage billing,
           # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for BYOK).
           # GH_USERNAME / GH_EMAIL set the global git identity inside the paseo-lite container.
-          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_"
+          # DOZZLE_ forwards DOZZLE_PASSWORD (and optional overrides) to init-dozzle.sh.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_"
         run: |
           set +e
           SECONDS=0
