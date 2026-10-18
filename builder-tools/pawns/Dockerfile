@@ -9,7 +9,7 @@ FROM iproyal/pawns-cli:latest AS upstream
 # Runs on the build host (no QEMU): ELF e_machine at offset 18 is 0x3e for
 # x86_64 and 0xb7 for aarch64. The binary is never executed at build time;
 # it connects out as soon as it starts.
-FROM --platform=$BUILDPLATFORM busybox:1.37-musl AS check
+FROM --platform=$BUILDPLATFORM busybox:1.38-musl AS check
 ARG TARGETARCH
 COPY --from=upstream /pawns-cli /pawns-cli
 RUN case "$TARGETARCH" in \
