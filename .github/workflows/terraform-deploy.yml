@@ -167,7 +167,7 @@ jobs:
           echo "Resolved workspace: ${{ secrets.TF_WORKSPACE_PREFIX || 'tf' }}-$CLEAN_DIR"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.9.8"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
@@ -294,7 +294,7 @@ jobs:
           echo "workspace_name=$CLEAN_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.9.8"
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
