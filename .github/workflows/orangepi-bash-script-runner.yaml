@@ -16,8 +16,8 @@ name: "Run Bash Scripts on Orange Pi"
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
 #   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
-#   opi-init-tailscale-docker.sh alone also gets OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_HOSTNAME and
-#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, its only credential (the OAuth client needs auth_keys
+#   opi-init-tailscale-docker.sh alone also gets OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS, OPI_TS_HOSTNAME and
+#   TAILSCALE_OAUTH_CLIENT_SECRET, its only credential (the OAuth client needs auth_keys
 #   to log a new node in, plus devices:core / devices:routes to pin OPI_TS_IP and approve routes)
 on:
   workflow_dispatch:
@@ -175,7 +175,7 @@ jobs:
                      MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
                      KONGMING_TURSO_AUTH_TOKEN KONGMING_TURSO_DATABASE_URL KONGMING_TURSO_TOKEN KONGMING_TURSO_URL
                      KONGMING_PASSWORD KONGMING_SECRET KONGMING_PUBLIC_URL
-                     OPI_TS_HOSTNAME OPI_TS_IP OPI_TS_ROUTES
+                     OPI_TS_HOSTNAME OPI_TS_IP OPI_TS_ROUTES OPI_TS_TAGS
                      TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_AUTH_KEY);
           my $h = '[0-9A-Fa-f]{1,4}';
           while (my $l = <>) {
@@ -306,6 +306,7 @@ jobs:
           OPI_TS_HOSTNAME: ${{ secrets.OPI_TS_HOSTNAME }}
           OPI_TS_IP: ${{ secrets.OPI_TS_IP }}
           OPI_TS_ROUTES: ${{ secrets.OPI_TS_ROUTES }}
+          OPI_TS_TAGS: ${{ secrets.OPI_TS_TAGS }}
         run: |
           set +e
           SECONDS=0
@@ -330,12 +331,12 @@ jobs:
                  | "export \(.key)=\(.value|@sh)"'
             done
             # The device's own Tailscale reuses the runner's OAuth client, so only
-            # opi-init-tailscale-docker.sh gets it (plus TAILSCALE_TAGS and its OPI_TS_ settings); no other script
+            # opi-init-tailscale-docker.sh gets it (plus its OPI_TS_ settings); no other script
             # ever sees TAILSCALE_ values.
             if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
               echo "$ALL_SECRETS" | jq -r 'to_entries[] | select(.key | startswith("OPI_TS_"))
                 | "export \(.key)=\(.value|@sh)"'
-              for v in TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS; do
+              for v in TAILSCALE_OAUTH_CLIENT_SECRET; do
                 [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
               done
             fi

@@ -18,7 +18,7 @@
 #
 # Auth: TAILSCALE_OAUTH_CLIENT_SECRET, the same OAuth client the GitHub workflows here use, is the
 # only credential. A new node logs in with a one-off, non-ephemeral, pre-approved auth key minted
-# from it and tagged TAILSCALE_TAGS. The same client approves the routes and the exit node, and
+# from it and tagged OPI_TS_TAGS. The same client approves the routes and the exit node, and
 # moves the node to OPI_TS_IP (Tailscale assigns IPs on its side, so pinning one goes through the
 # API).
 #
@@ -34,8 +34,8 @@
 #                       approval. Not needed to take over a host install or once logged in;
 #                       without it, approve routes in the admin console and OPI_TS_IP is ignored.
 #                       The minted key is removed from disk after the login.
-#   TAILSCALE_TAGS      tags for a new node, e.g. tag:server (OPI_TS_TAGS overrides it, to tag
-#                       this node differently from the CI runners)
+#   OPI_TS_TAGS         tags for this node, comma separated, e.g. tag:opi. Used for the first login
+#                       and kept in sync on every run (devices:core). The OAuth client must own them.
 #   OPI_TS_HOSTNAME     node name (default: the host name)
 #   OPI_TS_IP           tailnet IPv4 for this node, e.g. 100.100.10.10. Changing it drops
 #                       connections to the old IP, this SSH session included, so it is the very
@@ -59,7 +59,7 @@ WANT_IP="$(printf '%s' "${OPI_TS_IP:-}" | tr -d '[:space:]')"
 ROUTES_RAW="$(printf '%s' "${OPI_TS_ROUTES:-}" | tr -d '[:space:]')"
 EXIT_NODE="${OPI_TS_EXIT_NODE:-1}"
 OAUTH_SECRET="$(printf '%s' "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" | tr -d '[:space:]')"
-TAGS_RAW="$(printf '%s' "${OPI_TS_TAGS:-${TAILSCALE_TAGS:-}}" | tr -d '[:space:]')"
+TAGS_RAW="$(printf '%s' "${OPI_TS_TAGS:-}" | tr -d '[:space:]')"
 PORT="${OPI_TS_PORT:-41641}"
 MEMORY_LIMIT="${OPI_TS_MEMORY_LIMIT:-128m}"
 MIGRATE="${OPI_TS_MIGRATE:-1}"
@@ -136,7 +136,7 @@ TAGS=()
 if [ -n "$TAGS_RAW" ]; then
   IFS=',' read -ra TAGS <<< "$TAGS_RAW"
   for t in "${TAGS[@]}"; do
-    [[ "$t" =~ ^tag:[A-Za-z0-9_-]+$ ]] || fail "TAILSCALE_TAGS: '${t}' is not a tag like tag:server"
+    [[ "$t" =~ ^tag:[A-Za-z0-9_-]+$ ]] || fail "OPI_TS_TAGS: '${t}' is not a tag like tag:server"
   done
 fi
 
@@ -274,7 +274,7 @@ HAVE_STATE=0
 AUTHKEY=""
 if [ "$HAVE_STATE" = 0 ] && [ -n "$OAUTH_SECRET" ]; then
   if [ "${#TAGS[@]}" -eq 0 ]; then
-    warn "TAILSCALE_TAGS is empty: an OAuth client can only create tagged keys, so it can't log this node in"
+    warn "OPI_TS_TAGS is empty: an OAuth client can only create tagged keys, so it can't log this node in"
   else
     AUTHKEY="$(mint_authkey || true)"
     if [ -n "$AUTHKEY" ]; then
@@ -539,6 +539,19 @@ if [ -n "$OAUTH_SECRET" ] && [ "$BACKEND" = "Running" ]; then
   elif ! api_login; then
     warn "Tailscale API login failed (check TAILSCALE_OAUTH_CLIENT_SECRET); skipping the API steps"
   else
+    # A login key only tags a node at its first login, so later OPI_TS_TAGS changes go through the API
+    if [ "${#TAGS[@]}" -gt 0 ]; then
+      sorted() { tr ',' '\n' | sort -u | paste -sd, -; }
+      CUR_TAGS="$("${DOCKER[@]}" exec "$CONTAINER_NAME" tailscale status --json --peers=false 2>/dev/null \
+        | tr -d ' \t\n' | sed -n 's/.*"Tags":\[\([^]]*\)\].*/\1/p' | tr -d '"' | sorted || true)"
+      if [ "$CUR_TAGS" = "$(printf '%s' "$TAGS_RAW" | sorted)" ]; then
+        ok "tags already ${TAGS_RAW}"
+      elif api_post "/device/${NODE_ID}/tags" "{\"tags\": $(json_list "${TAGS[@]}")}"; then
+        ok "tags set to ${TAGS_RAW}"
+      else
+        warn "setting the tags failed: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client needs the devices:core scope and must own ${TAGS_RAW})")"
+      fi
+    fi
     # Approved routes = exactly what this node advertises (the call replaces the whole list)
     APPROVE=("${ROUTES[@]}")
     [ "$EXIT_NODE" = 1 ] && APPROVE+=("0.0.0.0/0" "::/0")

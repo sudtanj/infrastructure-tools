@@ -102,7 +102,8 @@ runs this image without Compose and adds:
 - Subnet routes (`OPI_TS_ROUTES`).
 - One credential, the repo's existing `TAILSCALE_OAUTH_CLIENT_SECRET` OAuth
   client, used to:
-  - log a new node in with a one-off auth key tagged `TAILSCALE_TAGS`
+  - log a new node in with a one-off auth key tagged `OPI_TS_TAGS`, and keep
+    the tags in sync on later runs
   - approve the routes and exit node
   - pin the tailnet IP (`OPI_TS_IP`)
 
@@ -110,7 +111,7 @@ Run it from the Orange Pi workflow (pick `opi-init-tailscale-docker`) or directl
 on the device:
 
 ```bash
-sudo TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-xxxx TAILSCALE_TAGS=tag:server \
+sudo TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-xxxx OPI_TS_TAGS=tag:opi \
   OPI_TS_ROUTES=192.168.1.0/24 OPI_TS_IP=100.100.10.10 \
   bash opi-init-tailscale-docker.sh
 ```
