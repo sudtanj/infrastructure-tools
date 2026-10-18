@@ -37,7 +37,7 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── init-n8n.sh                   # Deploy n8n workflow automation, tuned for free tier
 │   ├── init-tailscale.sh             # Install, update & configure Tailscale (idempotent)
 │   ├── reset-containers.sh           # Stop & remove all running containers, keep volumes
-│   ├── init-dozzle.sh                # Light container logs/stats/actions web UI over Tailscale
+│   ├── init-dozzle.sh                # Light container logs/stats/actions web UI on port 27461
 │   ├── init-kongming.sh              # Deploy & maintain kongming (Rust agentic AI daemon, state on Turso, read-only image)
 │   └── init-portainer.sh             # Deploy latest Portainer only
 ├── terraform_free_tier_gcp/
@@ -85,7 +85,7 @@ The configuration uses HCP Terraform remote state and requires an existing VCN w
 - **`init-tailscale.sh`**: Idempotent Tailscale install, update and configuration. Installs or updates the binaries to the latest stable (reusing the cloud-init install in `/var/lib/docker/tailscale-bin`), writes the resource-capped `tailscaled` systemd unit, authenticates with `TS_AUTHKEY` when needed, verifies the node is healthy, and rolls back to the previous binaries if an update fails.
 - **`reset-containers.sh`**: Stops and removes every running Docker container without touching volumes, so re-running the `init-*.sh` scripts restores the services with their data. Excluded from the workflow's `all` option; select `reset-containers` to run it.
 - **`init-portainer.sh`**: Deploy or update latest Portainer CE container.
-- **`init-dozzle.sh`**: Deploys [Dozzle](https://dozzle.dev), a lighter alternative to Portainer (about 10–20 MB of RAM) for live container logs, stats and start/stop/restart. Runs on both the GCP e2-micro (amd64) and an Orange Pi Zero 3 (arm64). Listens on the Tailscale IP only (loopback as fallback), requires a login from the `DOZZLE_PASSWORD` secret (12+ characters, never logged), and keeps the in-browser shell off unless `DOZZLE_SHELL=1`. Capped at 0.25 CPU / 48 MiB (each cap only where the kernel's cgroups support it, so it runs on any Linux with Docker), logs at warn level, and keeps container logs smaller when the root filesystem is on an SD card. Set `DOZZLE_REPLACE_PORTAINER=1` to remove the Portainer container (its volume is kept).
+- **`init-dozzle.sh`**: Deploys [Dozzle](https://dozzle.dev), a lighter alternative to Portainer (about 10–20 MB of RAM) for live container logs, stats and start/stop/restart. Runs on both the GCP e2-micro (amd64) and an Orange Pi Zero 3 (arm64). Listens on all interfaces on port 27461 (set `DOZZLE_BIND` / `DOZZLE_PORT` to change), requires a login from the `DOZZLE_PASSWORD` secret (12+ characters, never logged), and keeps the in-browser shell off unless `DOZZLE_SHELL=1`. Capped at 0.25 CPU / 48 MiB (each cap only where the kernel's cgroups support it, so it runs on any Linux with Docker), logs at warn level, and keeps container logs smaller when the root filesystem is on an SD card. Set `DOZZLE_REPLACE_PORTAINER=1` to remove the Portainer container (its volume is kept).
 
 ### 4. GitHub Actions CI/CD (`.github/workflows/`)
 

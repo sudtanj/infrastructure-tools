@@ -3,14 +3,14 @@
 # Idempotent deploy/update of Dozzle (amir20/dozzle): a light web UI for container logs, stats and
 # start/stop/restart. Works on the GCP free-tier e2-micro (amd64, COS) and on an Orange Pi Zero 3
 # (arm64, Armbian/Debian): the image is multi-arch and nothing below is distro-specific. Only
-# docker is required; curl, ss, ip, findmnt and tailscale are used when present.
+# docker is required; curl, ss and findmnt are used when present.
 #
 # Footprint (sized for the Zero 3): ~15-25 MB RSS, 1 Go thread, warn-level logging, no healthcheck
 # process, no outbound calls (analytics, release/image checks, avatars). CPU/memory/pids caps are
 # applied only when the kernel's cgroups support them, so it also runs on boards without them.
 #
 # Security model (this repo is public and its Actions logs are public):
-#   - The UI listens on the Tailscale IP only (127.0.0.1 if Tailscale is not up). Never 0.0.0.0.
+#   - The UI listens on all interfaces (0.0.0.0) on a non-default port; set DOZZLE_BIND to narrow it.
 #   - Login is required (simple auth, bcrypt users.yml). The password is read from the
 #     DOZZLE_PASSWORD secret, piped over stdin to `dozzle generate`, and never printed.
 #   - The in-browser shell is OFF unless DOZZLE_SHELL=1. Setup wizard, MCP, analytics,
@@ -19,8 +19,8 @@
 # Env:
 #   DOZZLE_PASSWORD        login password (or DOZZLE_PASSWORD_FILE). Optional once users.yml exists.
 #   DOZZLE_USER            login name (default admin)
-#   DOZZLE_PORT            listen port (default 8080)
-#   DOZZLE_BIND            listen address (default: Tailscale IPv4, else 127.0.0.1)
+#   DOZZLE_PORT            listen port (default 27461)
+#   DOZZLE_BIND            listen address (default 0.0.0.0, e.g. a Tailscale IP or 127.0.0.1)
 #   DOZZLE_SHELL           1 = enable the in-browser shell (default 0)
 #   DOZZLE_AUTH_TTL        login lifetime, s/m/h units (default 24h)
 #   DOZZLE_CPU_LIMIT       default 0.25
@@ -34,7 +34,7 @@ set -euo pipefail
 CONTAINER_NAME="dozzle"
 IMAGE="${DOZZLE_IMAGE:-amir20/dozzle:latest}"
 LOGIN_USER="${DOZZLE_USER:-admin}"
-PORT="${DOZZLE_PORT:-8080}"
+PORT="${DOZZLE_PORT:-27461}"
 BIND="${DOZZLE_BIND:-}"
 SHELL_ENABLED="${DOZZLE_SHELL:-0}"
 AUTH_TTL="${DOZZLE_AUTH_TTL:-24h}"
@@ -101,31 +101,11 @@ fi
 ok "docker ready (arch ${ARCH}, root on ${MEDIA}, caps: ${LIMITS[*]:-none supported})"
 
 # ---------------------------------------------------------------------------
-# 2. Listen address: Tailscale only, loopback as fallback
+# 2. Listen address: all interfaces unless DOZZLE_BIND narrows it
 # ---------------------------------------------------------------------------
-step "resolving listen address"
-if [ -z "$BIND" ]; then
-  for candidate in tailscale /var/lib/docker/tailscale-bin/tailscale /var/lib/cloud/tailscale-bin/tailscale /usr/bin/tailscale /usr/local/bin/tailscale; do
-    if [ "$candidate" = "tailscale" ]; then
-      command -v tailscale >/dev/null 2>&1 || continue
-    elif ! "${SUDO[@]}" test -x "$candidate"; then
-      continue
-    fi
-    BIND="$("${SUDO[@]}" "$candidate" ip -4 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
-    [ -n "$BIND" ] && break
-  done
-fi
-if [ -z "$BIND" ]; then
-  BIND="$(ip -4 -o addr show dev tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
-fi
-if [ -z "$BIND" ]; then
-  BIND="127.0.0.1"
-  warn "no tailscale address found; listening on 127.0.0.1 only (use an ssh tunnel, or run init-tailscale first)"
-fi
-case "$BIND" in
-  0.0.0.0|::|"[::]") fail "refusing to listen on all interfaces; DOZZLE_BIND must be a Tailscale or loopback address" ;;
-esac
-ok "listen address resolved"
+[ -n "$BIND" ] || BIND="0.0.0.0"
+# Probe the UI over loopback when listening on all interfaces
+case "$BIND" in 0.0.0.0) PROBE="127.0.0.1" ;; *) PROBE="$BIND" ;; esac
 
 # ---------------------------------------------------------------------------
 # 3. Image
@@ -196,8 +176,9 @@ fi
 CAPS=(--cap-drop ALL)
 [ "$PORT" -lt 1024 ] && CAPS+=(--cap-add NET_BIND_SERVICE)
 
-# Host network + DOZZLE_ADDR instead of -p: if Tailscale isn't up yet at boot, Dozzle exits on the
-# failed bind and the restart policy retries it. A failed -p bind at boot is never retried by Docker.
+# Host network + DOZZLE_ADDR instead of -p: if DOZZLE_BIND names an address that is not up yet at
+# boot, Dozzle exits on the failed bind and the restart policy retries it. A failed -p bind at boot
+# is never retried by Docker.
 # Settings passed as env are locked in the UI, so they are all set explicitly.
 step "starting ${CONTAINER_NAME}"
 "${DOCKER[@]}" run -d --name "$CONTAINER_NAME" \
@@ -236,9 +217,9 @@ for _ in $(seq 1 20); do
   STATE="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)"
   [ "$STATE" = "running" ] || { sleep 1; continue; }
   if command -v curl >/dev/null 2>&1; then
-    CODE="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://${BIND}:${PORT}/" 2>/dev/null || true)"
+    CODE="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://${PROBE}:${PORT}/" 2>/dev/null || true)"
     if [[ "$CODE" =~ ^[23] ]] || [ "$CODE" = "401" ]; then UP=1; break; fi
-  elif timeout 3 bash -c "exec 3<>/dev/tcp/${BIND}/${PORT}" 2>/dev/null; then
+  elif timeout 3 bash -c "exec 3<>/dev/tcp/${PROBE}/${PORT}" 2>/dev/null; then
     CODE="tcp-open"; UP=1; break
   fi
   sleep 1
@@ -257,7 +238,7 @@ fi
 
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 echo "[>] summary"
-echo "[*] listen: $([ "$BIND" = "127.0.0.1" ] && echo "loopback" || echo "tailscale") port ${PORT}"
+echo "[*] listen: $([ "$BIND" = "0.0.0.0" ] && echo "all interfaces" || echo "$BIND") port ${PORT}"
 echo "[*] user: ${LOGIN_USER}   roles: ${ROLES}"
 echo "[*] shell: $([ "$SHELL_ENABLED" = "1" ] && echo enabled || echo disabled)"
 echo "[*] memory: ${MEM:-unknown}"
