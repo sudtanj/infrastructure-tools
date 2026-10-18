@@ -232,7 +232,7 @@ jobs:
       matrix: ${{ steps.collect.outputs.matrix }}
     steps:
       - name: Download Plan Markers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: plan-ok-*
