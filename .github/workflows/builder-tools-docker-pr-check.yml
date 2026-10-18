@@ -2,14 +2,15 @@ name: Builder Tools - Validate Dockerfile updates
 
 on:
   pull_request:
+    paths:
+      - 'builder-tools/*/Dockerfile'
 
 permissions:
   contents: read
 
 jobs:
   build:
-    # Required by the main branch ruleset, so it runs on every PR (and builds
-    # nothing when no builder-tools Dockerfile changed).
+    # builder-tools-dependabot-auto-merge.yml waits for this check by name.
     name: Validate Dockerfiles
     runs-on: ubuntu-latest
     steps:

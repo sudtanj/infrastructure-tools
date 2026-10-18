@@ -5,14 +5,39 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  checks: read
 jobs:
   merge:
     # The PR must be opened by Dependabot, and the event that triggered this run (e.g. a push to
     # its branch) must come from Dependabot too.
     if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && startsWith(github.event.pull_request.head.ref, 'dependabot/docker/builder-tools/')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A newer push to the PR starts a fresh run for the new commit
+    concurrency:
+      group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
+      # main has no required checks (a bot commits to it directly), so GitHub's own
+      # auto-merge would merge straight away. Instead wait for "Validate Dockerfiles"
+      # (builder-tools-docker-pr-check.yml) to pass on this exact commit, then merge
+      # only that commit.
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh pr merge "$PR" --auto --squash --repo "$GITHUB_REPOSITORY"
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          CHECK="Validate Dockerfiles"
+          for _ in $(seq 1 50); do
+            # Latest run of the check on this commit: "<status> <conclusion>", empty until it exists
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs?check_name=${CHECK// /%20}&filter=latest" \
+              --jq '.check_runs[0] | select(.) | "\(.status) \(.conclusion)"' || true)
+            case "$state" in
+              "completed success") break ;;
+              completed*) echo "::error::'$CHECK' finished as '${state#completed }'; not merging"; exit 1 ;;
+            esac
+            sleep 30
+          done
+          [ "$state" = "completed success" ] || { echo "::error::'$CHECK' did not pass within 25 minutes; not merging"; exit 1; }
+          gh pr merge "$PR" --squash --match-head-commit "$SHA" --repo "$GITHUB_REPOSITORY"
