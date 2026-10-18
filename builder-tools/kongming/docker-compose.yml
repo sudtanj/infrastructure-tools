@@ -7,8 +7,9 @@ services:
         KONGMING_REF: ""   # tag/branch/commit of sudtanj/kongming, empty = main
     container_name: kongming
     restart: unless-stopped
-    ports:
-      - "18800:18800"
+    # Shares the host network: listens on port 18800 of every host interface, and
+    # the agents' shell reaches what the host reaches (loopback, LAN, tailnet).
+    network_mode: host
     env_file: .env
     read_only: true
     cap_drop: [ALL]

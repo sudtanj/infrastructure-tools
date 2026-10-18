@@ -5,9 +5,9 @@ services:
     image: sudtanj/kongming:latest
     container_name: kongming
     restart: unless-stopped
-    ports:
-      # Loopback only. Use "<tailscale-ip>:18800:18800" to reach it remotely.
-      - "18800:18800"
+    # Shares the host network: listens on port 18800 of every host interface, and
+    # the agents' shell reaches what the host reaches (loopback, LAN, tailnet).
+    network_mode: host
     env_file: .env   # KONGMING_TURSO_DATABASE_URL, KONGMING_TURSO_AUTH_TOKEN, KONGMING_PASSWORD, KONGMING_SECRET
     environment:
       KONGMING_WORKERS: "1"
