@@ -16,7 +16,8 @@ name: "Run Bash Scripts on Orange Pi"
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
 #   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
-#   opi-init-tailscale-docker.sh alone also gets OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS, OPI_TS_HOSTNAME and
+#   opi-init-tailscale-docker.sh alone also gets every OPI_TS_ secret (OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS,
+#   OPI_TS_HOSTNAME, OPI_TS_TAILSCALED_EXTRA_ARGS, ...) and
 #   TAILSCALE_OAUTH_CLIENT_SECRET, its only credential (the OAuth client needs auth_keys
 #   to log a new node in, plus devices:core / devices:routes to pin OPI_TS_IP and approve routes)
 on:
@@ -316,7 +317,7 @@ jobs:
           umask 077
           LOG=$(mktemp)
           PAYLOAD=$(mktemp)
-          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
+          trap 'rm -f "$LOG" "$PAYLOAD" "${PAYLOAD}.attach"' EXIT
 
           # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
           {
@@ -356,7 +357,17 @@ jobs:
           fi
           unset __SUDO_PW
           SHIM
-            cat "${SCRIPT_PATH}"
+            if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
+              # Run from a file, so the script can hand itself to a systemd unit that survives the
+              # SSH session dropping while the Tailscale container is replaced
+              printf '__S="$(mktemp)"; echo %s | base64 -d > "$__S"\n' "$(base64 -w0 "${SCRIPT_PATH}")"
+              cat <<'RUN'
+          [ "$(type -t sudo)" = function ] && export -f sudo
+          bash "$__S"; __RC=$?; rm -f "$__S"; exit "$__RC"
+          RUN
+            else
+              cat "${SCRIPT_PATH}"
+            fi
           } > "$PAYLOAD"
 
           NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
@@ -370,9 +381,54 @@ jobs:
           } | perl "$SAN"
           echo "::endgroup::"
 
+          # The device's host name = its Tailscale name unless OPI_TS_HOSTNAME says otherwise; used
+          # to find the node again if the session drops
+          DEV_HOST=""
+          if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
+            DEV_HOST="$(SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" \
+              'hostname -s 2>/dev/null || hostname' 2>/dev/null | tail -n1 | tr -d '[:space:]')"
+          fi
+
           SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" 'bash -s' \
             < "$PAYLOAD" > "$LOG" 2>&1
           RC=$?
+
+          # opi-init-tailscale-docker.sh replaces the Tailscale this session rides on, so a dropped
+          # connection (exit 255) is expected. The deployment runs on in its own systemd unit: wait
+          # for the device to come back on the tailnet, then follow the deployment to its end
+          # (OPI_TS_ATTACH=1 prints the whole log again and exits with the deployment's code).
+          if [ "${SCRIPT_PATH##*/}" = "opi-init-tailscale-docker.sh" ]; then
+            { printf 'export OPI_TS_ATTACH=1\n'; cat "$PAYLOAD"; } > "${PAYLOAD}.attach"
+            # The node may come back on OPI_TS_IP when that differs from the address used so far
+            TARGETS="$OPI_TAILSCALE_IP"
+            [ -n "${OPI_TS_IP:-}" ] && [ "$OPI_TS_IP" != "$OPI_TAILSCALE_IP" ] && TARGETS="$TARGETS $OPI_TS_IP"
+            TS_NAME="${OPI_TS_HOSTNAME:-$DEV_HOST}"
+            TRIES=0
+            while [ "$RC" -eq 255 ] && [ "$TRIES" -lt 6 ]; do
+              TRIES=$((TRIES + 1))
+              echo "[*] SSH session dropped (expected while the container is replaced); waiting for the device to come back (attempt ${TRIES}/6)"
+              TARGET=""
+              for _ in $(seq 1 36); do
+                # Plus wherever the node is online now, found by name in the runner's peer list
+                PEER_IPS="$(tailscale status --json 2>/dev/null | jq -r --arg h "$TS_NAME" '.Peer[]?
+                  | select(.Online and (.HostName == $h or (.DNSName | split(".")[0]) == $h))
+                  | .TailscaleIPs[]? | select(test("^100\\."))' 2>/dev/null | paste -sd' ' -)"
+                for t in $TARGETS $PEER_IPS; do
+                  if timeout 5 bash -c "exec 3<>/dev/tcp/${t}/${PORT}" 2>/dev/null; then TARGET="$t"; break 2; fi
+                done
+                sleep 10
+              done
+              if [ -z "$TARGET" ]; then
+                echo "::error::the device did not come back on the tailnet within 6 minutes"
+                break
+              fi
+              echo "[+] device reachable again over tailscale; following the deployment"
+              SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${TARGET}" 'bash -s' \
+                < "${PAYLOAD}.attach" > "$LOG" 2>&1
+              RC=$?
+            done
+            rm -f "${PAYLOAD}.attach"
+          fi
           DUR=$SECONDS
           set -e
 

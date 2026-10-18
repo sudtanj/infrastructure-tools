@@ -29,6 +29,12 @@
 # host tailscaled is restored. A stopped host install is reused the same way: its node identity
 # is copied in (also over a container node that got logged out), so the machine keeps its IP.
 #
+# Disconnect-safe: with systemd, the deployment runs as its own unit (tailscale-docker-deploy-*)
+# and the calling session only follows its log, because replacing the container drops an SSH
+# session that came in over the tailnet. A container that doesn't come up is swapped back for the
+# previous one, so the box stays reachable. After a dropped session, reconnect and run the script
+# again with OPI_TS_ATTACH=1 for the rest of the log and the exit code.
+#
 # Env:
 #   TAILSCALE_OAUTH_CLIENT_SECRET  OAuth client secret (tskey-client-...). Scopes: auth_keys to log
 #                       a new node in, devices:core for OPI_TS_IP, devices:routes for route
@@ -50,6 +56,7 @@
 #   OPI_TS_MEMORY_LIMIT default 128m (the Go heap target is 3/4 of it)
 #   OPI_TS_MIGRATE      1 (default) = take over a running host tailscaled | 0 = stop instead
 #   OPI_TS_HOST_STATE   host state file to take over (default /var/lib/tailscale/tailscaled.state)
+#   OPI_TS_ATTACH       1 = start nothing, follow the last deployment to its end and exit with its code
 
 set -euo pipefail
 
@@ -97,6 +104,8 @@ put() {
   "${SUDO[@]}" tee "$file" < "$tmp" >/dev/null
   rm -f "$tmp"
 }
+
+ts_ip4() { "${DOCKER[@]}" exec "$CONTAINER_NAME" tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]' || true; }
 
 renice -n 19 -p $$ >/dev/null 2>&1 || true
 command -v ionice >/dev/null 2>&1 && ionice -c3 -p $$ >/dev/null 2>&1 || true
@@ -199,6 +208,78 @@ mint_authkey() {
 
 HAS_SYSTEMD=0
 [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && HAS_SYSTEMD=1
+
+# ---------------------------------------------------------------------------
+# Run detached from the SSH session
+# ---------------------------------------------------------------------------
+# Replacing the container takes tailscale0 down, and with it an SSH session that came in over the
+# tailnet. One through a subnet router drops too: once this node is up, replies to the client's
+# 100.x address leave through tailscale0. So the deployment runs as its own systemd unit and this
+# session only follows its log. If the session drops, the deployment carries on; run the script
+# again with OPI_TS_ATTACH=1 to follow it to the end and get its exit code.
+RUN_DIR="${ROOT}/deploy"
+deploy_unit_active() {
+  local unit
+  unit="$("${SUDO[@]}" cat "${RUN_DIR}/unit" 2>/dev/null || true)"
+  [ -n "$unit" ] && systemctl is-active --quiet "$unit" 2>/dev/null
+}
+attach() { # print the deployment log from the start, wait for its result, return its exit code
+  local n=0 new res t=0
+  "${SUDO[@]}" test -d "$RUN_DIR" || fail "no deployment to follow in ${RUN_DIR}"
+  while :; do
+    # Result first: every log line written before it is printed below
+    res="$("${SUDO[@]}" cat "${RUN_DIR}/result" 2>/dev/null || true)"
+    new="$("${SUDO[@]}" sed -n "$(( n + 1 )),\$p" "${RUN_DIR}/log" 2>/dev/null || true)"
+    if [ -n "$new" ]; then
+      printf '%s\n' "$new"
+      n=$(( n + $(printf '%s\n' "$new" | wc -l) ))
+    fi
+    if [[ "$res" =~ ^[0-9]+$ ]]; then return "$res"; fi
+    if ! deploy_unit_active && [ "$t" -gt 5 ]; then
+      res="$("${SUDO[@]}" cat "${RUN_DIR}/result" 2>/dev/null || true)"
+      [[ "$res" =~ ^[0-9]+$ ]] && continue
+      warn "the deployment unit ended without a result (journalctl -u '$("${SUDO[@]}" cat "${RUN_DIR}/unit" 2>/dev/null)')"
+      return 1
+    fi
+    t=$(( t + 1 ))
+    [ "$t" -lt 1200 ] || { warn "still deploying after 20 min; rerun with OPI_TS_ATTACH=1"; return 1; }
+    sleep 1
+  done
+}
+if [ "${OPI_TS_DETACHED:-0}" != 1 ] && [ "$HAS_SYSTEMD" = 1 ]; then
+  if [ "${OPI_TS_ATTACH:-0}" = 1 ]; then
+    status "following the deployment in ${RUN_DIR}"
+    attach && exit 0 || exit $?
+  fi
+  if deploy_unit_active; then
+    warn "a deployment is already running; following it instead of starting another"
+    attach && exit 0 || exit $?
+  fi
+  SELF="${BASH_SOURCE[0]:-}"
+  if [ -n "$SELF" ] && [ -f "$SELF" ] && [ -r "$SELF" ]; then
+    UNIT="tailscale-docker-deploy-$(date +%s)"
+    "${SUDO[@]}" rm -rf "$RUN_DIR"
+    "${SUDO[@]}" mkdir -p "$ROOT"
+    "${SUDO[@]}" chmod 700 "$ROOT"
+    "${SUDO[@]}" mkdir -m 700 "$RUN_DIR"
+    "${SUDO[@]}" install -m 700 "$SELF" "${RUN_DIR}/run.sh"
+    # Settings go through a 0600 file the unit deletes after reading, never through argv or the
+    # unit's environment (both readable by any user)
+    {
+      while IFS= read -r v; do printf 'export %s=%q\n' "$v" "${!v}"; done \
+        < <(compgen -e | grep -E '^(OPI_TS_[A-Z0-9_]+|TAILSCALE_OAUTH_CLIENT_SECRET)$' || true)
+      printf 'export OPI_TS_DETACHED=1\n'
+    } | put "${RUN_DIR}/env" 600 || true
+    printf '%s\n' "$UNIT" | put "${RUN_DIR}/unit" 600 || true
+    # shellcheck disable=SC2016
+    "${SUDO[@]}" systemd-run --quiet --collect --unit "$UNIT" /bin/bash -c \
+      '. "$1/env"; rm -f "$1/env"; bash "$1/run.sh" >> "$1/log" 2>&1; echo $? > "$1/result"' _ "$RUN_DIR" \
+      || fail "could not start the deployment unit"
+    status "deploying as systemd unit ${UNIT}; this SSH session only follows it and may drop while the container is replaced"
+    attach && exit 0 || exit $?
+  fi
+  warn "not run from a file, so the deployment runs in this session: if the SSH session drops, it stops"
+fi
 
 if [ ! -c /dev/net/tun ]; then
   "${SUDO[@]}" modprobe tun >/dev/null 2>&1 || true
@@ -346,7 +427,7 @@ EOF
 put "$HELPER" 700 <<'HELPER_EOF' || true
 #!/bin/bash
 # Written by bash-scripts/opi-init-tailscale-docker.sh; rerun that script instead of editing this file.
-# Usage: tailscale-docker start | state | wait [Running] | spec | cutover
+# Usage: tailscale-docker start | replace [Running] | state | wait [Running] | spec | cutover
 set -euo pipefail
 ROOT=/var/lib/tailscale-docker
 . "$ROOT/settings"
@@ -409,6 +490,30 @@ wait_ready() {
   return 1
 }
 
+# New container in place of the running one. The old one is stopped and kept until the new one is
+# ready, and started again if it isn't, so a bad image or setting never leaves the box offline.
+replace() {
+  local want="${1:-}" old="${CONTAINER}-previous"
+  docker rm -f "$old" >/dev/null 2>&1 || true
+  if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    docker stop -t 10 "$CONTAINER" >/dev/null 2>&1 || true
+    docker rename "$CONTAINER" "$old" || { docker start "$CONTAINER" >/dev/null 2>&1 || true; return 1; }
+  fi
+  if start && wait_ready "$want"; then
+    docker rm -f "$old" >/dev/null 2>&1 || true
+    return 0
+  fi
+  log "the new container did not come up, starting the previous one again"
+  docker logs --tail 20 "$CONTAINER" 2>&1 | sed 's/^/[!]   /' >&2 || true
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if docker inspect "$old" >/dev/null 2>&1; then
+    docker rename "$old" "$CONTAINER"
+    docker start "$CONTAINER" >/dev/null 2>&1 || true
+    wait_ready || true
+  fi
+  return 1
+}
+
 # Take over from a host tailscaled. Runs as its own systemd unit: the SSH session that started it
 # may ride on the tailnet this replaces.
 cutover() {
@@ -443,11 +548,12 @@ cutover() {
 
 case "${1:-}" in
   start)   lock; start ;;
+  replace) lock; replace "${2:-}" ;;
   state)   state ;;
   wait)    wait_ready "${2:-}" ;;
   spec)    spec ;;
   cutover) lock; cutover ;;
-  *) echo "usage: $0 start | state | wait [Running] | spec | cutover" >&2; exit 2 ;;
+  *) echo "usage: $0 start | replace [Running] | state | wait [Running] | spec | cutover" >&2; exit 2 ;;
 esac
 HELPER_EOF
 ok "settings ready (config mode 600, auth key $([ "$NEED_LOGIN" = 1 ] && [ -n "$AUTHKEY" ] && echo "stored for the first login" || echo "not stored"))"
@@ -511,8 +617,9 @@ else
   if [ "$RUNNING" = "true" ] && [ "$CURRENT_SPEC" = "$WANT_SPEC" ]; then
     ok "container unchanged"
   else
-    step "starting ${CONTAINER_NAME}"
-    "${SUDO[@]}" bash "$HELPER" start || fail "failed to start ${CONTAINER_NAME}"
+    step "replacing ${CONTAINER_NAME}; an SSH session over Tailscale may drop now, the deployment carries on"
+    "${SUDO[@]}" bash "$HELPER" replace "$WANT_READY" \
+      || fail "the new ${CONTAINER_NAME} container did not come up; the previous one was started again"
   fi
   step "waiting for tailscaled"
   if ! "${SUDO[@]}" bash "$HELPER" wait "$WANT_READY"; then
@@ -523,31 +630,60 @@ fi
 
 BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
 
-# Saved state but logged out on the server (machine deleted in the admin console, key revoked):
-# log in again with a fresh key from the OAuth client. tailscaled reads the key from its config
-# at start, and put() rewrites the bind-mounted file in place, so a restart is enough.
-# First choice: the stopped host install's identity, which keeps its IP. The logged-out container
-# state is kept next to it, and put back if the host identity doesn't log in either.
-if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ "$HOST_IDLE_STATE" = 1 ] && [ "$ADOPTED" = 0 ]; then
-  warn "the container's node is logged out on the server; switching to the host install's node identity"
-  LOGGED_OUT="${ROOT}/state/tailscaled.state.logged-out-$(date +%s)"
+# Switch the container to another saved node identity. Succeeds when it logs in (and, given an IP,
+# comes up on that IP); otherwise the current identity is put back. The replaced file is kept
+# next to it as tailscaled.state.before-<time>.
+try_identity() { # file [ip]
+  local file="$1" ip="${2:-}" before
+  before="${ROOT}/state/tailscaled.state.before-$(date +%s)"
   "${DOCKER[@]}" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  "${SUDO[@]}" mv -f "${ROOT}/state/tailscaled.state" "$LOGGED_OUT"
-  adopt_host_state
-  "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
-  if "${SUDO[@]}" bash "$HELPER" wait Running; then
-    ok "back on the host install's node (same tailnet IP, name and tags)"
-  else
-    warn "the host install's node identity is logged out too; going back to the container's"
-    "${DOCKER[@]}" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    "${SUDO[@]}" mv -f "$LOGGED_OUT" "${ROOT}/state/tailscaled.state"
-    ADOPTED=0
-    "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
-    "${SUDO[@]}" bash "$HELPER" wait || true
+  "${SUDO[@]}" mv -f "${ROOT}/state/tailscaled.state" "$before"
+  "${SUDO[@]}" cp -p "$file" "${ROOT}/state/tailscaled.state"
+  "${SUDO[@]}" chmod 600 "${ROOT}/state/tailscaled.state"
+  "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  if "${SUDO[@]}" bash "$HELPER" wait Running && { [ -z "$ip" ] || [ "$(ts_ip4)" = "$ip" ]; }; then
+    return 0
   fi
+  "${DOCKER[@]}" stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  "${SUDO[@]}" mv -f "$before" "${ROOT}/state/tailscaled.state"
+  "${DOCKER[@]}" start "$CONTAINER_NAME" >/dev/null || fail "failed to start ${CONTAINER_NAME}"
+  "${SUDO[@]}" bash "$HELPER" wait || true
+  return 1
+}
+
+# The original machine is the one to keep: same tailnet IP, name, tags and approved routes, and no
+# API scope needed. Its identity is the host install's state file, or the copy an earlier takeover
+# moved aside. Tried when this node is logged out on the server (before logging in as a new
+# machine) or is not on OPI_TS_IP (an earlier run logged in as a new machine). Each file is tried
+# once; a marker in ${ROOT} remembers it.
+recover_identity() { # [ip]
+  local cand sum
+  for cand in "$HOST_STATE" "${HOST_STATE}.moved-to-docker"; do
+    "${SUDO[@]}" test -s "$cand" || continue
+    "${SUDO[@]}" cmp -s "$cand" "${ROOT}/state/tailscaled.state" && continue
+    sum="$("${SUDO[@]}" sha256sum "$cand" | cut -c1-16)"
+    "${SUDO[@]}" test -e "${ROOT}/tried-${sum}" && continue
+    "${SUDO[@]}" touch "${ROOT}/tried-${sum}"
+    step "trying the original machine's saved identity (${cand})"
+    if try_identity "$cand" "${1:-}"; then
+      [ "$cand" = "$HOST_STATE" ] && ADOPTED=1
+      ok "back on the original machine (same tailnet IP, name and tags)"
+      return 0
+    fi
+    warn "that identity is logged out on the server$([ -n "${1:-}" ] && echo " or not on OPI_TS_IP"); kept the current one"
+  done
+  return 1
+}
+
+if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ]; then
+  warn "the container's node is logged out on the server"
+  recover_identity || true
   BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
 fi
 
+# Still logged out (machine deleted in the admin console, key revoked): log in again as a new
+# machine with a fresh key from the OAuth client. tailscaled reads the key from its config at
+# start, and put() rewrites the bind-mounted file in place, so a restart is enough.
 if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ -n "$OAUTH_SECRET" ]; then
   warn "node state is there but Tailscale wants a new login (was the machine removed from the admin console?)"
   if [ "${#TAGS[@]}" -eq 0 ]; then
@@ -571,6 +707,20 @@ if [ "$BACKEND" = "NeedsLogin" ] && [ -z "$AUTHKEY" ] && [ -n "$OAUTH_SECRET" ];
       BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
     fi
   fi
+fi
+
+# Logged in, but not on OPI_TS_IP: likely a new machine from an earlier run, while the original
+# machine still holds the IP. Going back to the original identity keeps the IP without the API.
+PREV_NODE_ID=""
+if [ "$BACKEND" = "Running" ] && [ -n "$WANT_IP" ] && [ "$(ts_ip4)" != "$WANT_IP" ]; then
+  PREV_NODE_ID="$("${DOCKER[@]}" exec "$CONTAINER_NAME" tailscale status --json --peers=false 2>/dev/null \
+    | sed -n 's/^ *"ID": *"\([^"]*\)".*/\1/p' | head -n1 || true)"
+  if recover_identity "$WANT_IP"; then
+    step "the machine this node was before is now an offline leftover; it is removed below if the OAuth client may"
+  else
+    PREV_NODE_ID=""
+  fi
+  BACKEND="$("${SUDO[@]}" bash "$HELPER" state 2>/dev/null || true)"
 fi
 
 if [ "$BACKEND" = "Running" ] && [ "$ADOPTED" = 1 ]; then
@@ -609,8 +759,6 @@ fi
 # ---------------------------------------------------------------------------
 # 8. Tailscale API: approve routes, pin the IP
 # ---------------------------------------------------------------------------
-ts_ip4() { "${DOCKER[@]}" exec "$CONTAINER_NAME" tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]' || true; }
-
 IP_RESULT="unchanged"
 ROUTES_RESULT="$([ "$EXIT_NODE" = 1 ] || [ "${#ROUTES[@]}" -gt 0 ] && echo "approve in the admin console (Machines -> Edit route settings)" || echo "none")"
 if [ -n "$OAUTH_SECRET" ] && [ "$BACKEND" = "Running" ]; then
@@ -623,6 +771,13 @@ if [ -n "$OAUTH_SECRET" ] && [ "$BACKEND" = "Running" ]; then
   elif ! api_login; then
     warn "Tailscale API login failed (check TAILSCALE_OAUTH_CLIENT_SECRET); skipping the API steps"
   else
+    if [ -n "$PREV_NODE_ID" ] && [ "$PREV_NODE_ID" != "$NODE_ID" ]; then
+      if curl -fsS -m 30 -o /dev/null -X DELETE -H @"$API_HDR" "${API}/device/${PREV_NODE_ID}" 2>/dev/null; then
+        ok "removed the leftover machine from the earlier run"
+      else
+        warn "could not remove the leftover machine from the earlier run (needs devices:core); delete it in the admin console"
+      fi
+    fi
     # A login key only tags a node at its first login, so later OPI_TS_TAGS changes go through the API
     if [ "${#TAGS[@]}" -gt 0 ]; then
       sorted() { tr ',' '\n' | sort -u | paste -sd, -; }

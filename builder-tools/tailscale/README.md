@@ -99,6 +99,10 @@ docker compose -f docker-compose.hub.yml up -d
 [`bash-scripts/opi-init-tailscale-docker.sh`](../../bash-scripts/opi-init-tailscale-docker.sh)
 runs this image without Compose and adds:
 - Taking over a host-installed Tailscale, keeping the same node identity.
+- Disconnect-safe deploys: the work runs as its own systemd unit, so it finishes
+  when the SSH session over Tailscale drops, and a container that does not come
+  up is swapped back for the previous one. `OPI_TS_ATTACH=1` follows a running
+  deployment; the Orange Pi workflow reconnects and does this on its own.
 - IP forwarding on the host.
 - Subnet routes (`OPI_TS_ROUTES`).
 - Extra `tailscaled` flags (`OPI_TS_TAILSCALED_EXTRA_ARGS`, e.g. `--port 8806`
