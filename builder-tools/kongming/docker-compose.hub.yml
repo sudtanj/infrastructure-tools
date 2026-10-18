@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     ports:
       # Loopback only. Use "<tailscale-ip>:18800:18800" to reach it remotely.
-      - "127.0.0.1:18800:18800"
+      - "18800:18800"
     env_file: .env   # KONGMING_TURSO_DATABASE_URL, KONGMING_TURSO_AUTH_TOKEN, KONGMING_PASSWORD, KONGMING_SECRET
     environment:
       KONGMING_WORKERS: "1"

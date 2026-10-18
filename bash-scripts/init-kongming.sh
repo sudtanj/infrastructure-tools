@@ -2,7 +2,8 @@
 # bash-scripts/init-kongming.sh
 # Idempotent deploy/update of kongming (sudtanj/kongming, see builder-tools/kongming/)
 # on a small board, tuned for the Orange Pi Zero 3 (4x A53, 1 GB RAM, SD card):
-#   - published only on 127.0.0.1 by default; KONGMING_BIND opens it deliberately
+#   - published on 0.0.0.0 (reachable from outside the board) by default, which needs
+#     KONGMING_PASSWORD; KONGMING_BIND=127.0.0.1 keeps it on the board only
 #   - read-only rootfs, no volume at all (state is on Turso), all caps dropped,
 #     hard RAM cap without swap, low CPU weight
 #   - 1 tokio worker, logs capped at 1 MB
@@ -15,13 +16,13 @@
 #   KONGMING_TURSO_DATABASE_URL   libsql://<db>-<org>.turso.io           (required)
 #   KONGMING_TURSO_AUTH_TOKEN     Turso auth token                       (required)
 #                                 (the older KONGMING_TURSO_URL / KONGMING_TURSO_TOKEN still work)
-#   KONGMING_PASSWORD             web UI password                        (recommended)
+#   KONGMING_PASSWORD             web UI password                        (required unless BIND is 127.0.0.1)
 #   KONGMING_SECRET               cookie signing secret                  (recommended)
 #   KONGMING_PUBLIC_URL           optional public HTTPS URL; leave empty behind a firewall
 #                                 (MCP OAuth then uses the localhost redirect + paste flow and
 #                                 Telegram uses long polling; with it, a Telegram webhook)
 #   The LLM provider and Telegram are set up later in the dashboard (stored on Turso).
-#   KONGMING_BIND                 host address to publish on, default 127.0.0.1
+#   KONGMING_BIND                 host address to publish on, default 0.0.0.0 (every interface)
 #   KONGMING_PORT                 host port, default 18800 (container listens on 18800)
 #   KONGMING_IMAGE                default sudtanj/kongming:latest
 #   KONGMING_CPU_LIMIT            default 1.0
@@ -35,7 +36,7 @@ CONTAINER_NAME="kongming"
 IMAGE="${KONGMING_IMAGE:-sudtanj/kongming:latest}"
 PORT="${KONGMING_PORT:-18800}"
 CPORT=18800
-BIND="${KONGMING_BIND:-127.0.0.1}"
+BIND="${KONGMING_BIND:-0.0.0.0}"
 TURSO_URL="${KONGMING_TURSO_DATABASE_URL:-${KONGMING_TURSO_URL:-}}"
 TURSO_TOKEN="${KONGMING_TURSO_AUTH_TOKEN:-${KONGMING_TURSO_TOKEN:-}}"
 PASSWORD="${KONGMING_PASSWORD:-}"
@@ -73,11 +74,11 @@ esac
 [ -n "$TURSO_URL" ] && [ -n "$TURSO_TOKEN" ] || fail "KONGMING_TURSO_DATABASE_URL and KONGMING_TURSO_AUTH_TOKEN are required (kongming keeps no local data)"
 [[ "$PORT" =~ ^[0-9]{2,5}$ ]] || fail "KONGMING_PORT must be a number"
 [[ "$BIND" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "KONGMING_BIND must be an IPv4 address"
-if [ "$BIND" = "0.0.0.0" ] && [ "${KONGMING_ALLOW_ANY:-0}" != "1" ]; then
-  fail "KONGMING_BIND=0.0.0.0 exposes the UI on every interface; set KONGMING_ALLOW_ANY=1 if that is intended"
-fi
 case "$NETWORK" in bridge|host) ;; *) fail "KONGMING_NETWORK must be bridge or host" ;; esac
-[ -z "$PASSWORD" ] && warn "KONGMING_PASSWORD unset: the web UI has no login (keep it on loopback/tailnet only)"
+if [ -z "$PASSWORD" ]; then
+  [ "$BIND" = "127.0.0.1" ] || fail "KONGMING_PASSWORD is required when kongming is published on ${BIND} (anyone who reaches it could use your agents and keys); set it, or KONGMING_BIND=127.0.0.1"
+  warn "KONGMING_PASSWORD unset: the web UI has no login (loopback only)"
+fi
 [ -z "$SECRET" ] && warn "KONGMING_SECRET unset: UI logins reset on every restart"
 if [ "$NETWORK" = "bridge" ] && command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
    && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
