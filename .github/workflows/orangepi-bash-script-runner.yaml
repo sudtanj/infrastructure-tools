@@ -205,10 +205,6 @@ jobs:
               --hostname="$HOST" --accept-routes >/dev/null 2>&1
           fi
           echo "[+] joined the tailnet"
-          # kongming's browser: chrome-cdp's tailnet IP, exported to the device as KONGMING_CDP_URL
-          # (the device sits behind a subnet router, without a tailscale CLI of its own).
-          CDP_IP="$(tailscale ip -4 chrome-cdp 2>/dev/null | head -n1 || true)"
-          if [ -n "$CDP_IP" ]; then echo "CDP_LOOKUP_URL=http://${CDP_IP}:9222" >> "$GITHUB_ENV"; fi
 
       - name: Configure SSH
         run: |
@@ -315,7 +311,6 @@ jobs:
             # zilong-router defaults (not secrets, so ALL_SECRETS never carries them); any
             # MINI_ROUTER_ repo secret exported below overrides them.
             printf 'export ZILONG_ROUTER_BIND=0.0.0.0\nexport ZILONG_ROUTER_ALLOW_ANY=1\n'
-            if [ -n "${CDP_LOOKUP_URL:-}" ]; then printf 'export KONGMING_CDP_URL=%q\n' "$CDP_LOOKUP_URL"; fi
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
             for p in "${PREFIXES[@]}"; do
               echo "$ALL_SECRETS" | jq -r --arg p "$p" \
