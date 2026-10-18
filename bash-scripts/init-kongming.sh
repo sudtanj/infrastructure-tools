@@ -31,7 +31,8 @@
 #   KONGMING_MEMORY_LIMIT         default 96m (swap disabled)
 #   KONGMING_NETWORK              "host" to reach loopback services on the board (then BIND/PORT are ignored)
 #   KONGMING_CDP_URL              Chrome DevTools endpoint for the agents' `cdp` command (shell tool),
-#                                 e.g. http://100.x.y.z:9222; default: the tailnet IP of KONGMING_CDP_HOST
+#                                 e.g. http://100.x.y.z:9222; the Orange Pi runner fills it in from its own
+#                                 tailnet view, else the board's tailscale CLI looks up KONGMING_CDP_HOST
 #   KONGMING_CDP_HOST             tailnet machine running Chrome, default chrome-cdp (the
 #                                 chrome-cdp-session workflow); "none" turns the lookup off
 # The Orange Pi runner fills these from the KONGMING_* repo secrets (same suffix).
@@ -236,14 +237,21 @@ fi
 [ "${INIT_DEBUG:-0}" = "1" ] && show_logs 10 '[d]  '
 
 # Can the container (not just the board) reach the browser? Bridge traffic to 100.x goes out
-# through the board's tailscale0. The browser session runs on demand, so this only warns.
+# through the board's tailscale0, or its LAN gateway when a subnet router puts it on the tailnet.
+# The browser session runs on demand, so this only warns.
 if [ -n "$CDP_URL" ]; then
   if "${DOCKER[@]}" exec "$CONTAINER_NAME" /usr/local/bin/kongming cdp --url "$CDP_URL" version >/dev/null 2>&1; then
     ok "agents can reach the browser on the tailnet (cdp)"
-  elif command -v curl >/dev/null 2>&1 && curl -fsS -m 5 "${CDP_URL}/json/version" >/dev/null 2>&1; then
+  elif curl -fsS -m 5 "${CDP_URL}/json/version" >/dev/null 2>&1 || wget -q -T 5 -O /dev/null "${CDP_URL}/json/version" 2>/dev/null; then
     warn "the board reaches the browser but the container does not: check forwarding from docker0 to tailscale0, or use KONGMING_NETWORK=host"
+    CDP_HOSTPORT="${CDP_URL#*://}"; CDP_HOSTPORT="${CDP_HOSTPORT%%/*}"
+    debug "route to the browser: $(ip route get "${CDP_HOSTPORT%%:*}" 2>&1 | head -n1 | sed 's/ uid .*//')"
+    debug "default route: $(ip route show default 2>&1 | head -n1)"
   else
     warn "browser not reachable right now (start the chrome-cdp-session workflow; the tailnet ACL must let this board reach ${CDP_HOST}:9222)"
+    CDP_HOSTPORT="${CDP_URL#*://}"; CDP_HOSTPORT="${CDP_HOSTPORT%%/*}"
+    debug "route to the browser: $(ip route get "${CDP_HOSTPORT%%:*}" 2>&1 | head -n1 | sed 's/ uid .*//')"
+    debug "default route: $(ip route show default 2>&1 | head -n1)"
   fi
 fi
 

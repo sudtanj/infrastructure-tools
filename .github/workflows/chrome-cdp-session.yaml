@@ -234,9 +234,11 @@ jobs:
 
           # The auth key is only used when the restored identity is missing or
           # was deleted. Not ephemeral, so the machine and its IP outlive the run.
+          # --accept-routes: devices behind a subnet router (the Orange Pi running kongming)
+          # reach CDP from their LAN address, and the replies have to go back through that router.
           secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
           sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
-            --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp
+            --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp --accept-routes
 
           # Saved straight away, so a cancelled run still keeps the identity.
           sudo cat /var/lib/tailscale/tailscaled.state \
