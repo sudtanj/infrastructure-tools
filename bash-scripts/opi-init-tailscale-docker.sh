@@ -616,8 +616,35 @@ echo "[*] route approval: ${ROUTES_RESULT}"
 echo "[*] filesystem: read-only (writable: /tmp tmpfs, node state, socket dir)"
 echo "[*] memory: ${MEM:-unknown}"
 
+# OPI_TS_IP held by another machine? A re-login (machine removed, key revoked) makes a new node,
+# and the old entry can keep the IP. Only an offline entry with this node's hostname, i.e. this
+# Pi's own leftover, is removed; anything else is left alone and named.
+free_ip() {
+  local devices holder hid hname
+  devices="$(curl -fsS -m 30 -H @"$API_HDR" "${API}/tailnet/-/devices" 2>/dev/null)" \
+    || { warn "could not list the tailnet's machines; trying the IP change anyway"; return 0; }
+  # The default device fields hold no nested objects, so "},{" separates devices
+  holder="$(printf '%s' "$devices" | tr -d '\n' | sed 's/},{/}\n{/g' | grep -F "\"${WANT_IP}\"" | head -n1 || true)"
+  [ -n "$holder" ] || return 0
+  hid="$(printf '%s' "$holder" | sed -n 's/.*"nodeId" *: *"\([^"]*\)".*/\1/p')"
+  hname="$(printf '%s' "$holder" | sed -n 's/.*"hostname" *: *"\([^"]*\)".*/\1/p')"
+  [ "$hid" = "$NODE_ID" ] && return 0
+  if [ "$hname" = "$TS_HOST" ] && printf '%s' "$holder" | grep -q '"connectedToControl" *: *false'; then
+    step "removing this Pi's offline leftover machine entry that still holds OPI_TS_IP"
+    if curl -fsS -m 30 -o /dev/null -X DELETE -H @"$API_HDR" "${API}/device/${hid}" 2>/dev/null; then
+      ok "old entry removed; the IP is free"
+      return 0
+    fi
+    warn "could not remove the old entry (the OAuth client needs the devices:core scope)"
+    return 1
+  fi
+  warn "OPI_TS_IP belongs to another machine (${hname:-unknown}$(printf '%s' "$holder" | grep -q '"connectedToControl" *: *true' && echo ", online")); not touching it"
+  return 1
+}
+
 # Last on purpose: a new IP drops every connection to the old one, this SSH session included
 if [ "$IP_RESULT" = "change requested" ]; then
+  free_ip || fail "OPI_TS_IP is still taken; free it in the admin console (Machines) and rerun"
   step "moving the node to the requested tailnet IP; an SSH session on the old IP will drop now"
   api_post "/device/${NODE_ID}/ip" "{\"ipv4\": \"${WANT_IP}\"}" \
     || fail "setting the IP failed: ${API_ERR}$([[ "$API_ERR" == "HTTP 40"[13]* ]] && echo " (the OAuth client lacks the devices:core scope)" || echo " (is the IP free in the tailnet and inside 100.64.0.0/10?)")"
