@@ -64,12 +64,14 @@ RUN set -eux; \
 
 # Static BusyBox for kongming's `shell` tool: one ~1 MB binary plus applet links,
 # so the distroless runtime gets sh, ls, grep, sed, awk, wget, nc, tar, ... and
-# nothing else. /work is the mount point of the tool's tmpfs scratch directory.
+# nothing else. /work is the mount point of the tool's tmpfs scratch directory;
+# `cdp` is kongming itself (its Chrome DevTools client, for a browser on the tailnet).
 FROM busybox:1.37-musl AS busybox
 RUN set -eux; \
     mkdir -p /opt/busybox/bin /work; \
     cp /bin/busybox /opt/busybox/busybox; \
     for applet in $(/bin/busybox --list); do ln -s ../busybox "/opt/busybox/bin/${applet}"; done; \
+    ln -s /usr/local/bin/kongming /opt/busybox/bin/cdp; \
     /opt/busybox/bin/sh -c 'echo busybox ok'
 
 FROM ${RUNTIME_IMAGE}
