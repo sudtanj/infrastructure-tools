@@ -257,7 +257,7 @@ if [ -n "$CDP_URL" ]; then
 fi
 
 # The agents' shell is for interacting, not storage: nothing in the container may be writable.
-WRITABLE="$("${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/sh -c 'for d in / /tmp /var/tmp /run /dev /dev/shm /dev/mqueue /opt /usr/local/bin; do [ -d "$d" ] && touch "$d/.kongming-w" 2>/dev/null && rm -f "$d/.kongming-w" && echo "$d"; done' 2>/dev/null | tr '\n' ' ')"
+WRITABLE="$("${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/sh -c 'for d in / /tmp /var/tmp /run /dev /dev/shm /dev/mqueue /opt /usr/local/bin; do [ -d "$d" ] && touch "$d/.kongming-w" 2>/dev/null && rm -f "$d/.kongming-w" && echo "$d"; done; true' 2>/dev/null | tr '\n' ' ' || true)"
 if [ -z "$WRITABLE" ]; then
   ok "no writable storage in the container (the agents' shell can only interact)"
 else
