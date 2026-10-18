@@ -62,14 +62,27 @@ RUN set -eux; \
     cargo build --release ${locked} --target "${target}"; \
     install -m755 "target/${target}/release/kongming" /usr/local/bin/kongming
 
+# Static BusyBox for kongming's `shell` tool: one ~1 MB binary plus applet links,
+# so the distroless runtime gets sh, ls, grep, sed, awk, wget, nc, tar, ... and
+# nothing else. /work is the mount point of the tool's tmpfs scratch directory.
+FROM busybox:1.37-musl AS busybox
+RUN set -eux; \
+    mkdir -p /opt/busybox/bin /work; \
+    cp /bin/busybox /opt/busybox/busybox; \
+    for applet in $(/bin/busybox --list); do ln -s ../busybox "/opt/busybox/bin/${applet}"; done; \
+    /opt/busybox/bin/sh -c 'echo busybox ok'
+
 FROM ${RUNTIME_IMAGE}
 
 COPY --from=builder /usr/local/bin/kongming /usr/local/bin/kongming
+COPY --from=busybox /opt/busybox /opt/busybox
+COPY --from=busybox --chown=65532:65532 /work /work
 
 ENV PORT=18800 \
     KONGMING_HOST=0.0.0.0 \
     KONGMING_WORKERS=1 \
-    LOG_LEVEL=info
+    LOG_LEVEL=info \
+    KONGMING_WORKDIR=/work
 
 USER 65532:65532
 EXPOSE 18800

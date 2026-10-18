@@ -7,6 +7,8 @@
 #   - read-only rootfs, no volume at all (state is on Turso), all caps dropped,
 #     hard RAM cap without swap, low CPU weight
 #   - 1 tokio worker, logs capped at 1 MB
+#   - the agents' `shell` tool (bundled BusyBox) works in a 32 MB tmpfs at /work that is
+#     wiped on every restart; it counts against the memory cap
 #
 # Security model (this repo and its Actions logs are public): secret values are never
 # printed and never put on a command line; they reach docker through a 0600 env file
@@ -45,7 +47,7 @@ PUBLIC_URL="${KONGMING_PUBLIC_URL:-}"
 CPU_LIMIT="${KONGMING_CPU_LIMIT:-1.0}"
 MEMORY_LIMIT="${KONGMING_MEMORY_LIMIT:-96m}"
 NETWORK="${KONGMING_NETWORK:-bridge}"
-CONFIG_REV="2"   # bump when the docker run flags below change
+CONFIG_REV="3"   # bump when the docker run flags below change
 
 status() { printf '%s\n' "[*] $*"; }
 step()   { printf '%s\n' "[>] $*"; }
@@ -154,6 +156,7 @@ else
     --label "kongming.config=${WANT_SUM}" \
     --read-only \
     --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532,mode=0700" \
+    --tmpfs "/work:rw,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700" \
     --cpus "$CPU_LIMIT" --cpu-shares 512 \
     --memory "$MEMORY_LIMIT" --memory-swap "$MEMORY_LIMIT" \
     --oom-score-adj 300 \
