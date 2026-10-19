@@ -13,11 +13,14 @@ name: "Deploy paseo-lite on Instabox"
 # the Paseo relay. Two modes:
 #   on-demand (default): Instabox reserves 6768 (desktop/Orca control port), so a small socat
 #     container forwards port 16768 (repo variable INSTABOX_PUBLIC_PORT) to the daemon's 6768, and
-#     16768 is published as an Instabox public URL. Opening that
-#     URL (Paseo direct connection, or just the URL in a browser to wake it before using the relay)
-#     resumes the paused machine with the daemon still running. The idle pause stays on, so the
-#     machine sleeps when you stop using it. The URL is public, so PASEO_PASSWORD is required.
+#     16768 is published as an Instabox public URL (Paseo direct connection and pairing page).
+#     The idle pause stays on, so the machine sleeps when you stop using it. Traffic to the URL
+#     does NOT wake it (Instabox answers "Sandbox offline. Its owner must start it"): wake it with
+#     this workflow's "wake" mode (also from the GitHub mobile app), `instabox start <machine>`, or
+#     the Instabox dashboard. It resumes with the daemon still running.
+#     The URL is public, so PASEO_PASSWORD is required.
 #     The URL is never logged: run `instabox port ls <machine>` yourself to see it.
+#   wake: only starts the paused machine and restarts its idle timer, no redeploy.
 #   always-on: unpublishes the port and asks for no idle pause (`auto-suspend 0`), honoured only
 #     with manual lifecycle. Without it, uncomment the schedule below for a best-effort keep-alive:
 #     a no-op command every 20 minutes (GitHub may delay scheduled runs).
@@ -26,12 +29,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "on-demand: sleep when idle, wake via the public port URL. always-on: never pause"
+        description: "wake: just start the paused machine. on-demand: deploy, sleep when idle. always-on: deploy, never pause"
         required: false
         default: "on-demand"
         type: choice
         options:
           - on-demand
+          - wake
           - always-on
       machine_name:
         description: "Instabox machine name (blank: repo variable INSTABOX_MACHINE_NAME, else paseo-lite)"
@@ -66,8 +70,8 @@ env:
 
 jobs:
   keepalive:
-    name: "Keep-alive"
-    if: github.event_name == 'schedule'
+    name: "${{ github.event_name == 'schedule' && 'Keep-alive' || 'Wake' }}"
+    if: github.event_name == 'schedule' || inputs.mode == 'wake'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -82,16 +86,19 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${INSTABOX_API_KEY:-}" ] || { echo "::error::Missing secret: INSTABOX_API_KEY"; exit 1; }
-          # A command wakes a machine paused for being idle and resets its idle timer.
-          # One you paused or stopped yourself is not woken: exec fails and so does this run.
           state=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.state // "unknown"' || echo unknown)
           echo "[*] state: ${state}"
-          instabox exec "$MACHINE_NAME" --timeout 30 -- true
-          echo "[+] keep-alive sent"
+          # start resumes a paused machine, or boots it fresh when its memory cannot be restored.
+          case "$state" in
+            suspended|stopped|error) instabox start "$MACHINE_NAME" ;;
+          esac
+          # A command also wakes a machine paused for being idle, and resets its idle timer.
+          instabox exec "$MACHINE_NAME" --timeout 60 -- true
+          echo "[+] machine is up; it pauses again after 30 idle minutes"
 
   deploy:
     name: "Deploy paseo-lite"
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'wake'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -500,7 +507,7 @@ jobs:
             fi
             # Back to the default idle pause, in case an earlier always-on run turned it off.
             instabox auto-suspend "$MACHINE_NAME" 30m >/dev/null
-            echo "[+] on-demand: the machine pauses after 30 idle minutes; opening its public URL wakes it"
+            echo "[+] on-demand: the machine pauses after 30 idle minutes; wake it with this workflow's wake mode"
             echo "[*] get the URL on your own computer: instabox port ls ${MACHINE_NAME}"
           else
             instabox port unpublish "$MACHINE_NAME" "$PUBLIC_PORT" >/dev/null 2>&1 \
