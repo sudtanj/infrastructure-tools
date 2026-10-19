@@ -164,6 +164,13 @@ jobs:
             | jq -r '(if type == "array" then . else (.machines // .sandboxes // .items // []) end)[] | .name // .id // empty' \
             | paste -sd' ' - || true)
           echo "[*] machines with app=paseo-lite left: ${left:-none}"
+          # Anything else left on the account (names and counts only), so leftovers are visible.
+          names='(if type == "array" then . else (.machines // .sandboxes // .snapshots // .images // .ports // .items // []) end)[]? | (.name // .id // empty)'
+          echo "[*] account after destroy:"
+          echo "    machines:  $(instabox ls --json 2>/dev/null | jq -r "$names" 2>/dev/null | paste -sd' ' - || true)"
+          echo "    ports:     $(instabox port ls --json 2>/dev/null | jq -r 'if type == "array" then length else (.ports // .items // []) | length end' 2>/dev/null || echo '?')"
+          echo "    snapshots: $(instabox snapshot ls --json 2>/dev/null | jq -r "$names" 2>/dev/null | paste -sd' ' - || true)"
+          echo "    vault:     $(instabox vault ls --json 2>/dev/null | jq -r "$names" 2>/dev/null | paste -sd' ' - || echo '(needs a sign-in to list)')"
           echo "[*] left alone: your Instabox API keys (revoke INSTABOX_API_KEY with \`instabox keys rm\` if you are done),"
           echo "    snapshots, and the paseo-wake Cloudflare Worker (delete it in the Cloudflare dashboard if you deployed it)"
           exit "$failed"
