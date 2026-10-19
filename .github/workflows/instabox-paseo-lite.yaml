@@ -1,0 +1,325 @@
+name: "Deploy paseo-lite on Instabox"
+
+# Runs bash-scripts/init-paseo-lite.sh on an Instabox machine (https://instabox.sh), the same way
+# gcp-bash-script-runner.yaml runs it on the GCP VM: same script, same secrets (CODEX_*, GH_TOKEN,
+# GH_USERNAME, GH_EMAIL, ANTHROPIC_*, CLAUDE_CODE_*), so Claude Code and Codex are set up identically.
+#
+# Required secret: INSTABOX_API_KEY (ibk_..., dashboard Account page or `instabox keys create`).
+# Optional repo variables:
+#   INSTABOX_MACHINE_NAME  machine to use or create (default paseo-lite)
+#
+# Instabox pauses a machine after 30 idle minutes unless your account has "manual lifecycle"
+# (an Instabox admin setting). A paused machine keeps its memory and processes, but does not answer
+# the Paseo relay. Two modes:
+#   on-demand (default): publishes the daemon's port 6768 as an Instabox public URL. Opening that
+#     URL (Paseo direct connection, or just the URL in a browser to wake it before using the relay)
+#     resumes the paused machine with the daemon still running. The idle pause stays on, so the
+#     machine sleeps when you stop using it. The URL is public, so PASEO_PASSWORD is required.
+#     The URL is never logged: run `instabox port ls <machine>` yourself to see it.
+#   always-on: unpublishes the port and asks for no idle pause (`auto-suspend 0`), honoured only
+#     with manual lifecycle. Without it, uncomment the schedule below for a best-effort keep-alive:
+#     a no-op command every 20 minutes (GitHub may delay scheduled runs).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "on-demand: sleep when idle, wake via the public port URL. always-on: never pause"
+        required: false
+        default: "on-demand"
+        type: choice
+        options:
+          - on-demand
+          - always-on
+      machine_name:
+        description: "Instabox machine name (blank: repo variable INSTABOX_MACHINE_NAME, else paseo-lite)"
+        required: false
+        default: ""
+        type: string
+      template:
+        description: "Template for a new machine (ignored when it already exists)"
+        required: false
+        default: "universal"
+        type: choice
+        options:
+          - universal
+          - agent-browser
+          - herdr
+          - orca
+      debug:
+        description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
+        required: false
+        default: true
+        type: boolean
+  # schedule:
+  #   - cron: "*/20 * * * *"
+
+permissions:
+  contents: read
+
+env:
+  INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
+  INSTABOX_API_URL: https://api.instabox.sh
+  MACHINE_NAME: ${{ inputs.machine_name || vars.INSTABOX_MACHINE_NAME || 'paseo-lite' }}
+
+jobs:
+  keepalive:
+    name: "Keep-alive"
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install instabox CLI
+        run: |
+          set -euo pipefail
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Touch the machine
+        run: |
+          set -euo pipefail
+          [ -n "${INSTABOX_API_KEY:-}" ] || { echo "::error::Missing secret: INSTABOX_API_KEY"; exit 1; }
+          # A command wakes a machine paused for being idle and resets its idle timer.
+          # One you paused or stopped yourself is not woken: exec fails and so does this run.
+          state=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.state // "unknown"' || echo unknown)
+          echo "[*] state: ${state}"
+          instabox exec "$MACHINE_NAME" --timeout 30 -- true
+          echo "[+] keep-alive sent"
+
+  deploy:
+    name: "Deploy paseo-lite"
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: instabox-paseo-lite-${{ inputs.machine_name || vars.INSTABOX_MACHINE_NAME || 'paseo-lite' }}
+      cancel-in-progress: false
+
+    environment:
+      name: "approve-instabox-paseo-lite"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required config
+        env:
+          MODE: ${{ inputs.mode }}
+          HAS_PASEO_PASSWORD: ${{ secrets.PASEO_PASSWORD != '' }}
+        run: |
+          if [ -z "${INSTABOX_API_KEY:-}" ]; then
+            echo "::error::Missing secret: INSTABOX_API_KEY"
+            exit 1
+          fi
+          # on-demand puts the daemon on a public URL: without a password anyone could drive the agents.
+          if [ "$MODE" = "on-demand" ] && [ "$HAS_PASEO_PASSWORD" != "true" ]; then
+            echo "::error::on-demand mode publishes port 6768 publicly; set the PASEO_PASSWORD secret first"
+            exit 1
+          fi
+          echo "[+] INSTABOX_API_KEY is set | machine: ${MACHINE_NAME} | mode: ${MODE}"
+
+      - name: Prepare log sanitizer
+        run: |
+          # Same filter as gcp-bash-script-runner.yaml: every line from the machine passes through it.
+          cat > "${RUNNER_TEMP}/sanitize.pl" <<'PERL'
+          use strict;
+          use warnings;
+          my $h = '[0-9A-Fa-f]{1,4}';
+          while (my $l = <>) {
+            $l =~ s/\b(?:\d{1,3}\.){3}\d{1,3}\b/<ip>/g;
+            $l =~ s/(?<![\w:.])(?:(?:$h:){7}$h|(?:$h:){1,7}:(?:$h(?::$h){0,6})?|::(?:$h(?::$h){0,6})?)(?![\w:])/<ipv6>/g;
+            $l =~ s{(://)[^/\s@]+@}{$1<creds>@}g;
+            $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
+            $l =~ s/\bibk_\w+/ibk_<redacted>/g;
+            $l =~ s/\b(?:gh[pousr]_|github_pat_)\w+/<github-token>/g;
+            $l =~ s/\bsk-[\w-]{8,}/<api-key>/g;
+            $l =~ s/\bBearer\s+\S+/Bearer <redacted>/gi;
+            $l =~ s/((?:authkey|auth_key|token|password|passwd|secret|api[_-]?key)\s*[=:]\s*)(?!(?:set|unset)\b)\S+/$1<redacted>/gi;
+            print $l;
+          }
+          PERL
+          perl -c "${RUNNER_TEMP}/sanitize.pl"
+
+      - name: Install instabox CLI
+        run: |
+          set -euo pipefail
+          # The installer verifies the binary against SHA256SUMS and installs nothing on a mismatch.
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
+          "$INSTABOX_INSTALL_DIR/instabox" --version
+
+      - name: Ensure the machine exists and runs
+        env:
+          TEMPLATE: ${{ inputs.template }}
+        run: |
+          set -euo pipefail
+          if info=$(instabox get "$MACHINE_NAME" --json 2>/dev/null); then
+            state=$(jq -r '.state // "unknown"' <<< "$info")
+            echo "[*] machine exists, state: ${state}"
+            case "$state" in
+              running) ;;
+              # start resumes a paused machine, or boots it fresh when its memory cannot be restored
+              suspended|stopped|error) instabox start "$MACHINE_NAME" ;;
+              *) echo "[*] machine is busy (${state}); the SSH step wakes or waits for it" ;;
+            esac
+          else
+            echo "[*] creating ${MACHINE_NAME} from template ${TEMPLATE}"
+            instabox create --name "$MACHINE_NAME" --template "$TEMPLATE" --meta app=paseo-lite
+          fi
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          # Host block with a short-lived certificate signed by Instabox for this key.
+          instabox ssh-config "$MACHINE_NAME" > "${RUNNER_TEMP}/instabox_ssh_config"
+          {
+            cat "${RUNNER_TEMP}/instabox_ssh_config"
+            printf '\nHost *\n  LogLevel ERROR\n  ServerAliveInterval 30\n'
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          alias=$(awk '$1 == "Host" { print $2; exit }' "${RUNNER_TEMP}/instabox_ssh_config")
+          [ -n "$alias" ] || { echo "::error::instabox ssh-config printed no Host block"; exit 1; }
+          echo "SSH_ALIAS=${alias}" >> "$GITHUB_ENV"
+          ssh -T -o BatchMode=yes "$alias" true
+          echo "[+] SSH to the machine works"
+
+      - name: Run init-paseo-lite.sh over SSH
+        env:
+          SCRIPT_PATH: bash-scripts/init-paseo-lite.sh
+          DEBUG_LOGS: ${{ inputs.debug }}
+          # Same secrets as the paseo-lite run of gcp-bash-script-runner.yaml; only set ones are forwarded.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,ANTHROPIC_,CLAUDE_CODE_,PASEO_"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: ${{ secrets.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC }}
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${{ secrets.CLAUDE_CODE_MAX_OUTPUT_TOKENS }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_IDLE_SECS: ${{ secrets.CODEX_IDLE_SECS }}
+          CODEX_MAX_TOKEN: ${{ secrets.CODEX_MAX_TOKEN }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          GH_EMAIL: ${{ secrets.GH_EMAIL }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          PASEO_PASSWORD: ${{ secrets.PASEO_PASSWORD }}
+        run: |
+          set +e
+          SECONDS=0
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          DEBUG_LOGS="${DEBUG_LOGS:-true}"
+          umask 077
+          LOG=$(mktemp)
+          PAYLOAD=$(mktemp)
+          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
+
+          {
+            IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
+            for p in "${PREFIXES[@]}"; do
+              while IFS= read -r v; do
+                [ -n "${!v}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+              done < <(compgen -e | grep "^$p" || true)
+            done
+            printf 'export VERBOSE=0\n'
+            if [ "$DEBUG_LOGS" = "true" ]; then printf 'export INIT_DEBUG=1\n'; else printf 'export INIT_DEBUG=0\n'; fi
+            # Instabox machines are not COS: Docker may need starting, and the login user may only
+            # reach it through sudo. The script calls plain `docker` (also via `timeout`, which skips
+            # shell functions), so a wrapper executable first on PATH routes it through sudo then.
+            cat <<'SHIM'
+          if ! docker info >/dev/null 2>&1; then
+            sudo -n systemctl start docker >/dev/null 2>&1 || sudo -n service docker start >/dev/null 2>&1 || true
+            for _ in $(seq 1 20); do
+              { docker info >/dev/null 2>&1 || sudo -n docker info >/dev/null 2>&1; } && break
+              sleep 1
+            done
+          fi
+          if ! docker info >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+            echo "[*] instabox: using docker through sudo"
+            _real_docker=$(command -v docker)
+            _shim_dir=$(mktemp -d)
+            printf '#!/bin/sh\nexec sudo -n %s "$@"\n' "$_real_docker" > "$_shim_dir/docker"
+            chmod 755 "$_shim_dir/docker"
+            export PATH="$_shim_dir:$PATH"
+          fi
+          SHIM
+            cat "${SCRIPT_PATH}"
+          } > "$PAYLOAD"
+
+          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
+          SHA=$(sha256sum "${SCRIPT_PATH}" | cut -c1-12)
+          echo "[*] script: ${SCRIPT_PATH} (sha256 ${SHA}) | env forwarded: ${NAMES}" | perl "$SAN"
+
+          # SSH, not `instabox exec`: exec stops a command after 10 minutes and does not stream,
+          # while the first image pull alone can take longer.
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' < "$PAYLOAD" > "$LOG" 2>&1
+          RC=$?
+          DUR=$SECONDS
+          set -e
+
+          show() {
+            if [ "$DEBUG_LOGS" = "true" ]; then
+              grep -aE '^\[[*>+!xd]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            else
+              grep -aE '^\[[*>+!x]\] |^\[✓\] ' "$LOG" | perl "$SAN" || true
+            fi
+          }
+          {
+            echo "### \`init-paseo-lite.sh\` on Instabox \`${MACHINE_NAME}\`: $([ "$RC" -eq 0 ] && echo succeeded || echo FAILED)"
+            echo ""
+            echo "exit code ${RC}, ${DUR}s, script sha256 \`${SHA}\`, $(echo "$NAMES" | wc -w) env variables forwarded"
+            echo ""
+            echo "<details><summary>Output (sanitized)</summary>"
+            echo ""
+            echo '```text'
+            show | tail -n 200
+            echo '```'
+            echo "</details>"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          echo "::group::Script output (sanitized)"
+          show
+          echo "::endgroup::"
+          if [ "$RC" -eq 0 ]; then
+            { show | grep -a '^\[!\] ' | head -n 5 | while IFS= read -r w; do echo "::warning::${w#\[!\] }"; done; } || true
+            echo "[+] done in ${DUR}s. Pairing link: instabox ssh ${MACHINE_NAME} -- docker exec paseo-lite paseo-lite pair"
+            exit 0
+          fi
+          echo "::error::init-paseo-lite.sh failed (exit ${RC}) after ${DUR}s"
+          [ "$RC" -eq 255 ] && echo "[!] exit 255 = the SSH connection itself failed (not the script)."
+          echo "---- diagnostic tail (sanitized) ----"
+          perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -60 || true
+          exit "$RC"
+
+      - name: Apply mode (${{ inputs.mode }})
+        env:
+          MODE: ${{ inputs.mode }}
+          PASEO_PORT: "6768"   # fixed in init-paseo-lite.sh
+        run: |
+          set -euo pipefail
+          # Public URLs are never printed here (the repo and its logs are public).
+          if [ "$MODE" = "on-demand" ]; then
+            if instabox port publish "$MACHINE_NAME" "$PASEO_PORT" --name paseo-lite >/dev/null 2>&1; then
+              echo "[+] port ${PASEO_PORT} published"
+            elif instabox port ls "$MACHINE_NAME" 2>/dev/null | grep -qw "$PASEO_PORT"; then
+              echo "[+] port ${PASEO_PORT} was already published"
+            else
+              echo "::error::could not publish port ${PASEO_PORT}"
+              exit 1
+            fi
+            # Back to the default idle pause, in case an earlier always-on run turned it off.
+            instabox auto-suspend "$MACHINE_NAME" 30m >/dev/null
+            echo "[+] on-demand: the machine pauses after 30 idle minutes; opening its public URL wakes it"
+            echo "[*] get the URL on your own computer: instabox port ls ${MACHINE_NAME}"
+          else
+            instabox port unpublish "$MACHINE_NAME" "$PASEO_PORT" >/dev/null 2>&1 \
+              && echo "[+] port ${PASEO_PORT} unpublished" || echo "[*] port ${PASEO_PORT} was not published"
+            # Only honoured with manual lifecycle; otherwise the fixed 30-minute idle pause stays.
+            instabox auto-suspend "$MACHINE_NAME" 0 >/dev/null || echo "::warning::could not turn off the idle pause"
+            echo "[+] always-on requested (needs manual lifecycle on your Instabox account, or the keep-alive schedule)"
+          fi
