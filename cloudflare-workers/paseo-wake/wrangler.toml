@@ -1,0 +1,16 @@
+# Deployed by .github/workflows/cloudflare-paseo-wake.yaml. No secrets here:
+# they are Worker secrets, copied from GitHub secrets by that workflow.
+name = "paseo-wake"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+preview_urls = false
+
+# Password attempts and socket opens per client IP.
+[[ratelimits]]
+name = "AUTH_LIMIT"
+namespace_id = "6768"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60

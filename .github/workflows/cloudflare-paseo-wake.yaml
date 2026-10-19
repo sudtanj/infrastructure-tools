@@ -1,0 +1,200 @@
+name: "Deploy paseo-wake (Cloudflare Worker that wakes paseo-lite on Instabox)"
+
+# Deploys cloudflare-workers/paseo-wake: a Worker in front of paseo-lite's Instabox public URL
+# that wakes the paused machine when someone who knows the Paseo password connects.
+# Point the Paseo app's direct connection (and your browser) at the Worker URL instead of the
+# Instabox URL. Run "Deploy paseo-lite on Instabox" (on-demand) first, so the port is published.
+#
+# SECRETS (GitHub secrets only; this repo and its logs are public):
+#   CLOUDFLARE_API_TOKEN    token with "Workers Scripts: Edit" on your account (nothing more needed)
+#   CLOUDFLARE_ACCOUNT_ID
+#   INSTABOX_API_KEY        already used by the Instabox workflow; here only to look up the machine
+#   INSTABOX_WAKE_API_KEY   a SEPARATE Instabox key that goes into the Worker, so revoking it never
+#                           breaks your deploys. Create one that expires:
+#                             instabox keys create --name paseo-wake --scope machines:write --expires-in-days 90
+#                           (Instabox has no narrower scope: machines:write also allows SSH/exec,
+#                           so treat it like the main key, and rotate it by re-running this workflow.)
+#   PASEO_PASSWORD          already set; only a salted hash of it goes into the Worker
+#
+# What never happens: no secret, hash, machine ID or URL is printed, written to the repo or put
+# in wrangler.toml. Cloudflare stores them as encrypted Worker secrets, which cannot be read back.
+# The Worker URL is not printed either: find it in the Cloudflare dashboard (Workers > paseo-wake).
+
+on:
+  workflow_dispatch:
+    inputs:
+      machine_name:
+        description: "Instabox machine name (blank: repo variable INSTABOX_MACHINE_NAME, else paseo-lite)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-paseo-wake
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "Deploy paseo-wake"
+    # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: "approve-instabox-paseo-lite"
+    env:
+      MACHINE_NAME: ${{ inputs.machine_name || vars.INSTABOX_MACHINE_NAME || 'paseo-lite' }}
+      PUBLIC_PORT: ${{ vars.INSTABOX_PUBLIC_PORT || '16768' }}
+      INSTABOX_API_URL: https://api.instabox.sh
+      WORKER_DIR: cloudflare-workers/paseo-wake
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify required secrets
+        env:
+          HAS_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          HAS_IB_KEY: ${{ secrets.INSTABOX_API_KEY != '' }}
+          HAS_WAKE_KEY: ${{ secrets.INSTABOX_WAKE_API_KEY != '' }}
+          HAS_PASSWORD: ${{ secrets.PASEO_PASSWORD != '' }}
+        run: |
+          missing=""
+          [ "$HAS_CF_TOKEN" = true ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ "$HAS_CF_ACCOUNT" = true ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ "$HAS_IB_KEY" = true ] || missing="$missing INSTABOX_API_KEY"
+          [ "$HAS_WAKE_KEY" = true ] || missing="$missing INSTABOX_WAKE_API_KEY"
+          [ "$HAS_PASSWORD" = true ] || missing="$missing PASEO_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:${missing} (see the comment at the top of this workflow)"
+            exit 1
+          fi
+          echo "[+] all secrets are set"
+
+      - name: Install instabox CLI
+        run: |
+          set -euo pipefail
+          # The installer verifies the binary against SHA256SUMS and installs nothing on a mismatch.
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Look up the machine and its public URL
+        id: machine
+        env:
+          INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
+        run: |
+          set -euo pipefail
+          id=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.id // empty') || true
+          [ -n "$id" ] || { echo "::error::machine ${MACHINE_NAME} not found"; exit 1; }
+          echo "::add-mask::${id}"
+          # Any string in the port list that is this port's URL (the JSON layout is not documented).
+          url=$(instabox port ls "$MACHINE_NAME" --json 2>/dev/null \
+            | jq -r --arg p "${PUBLIC_PORT}-" '[.. | strings | select(contains($p) and contains("."))] | .[0] // empty') || true
+          [ -n "$url" ] || { echo "::error::port ${PUBLIC_PORT} is not published; run the Instabox workflow in on-demand mode first"; exit 1; }
+          case "$url" in https://*) ;; http://*) url="https://${url#http://}" ;; *) url="https://${url}" ;; esac
+          url="${url%/}"
+          echo "::add-mask::${url}"
+          echo "::add-mask::${url#https://}"
+          { echo "id=${id}"; echo "url=${url}"; } >> "$GITHUB_OUTPUT"
+          echo "[+] found the machine and its public URL (not shown)"
+
+      - name: Check the wake key can wake the machine
+        env:
+          WAKE_KEY: ${{ secrets.INSTABOX_WAKE_API_KEY }}
+          MACHINE_ID: ${{ steps.machine.outputs.id }}
+        run: |
+          set -euo pipefail
+          # The same call the Worker makes. On a running machine it is a no-op.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "X-API-Key: ${WAKE_KEY}" \
+            "${INSTABOX_API_URL}/v1/machines/${MACHINE_ID}/wake" || echo 000)
+          case "$code" in
+            2??) echo "[+] wake API answered ${code}" ;;
+            401|403) echo "::error::INSTABOX_WAKE_API_KEY was refused (${code}): expired, revoked, or missing machines:write"; exit 1 ;;
+            404|405) echo "::error::the Instabox wake API answered ${code}; the Worker would not be able to wake the machine"; exit 1 ;;
+            # e.g. "not paused": the key and the endpoint are fine, the machine is just awake.
+            4??) echo "[+] wake API answered ${code} (machine not paused right now)" ;;
+            *) echo "::error::the Instabox wake API answered ${code}"; exit 1 ;;
+          esac
+
+      - name: Deploy the Worker
+        id: deploy
+        working-directory: ${{ env.WORKER_DIR }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/wrangler-deploy.log"
+          # wrangler prints the Worker URL, so its output is kept out of the public log.
+          if ! npx --yes wrangler@4 deploy > "$log" 2>&1; then
+            sed -E 's#https?://[^ ]+#<url>#g; s#[A-Za-z0-9.-]+\.workers\.dev#<url>#g' "$log" | tail -40
+            echo "::error::wrangler deploy failed"
+            exit 1
+          fi
+          worker=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' "$log" | head -1 || true)
+          rm -f "$log"
+          if [ -n "$worker" ]; then
+            echo "::add-mask::${worker}"
+            echo "::add-mask::${worker#https://}"
+            echo "worker=${worker}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "[+] Worker deployed"
+
+      - name: Set the Worker secrets
+        working-directory: ${{ env.WORKER_DIR }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+          PASEO_PASSWORD: ${{ secrets.PASEO_PASSWORD }}
+          WAKE_KEY: ${{ secrets.INSTABOX_WAKE_API_KEY }}
+          MACHINE_ID: ${{ steps.machine.outputs.id }}
+          UPSTREAM_URL: ${{ steps.machine.outputs.url }}
+        run: |
+          set -euo pipefail
+          umask 077
+          file="${RUNNER_TEMP}/paseo-wake-secrets.json"
+          trap 'rm -f "$file"' EXIT
+          # A fresh salt on every deploy; the Worker only ever sees the salted hash.
+          salt=$(openssl rand -hex 16)
+          hash=$(printf '%s:%s' "$salt" "$PASEO_PASSWORD" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::${salt}"
+          echo "::add-mask::${hash}"
+          jq -n --arg u "$UPSTREAM_URL" --arg m "$MACHINE_ID" --arg k "$WAKE_KEY" --arg s "$salt" --arg h "$hash" \
+            '{UPSTREAM_URL: $u, INSTABOX_MACHINE_ID: $m, INSTABOX_WAKE_KEY: $k, PASSWORD_SALT: $s, PASSWORD_SHA256: $h}' > "$file"
+          if ! npx --yes wrangler@4 secret bulk "$file" > /dev/null 2>&1; then
+            echo "::error::could not set the Worker secrets (the Worker answers 503 until they are set)"
+            exit 1
+          fi
+          echo "[+] Worker secrets set: UPSTREAM_URL INSTABOX_MACHINE_ID INSTABOX_WAKE_KEY PASSWORD_SALT PASSWORD_SHA256"
+
+      - name: Smoke test
+        if: steps.deploy.outputs.worker != ''
+        env:
+          WORKER: ${{ steps.deploy.outputs.worker }}
+        run: |
+          set -euo pipefail
+          sleep 5
+          # A wrong password must be refused at the edge, without waking anything.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
+            -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            -H 'Sec-WebSocket-Protocol: paseo.bearer.definitely-not-the-password' "${WORKER}/ws" || echo 000)
+          [ "$code" = 401 ] && echo "[+] wrong password refused (401)" || { echo "::error::wrong password got ${code}, expected 401"; exit 1; }
+          # Anything outside / and /ws is not proxied.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "${WORKER}/anything-else" || echo 000)
+          [ "$code" = 404 ] && echo "[+] other paths refused (404)" || { echo "::error::other path got ${code}, expected 404"; exit 1; }
+          # The page: the daemon's pairing page (200) when awake, the wake form (503) when asleep.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "${WORKER}/" || echo 000)
+          case "$code" in
+            200) echo "[+] page proxied to the daemon (machine awake)" ;;
+            503) echo "[+] wake page served (machine asleep)" ;;
+            *) echo "::error::page got ${code}"; exit 1 ;;
+          esac
+          echo "[*] the Worker URL is in the Cloudflare dashboard (Workers > paseo-wake); use it in the Paseo app"
