@@ -54,8 +54,9 @@ FROM alpine:${ALPINE_VERSION}
 
 # What agents need to do real work: a shell, git (+ssh remotes), ripgrep for
 # Claude's search tools, and the C++ runtime the native Claude binary links.
-# tini reaps orphaned grandchildren; su-exec drops root -> paseo.
-RUN apk add --no-cache bash git openssh-client ca-certificates libgcc libstdc++ ripgrep tini su-exec \
+# tini reaps orphaned grandchildren; su-exec drops root -> paseo. docker-cli
+# drives the host Docker when the deploy shares its socket (PASEO_DOCKER_SOCKET=1).
+RUN apk add --no-cache bash git openssh-client ca-certificates libgcc libstdc++ ripgrep tini su-exec docker-cli docker-cli-compose \
  && adduser -D -u 1000 -h /home/paseo -s /bin/bash paseo \
  && mkdir -p /workspace && chown paseo:paseo /workspace
 

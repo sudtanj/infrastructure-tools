@@ -189,10 +189,48 @@ jobs:
           ssh -T -o BatchMode=yes "$alias" true
           echo "[+] SSH to the machine works"
 
+      # Read-only report of what the agents can use on this machine: the browser (binaries,
+      # running instances, DevTools endpoints) and the Docker socket they get.
+      - name: Inspect host browser and Docker
+        run: |
+          set -euo pipefail
+          template=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.template // .templateId // .templateName // "unknown"' || echo unknown)
+          echo "[*] template: ${template}"
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" bash -s <<'SH' | perl "${RUNNER_TEMP}/sanitize.pl"
+          as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@" 2>/dev/null || "$@"; fi; }
+          echo "[*] host: $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}") | user: $(id -un) | groups: $(id -Gn)"
+          found=""
+          for b in google-chrome google-chrome-stable chromium chromium-browser chrome microsoft-edge firefox; do
+            p=$(command -v "$b" 2>/dev/null) && found="${found} ${b}=${p}"
+          done
+          for p in /opt/google/chrome/chrome /usr/lib/chromium/chromium /snap/bin/chromium; do
+            [ -x "$p" ] && found="${found} ${p}"
+          done
+          echo "[*] browser binaries:${found:- none}"
+          procs=$(as_root ps -eo comm= | grep -iE 'chrom|firefox|msedge' | sort | uniq -c | awk '{printf " %s(x%s)", $2, $1}')
+          echo "[*] browser processes:${procs:- none running}"
+          flags=$(as_root ps -eo args= | grep -oE -- '--remote-debugging-(port|address|pipe)(=[^ ]*)?' | sort -u | tr '\n' ' ')
+          echo "[*] remote-debugging flags: ${flags:-none}"
+          ports=$( { as_root ss -Hltnp 2>/dev/null || true; } | grep -iE 'chrom|firefox|msedge' | awk '{print $4}' | sort -u | tr '\n' ' ')
+          echo "[*] ports a browser listens on: ${ports:-none}"
+          for port in $( { printf '9222\n9223\n9229\n'; echo "$ports" | tr ' ' '\n' | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'; } | sort -un); do
+            v=$( (curl -fsS -m 3 "http://127.0.0.1:${port}/json/version" || wget -qO- -T 3 "http://127.0.0.1:${port}/json/version") 2>/dev/null | grep -oE '"Browser" *: *"[^"]*"' || true)
+            [ -n "$v" ] && echo "[+] DevTools (CDP) on 127.0.0.1:${port}: ${v#*: }"
+          done
+          echo "[*] desktop: DISPLAY sockets $(ls /tmp/.X11-unix 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -S /var/run/docker.sock ]; then
+            echo "[*] docker socket: $(stat -c '%A %U:%G (gid %g)' /var/run/docker.sock)"
+          else
+            echo "[!] no /var/run/docker.sock on the host"
+          fi
+          SH
+
       - name: Run init-paseo-lite.sh over SSH
         env:
           SCRIPT_PATH: bash-scripts/init-paseo-lite.sh
           DEBUG_LOGS: ${{ inputs.debug }}
+          # The agents get the host's Docker (root-equivalent on this machine; GCP keeps it off).
+          PASEO_DOCKER_SOCKET: "1"
           # Same secrets as the paseo-lite run of gcp-bash-script-runner.yaml; only set ones are forwarded.
           SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,ANTHROPIC_,CLAUDE_CODE_,PASEO_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

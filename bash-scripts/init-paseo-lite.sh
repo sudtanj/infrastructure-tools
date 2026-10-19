@@ -102,9 +102,29 @@ CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
 CLAUDE_IDLE_SECS="${PASEO_CLAUDE_IDLE_SECS:-60}"
 CODEX_IDLE_SECS="${PASEO_CODEX_IDLE_SECS:-300}"
 
+# Opt-in: share the host's Docker with the agents (PASEO_DOCKER_SOCKET=1), so they
+# can run any container on the host. That is root-equivalent on this machine.
+PASEO_DOCKER_SOCKET="${PASEO_DOCKER_SOCKET:-0}"
+DOCKER_SOCK="${DOCKER_SOCK:-/var/run/docker.sock}"
+SOCK_ARGS=()
+SOCK_GID=""
+if [ "$PASEO_DOCKER_SOCKET" = "1" ]; then
+  if [ -S "$DOCKER_SOCK" ]; then
+    # The container runs as 1000:1000, so it joins the socket's group instead.
+    SOCK_GID=$(stat -c %g "$DOCKER_SOCK")
+    SOCK_ARGS=(-v "${DOCKER_SOCK}:/var/run/docker.sock" --group-add "$SOCK_GID")
+    case "$(stat -c %a "$DOCKER_SOCK")" in
+      *[67]?) echo "[+] host Docker socket shared with the agents (group ${SOCK_GID})" ;;
+      *) echo "[!] ${DOCKER_SOCK} is not group-writable ($(stat -c %a "$DOCKER_SOCK")); the agents' docker commands will be refused" ;;
+    esac
+  else
+    echo "[!] PASEO_DOCKER_SOCKET=1 but there is no socket at ${DOCKER_SOCK}; not shared"
+  fi
+fi
+
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="4"
+CONFIG_REV="5"
 DNS64_MODE="${DNS64_MODE:-auto}"
 DNS1="${DNS1:-2a00:1098:2b::1}"
 DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
@@ -291,6 +311,7 @@ CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
   "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
+  "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
 RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
@@ -375,6 +396,7 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
   -v "$HOME_VOLUME":/home/paseo \
   -v "$WORKSPACE_VOLUME":/workspace:rw \
+  ${SOCK_ARGS[@]+"${SOCK_ARGS[@]}"} \
   -e PASEO_LISTEN="0.0.0.0:${PASEO_PORT}" \
   -e PASEO_RELAY_ENABLED=true \
   -e PASEO_LOG_CONSOLE_LEVEL=warn \
