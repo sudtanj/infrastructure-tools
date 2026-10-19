@@ -41,6 +41,12 @@ ls -l /dev/net/tun || sudo modprobe tun
 printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' |
   sudo tee /etc/sysctl.d/99-tailscale.conf
 sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+
+# Exit node only, when Docker runs on iptables-legacy ("iptables -V" says
+# legacy): tailscaled here only writes nftables rules, and those can't override
+# Docker's legacy FORWARD DROP policy, so the exit node forwards nothing.
+sudo iptables-legacy -I FORWARD 1 -i tailscale0 -j ACCEPT
+sudo iptables-legacy -I FORWARD 1 -o tailscale0 -j ACCEPT
 ```
 
 Then approve the exit node in the admin console (Machines → Edit route
@@ -103,7 +109,10 @@ runs this image without Compose and adds:
   when the SSH session over Tailscale drops, and a container that does not come
   up is swapped back for the previous one. `OPI_TS_ATTACH=1` follows a running
   deployment; the Orange Pi workflow reconnects and does this on its own.
-- IP forwarding on the host.
+- IP forwarding on the host, loose `rp_filter` where it was strict, and, when
+  Docker or ufw use iptables-legacy with a `FORWARD` DROP policy, rules that let
+  `tailscale0` through it (kept across reboots by `tailscale-docker-forward.service`).
+  Without them the exit node can be selected but reaches nothing.
 - Subnet routes (`OPI_TS_ROUTES`).
 - Extra `tailscaled` flags (`OPI_TS_TAILSCALED_EXTRA_ARGS`, e.g. `--port 8806`
   for a fixed, port-forwarded WireGuard port and direct connections).

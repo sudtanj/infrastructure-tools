@@ -14,7 +14,10 @@
 # writable paths are /tmp (tmpfs, 16 MB), the node state directory (node key and prefs; tailscaled
 # can't run without it) and the LocalAPI socket directory.
 #
-# By default the node advertises itself as an exit node; OPI_TS_ROUTES adds subnet routes.
+# By default the node advertises itself as an exit node; OPI_TS_ROUTES adds subnet routes. For
+# forwarding, the host gets IP forwarding, loose rp_filter, and, when Docker/ufw use
+# iptables-legacy with a FORWARD DROP policy, rules letting tailscale0 through it (the image's
+# tailscaled only writes nftables rules, which can't override a legacy drop).
 #
 # Auth: TAILSCALE_OAUTH_CLIENT_SECRET, the same OAuth client the GitHub workflows here use, is the
 # only credential. A new node logs in with a one-off, non-ephemeral, pre-approved auth key minted
@@ -576,12 +579,93 @@ if [ "$EXIT_NODE" = 1 ] || [ "${#ROUTES[@]}" -gt 0 ]; then
   done
   WANT_SYSCTL+="net.ipv4.ip_forward = 1"$'\n'
   [ -e /proc/sys/net/ipv6/conf/all/forwarding ] && WANT_SYSCTL+="net.ipv6.conf.all.forwarding = 1"$'\n'
+  # Strict reverse path filtering (1) drops forwarded exit node traffic; loose (2) keeps the
+  # spoofing check. The kernel uses the higher of "all" and the interface's own value.
+  if [ "$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || true)" = "1" ] \
+     || grep -qx "net.ipv4.conf.all.rp_filter = 2" "$SYSCTL_CONF" 2>/dev/null; then
+    WANT_SYSCTL+="net.ipv4.conf.all.rp_filter = 2"$'\n'
+  fi
   "${SUDO[@]}" mkdir -p "$(dirname "$SYSCTL_CONF")"
   printf '%s' "$WANT_SYSCTL" | put "$SYSCTL_CONF" 644 && step "wrote ${SYSCTL_CONF}"
   if "${SUDO[@]}" sysctl -q -p "$SYSCTL_CONF" >/dev/null 2>&1; then
     ok "IP forwarding on"
   else
     warn "could not apply ${SYSCTL_CONF}; exit node and subnet routes will not forward"
+  fi
+
+  # tailscaled in the image has no iptables, so it always puts its forward rules in nftables
+  # ("ip filter" FORWARD, the same chain iptables-nft uses). When Docker (or ufw) runs on
+  # iptables-legacy and sets the legacy FORWARD policy to DROP, that drop is a separate hook an
+  # nftables accept can't override: the exit node and subnet routes get selected but forward
+  # nothing. Then the host lets tailscale0 traffic through the legacy FORWARD chain too, with the
+  # same accept tailscaled adds itself (its nftables chain still drops spoofed sources and marks
+  # packets for masquerading). A systemd unit puts the rules back after a reboot.
+  # /proc/net/ip*_tables_names lists legacy tables in use; reading it loads no modules.
+  # sbin is not on a normal user's PATH on Debian
+  sbin() { local d; for d in /usr/sbin /sbin /usr/bin /bin /usr/local/sbin; do [ -x "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }; done; return 1; }
+  FWD_LEGACY=()
+  for pair in "iptables-legacy:/proc/net/ip_tables_names" "ip6tables-legacy:/proc/net/ip6_tables_names"; do
+    names="${pair#*:}"
+    "${SUDO[@]}" grep -qx filter "$names" 2>/dev/null || continue
+    # Without the -legacy name, plain iptables counts only when it is the legacy variant
+    ipt="$(sbin "${pair%%:*}" || sbin "${pair%%-legacy:*}" || true)"
+    [ -n "$ipt" ] && "${SUDO[@]}" "$ipt" -V 2>/dev/null | grep -q legacy || continue
+    "${SUDO[@]}" "$ipt" -w -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP' && FWD_LEGACY+=("$ipt")
+  done
+  FWD_SCRIPT="${ROOT}/forward-rules"
+  FWD_UNIT="/etc/systemd/system/tailscale-docker-forward.service"
+  if [ "${#FWD_LEGACY[@]}" -gt 0 ]; then
+    step "legacy iptables FORWARD policy is DROP (${FWD_LEGACY[*]##*/}); allowing tailscale0 through it"
+    {
+      printf '#!/bin/bash\n'
+      printf '# Written by opi-init-tailscale-docker.sh: let tailscale0 traffic past a legacy iptables\n'
+      printf '# FORWARD DROP policy (Docker/ufw), which tailscaled'"'"'s nftables rules cannot override.\n'
+      printf 'rc=0\n'
+      printf 'for ipt in %s; do\n' "$(printf '%q ' "${FWD_LEGACY[@]}")"
+      printf '  "$ipt" -w -N ts-docker-forward 2>/dev/null || true\n'
+      printf '  "$ipt" -w -F ts-docker-forward || { rc=1; continue; }\n'
+      printf '  "$ipt" -w -A ts-docker-forward -i tailscale0 -j ACCEPT || rc=1\n'
+      printf '  "$ipt" -w -A ts-docker-forward -o tailscale0 -j ACCEPT || rc=1\n'
+      printf '  "$ipt" -w -C FORWARD -j ts-docker-forward 2>/dev/null || "$ipt" -w -I FORWARD 1 -j ts-docker-forward || rc=1\n'
+      printf 'done\n'
+      printf 'exit $rc\n'
+    } | put "$FWD_SCRIPT" 755 || true
+    if [ "$HAS_SYSTEMD" = 1 ]; then
+      printf '%s\n' \
+        '[Unit]' \
+        'Description=Let tailscale0 traffic past a legacy iptables FORWARD DROP policy' \
+        'After=docker.service' \
+        '' \
+        '[Service]' \
+        'Type=oneshot' \
+        'RemainAfterExit=yes' \
+        "ExecStart=/bin/bash ${FWD_SCRIPT}" \
+        '' \
+        '[Install]' \
+        'WantedBy=multi-user.target' | put "$FWD_UNIT" 644 && "${SUDO[@]}" systemctl daemon-reload || true
+      "${SUDO[@]}" systemctl enable --quiet tailscale-docker-forward.service 2>/dev/null \
+        || warn "could not enable tailscale-docker-forward.service; the forward rules won't survive a reboot"
+    else
+      warn "no systemd: the forward rules won't survive a reboot (run ${FWD_SCRIPT} at boot)"
+    fi
+    if "${SUDO[@]}" bash "$FWD_SCRIPT"; then
+      ok "tailscale0 forwarding allowed in legacy iptables"
+    else
+      warn "could not add the legacy iptables forward rules; the exit node and subnet routes may forward nothing"
+    fi
+  elif [ -f "$FWD_SCRIPT" ]; then
+    # The rules stay harmless where they are; re-run them so a changed host keeps them current
+    "${SUDO[@]}" bash "$FWD_SCRIPT" >/dev/null 2>&1 || true
+  fi
+  # Other forward-hook chains with a drop policy (Docker's nftables backend, firewalld, a custom
+  # ruleset) also win over tailscaled's accept. Those are left alone and only reported.
+  if NFT="$(sbin nft)"; then
+    FWD_NFT_DROP=$("${SUDO[@]}" "$NFT" list chains 2>/dev/null \
+      | awk '/^table /{t=$2" "$3} /hook forward/ && /policy drop/ && t!="ip filter" && t!="ip6 filter"{print t}' \
+      | sort -u | paste -sd, - || true)
+    if [ -n "$FWD_NFT_DROP" ]; then
+      warn "nftables forward chains with policy drop in: ${FWD_NFT_DROP}; if the exit node forwards nothing, allow iifname/oifname tailscale0 there"
+    fi
   fi
 fi
 
