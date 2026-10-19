@@ -16,6 +16,7 @@ on:
           - init-paseo-codex
           - init-paseo-lite
           - init-tailscale
+          - test-codex-url
           - upsert-github-runner
           - optimize-vm
           - debug-cloud-init
