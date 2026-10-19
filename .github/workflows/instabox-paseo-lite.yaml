@@ -448,6 +448,19 @@ jobs:
           else
             echo "[!] Codex: could not add the chrome-devtools MCP"
           fi
+
+          # End to end, as the agents run: host Docker from inside the container, then Claude
+          # Code starting the MCP server and reaching the browser through it.
+          if v=$(docker exec paseo-lite docker version --format '{{.Server.Version}}' 2>&1); then
+            echo "[+] agents reach the host Docker (engine ${v})"
+          else
+            echo "[!] agents cannot use the host Docker: $(echo "$v" | tail -n 1)"
+          fi
+          st=$(timeout 180 docker exec -e HOME=/home/paseo paseo-lite claude mcp list 2>&1 | grep -i 'chrome-devtools' | head -n 1)
+          case "$st" in
+            *onnected*) echo "[+] Claude Code: chrome-devtools MCP connected" ;;
+            *) echo "[!] Claude Code: chrome-devtools MCP not connected: ${st:-no status}" ;;
+          esac
           SH
 
       - name: Apply mode (${{ inputs.mode }})
