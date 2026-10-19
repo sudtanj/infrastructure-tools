@@ -22,8 +22,13 @@ ARG INSTALL_CLAUDE=1
 ARG INSTALL_CODEX=1
 # The native Claude binary needs libgcc/libstdc++ on musl to run its installer.
 RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ ripgrep
+# The download URL below never changes for a rolling release, so the layer
+# cache would keep an old daemon forever. ADD re-fetches this checksum on
+# every build: a new release changes it and invalidates the download.
+ADD https://github.com/sudtanj/paseo-code-rust/releases/download/${PASEO_LITE_RELEASE}/paseo-lite-x86_64-linux-musl.sha256 /tmp/paseo-lite.sha256
 RUN mkdir -p /out \
  && curl -fsSL -o /out/paseo-lite "https://github.com/sudtanj/paseo-code-rust/releases/download/${PASEO_LITE_RELEASE}/paseo-lite-x86_64-linux-musl" \
+ && echo "$(cut -d' ' -f1 /tmp/paseo-lite.sha256)  /out/paseo-lite" | sha256sum -c - \
  && chmod 755 /out/paseo-lite \
  && case "${TARGETARCH:-amd64}" in \
       amd64) arch=x86_64 ;; \
