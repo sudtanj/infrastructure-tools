@@ -22,7 +22,7 @@ changing the image name.
 | Codex processes | one `codex app-server` per agent | **one shared** app-server for every project; exits when idle |
 | Claude processes | one per agent, alive for the agent's life | started per prompt, kept warm 90 s, then released; max 3 at once (`PASEO_CLAUDE_MAX_LIVE`) |
 | Relay / pairing | Paseo relay | same Paseo relay (`relay.paseo.sh`), same E2EE pairing link/QR |
-| UI | full Paseo web UI | built-in lightweight web UI at `:6768`; official Paseo apps via relay for the core agent flow (best-effort, see the [paseo-lite README](https://github.com/sudtanj/paseo-code-rust#protocol-compatibility)) |
+| UI | full Paseo web UI | password-protected pairing page (QR only) at `:6768`; official Paseo apps via relay for the core agent flow (best-effort, see the [paseo-lite README](https://github.com/sudtanj/paseo-code-rust#protocol-compatibility)) |
 
 Idle cost is the daemon alone: no agent process runs until you send a
 prompt, and adding projects costs nothing until an agent runs a turn.
@@ -46,7 +46,8 @@ docker compose -f docker-compose.hub.yml up -d    # or pull the published image
 docker compose logs paseo-lite                    # pairing QR + link (relay)
 ```
 
-The web UI is at `http://<host>:6768`. The current directory is mounted
+A password-protected pairing page (QR code only, needs `PASEO_PASSWORD`) is
+at `http://<host>:6768`. The current directory is mounted
 at `/workspace` for agents to work in. `/home/paseo` (paseo-lite state and
 pairing key, `~/.claude`, `~/.codex`) persists in the `paseo-home` volume.
 
