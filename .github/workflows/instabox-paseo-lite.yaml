@@ -24,12 +24,15 @@ name: "Deploy paseo-lite on Instabox"
 #   always-on: unpublishes the port and asks for no idle pause (`auto-suspend 0`), honoured only
 #     with manual lifecycle. Without it, uncomment the schedule below for a best-effort keep-alive:
 #     a no-op command every 20 minutes (GitHub may delay scheduled runs).
+#   destroy: deletes the machine (disk, workspace, agent logins and all) and every other machine
+#     this workflow created (metadata app=paseo-lite). Type the machine name in confirm_destroy.
+#     Not undoable. Your Instabox API keys and snapshots are left alone.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "wake: just start the paused machine. on-demand: deploy, sleep when idle. always-on: deploy, never pause"
+        description: "wake: just start the paused machine. on-demand: deploy, sleep when idle. always-on: deploy, never pause. destroy: delete the machines"
         required: false
         default: "on-demand"
         type: choice
@@ -37,6 +40,12 @@ on:
           - on-demand
           - wake
           - always-on
+          - destroy
+      confirm_destroy:
+        description: "destroy only: type the machine name to confirm (e.g. paseo-lite)"
+        required: false
+        default: ""
+        type: string
       machine_name:
         description: "Instabox machine name (blank: repo variable INSTABOX_MACHINE_NAME, else paseo-lite)"
         required: false
@@ -96,9 +105,72 @@ jobs:
           instabox exec "$MACHINE_NAME" --timeout 60 -- true
           echo "[+] machine is up; it pauses again after 30 idle minutes"
 
+  destroy:
+    name: "Destroy"
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'destroy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: instabox-paseo-lite-${{ inputs.machine_name || vars.INSTABOX_MACHINE_NAME || 'paseo-lite' }}
+      cancel-in-progress: false
+    # Same approval gate as a deploy.
+    environment:
+      name: "approve-instabox-paseo-lite"
+    steps:
+      - name: Confirm
+        env:
+          CONFIRM: ${{ inputs.confirm_destroy }}
+        run: |
+          [ -n "${INSTABOX_API_KEY:-}" ] || { echo "::error::Missing secret: INSTABOX_API_KEY"; exit 1; }
+          if [ "$CONFIRM" != "$MACHINE_NAME" ]; then
+            echo "::error::confirm_destroy must be the machine name (${MACHINE_NAME}); nothing was deleted"
+            exit 1
+          fi
+          echo "[*] confirmed: destroying ${MACHINE_NAME} and every machine with app=paseo-lite"
+
+      - name: Install instabox CLI
+        run: |
+          set -euo pipefail
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Delete the machines
+        env:
+          PUBLIC_PORT: ${{ vars.INSTABOX_PUBLIC_PORT || '16768' }}
+        run: |
+          set -euo pipefail
+          # The named machine, plus any other this workflow created (it tags them app=paseo-lite).
+          tagged=$(instabox ls --meta app=paseo-lite --json 2>/dev/null \
+            | jq -r '(if type == "array" then . else (.machines // .sandboxes // .items // []) end)[] | .name // .id // empty' || true)
+          targets=$(printf '%s\n%s\n' "$MACHINE_NAME" "$tagged" | awk 'NF && !seen[$0]++')
+          failed=0
+          while IFS= read -r m; do
+            if ! instabox get "$m" --json >/dev/null 2>&1; then
+              echo "[*] ${m}: not found (already gone)"
+              continue
+            fi
+            # Close the public URL first, so nothing can reach the machine while it is deleted.
+            instabox port unpublish "$m" "$PUBLIC_PORT" >/dev/null 2>&1 || true
+            if err=$(instabox rm "$m" 2>&1 >/dev/null); then
+              echo "[+] ${m}: deleted"
+            else
+              echo "::error::${m}: could not delete: ${err}"
+              failed=1
+            fi
+          done <<< "$targets"
+          # Names only: the plain listing could show addresses, and this log is public.
+          left=$(instabox ls --meta app=paseo-lite --json 2>/dev/null \
+            | jq -r '(if type == "array" then . else (.machines // .sandboxes // .items // []) end)[] | .name // .id // empty' \
+            | paste -sd' ' - || true)
+          echo "[*] machines with app=paseo-lite left: ${left:-none}"
+          echo "[*] left alone: your Instabox API keys (revoke INSTABOX_API_KEY with \`instabox keys rm\` if you are done),"
+          echo "    snapshots, and the paseo-wake Cloudflare Worker (delete it in the Cloudflare dashboard if you deployed it)"
+          exit "$failed"
+
   deploy:
     name: "Deploy paseo-lite"
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'wake'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'wake' && inputs.mode != 'destroy'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
