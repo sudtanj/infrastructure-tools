@@ -194,7 +194,7 @@ jobs:
       - name: Inspect host browser and Docker
         run: |
           set -euo pipefail
-          template=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.template // .templateId // .templateName // "unknown"' || echo unknown)
+          template=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '(.template // .templateId // "unknown") | if type == "object" then (.name // .id // "unknown") else . end' || echo unknown)
           echo "[*] template: ${template}"
           ssh -T -o BatchMode=yes "$SSH_ALIAS" bash -s <<'SH' | perl "${RUNNER_TEMP}/sanitize.pl"
           as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@" 2>/dev/null || "$@"; fi; }
@@ -335,6 +335,120 @@ jobs:
           echo "---- diagnostic tail (sanitized) ----"
           perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -60 || true
           exit "$RC"
+
+      # The host's Chromium as a service, on the machine's desktop (watch it, or log in to sites,
+      # in the Instabox desktop view) or headless when there is none, with DevTools on 127.0.0.1
+      # only. Claude Code and Codex get the chrome-devtools MCP server for it, run in a throwaway
+      # Node container on the host Docker since the paseo-lite image has no Node.
+      - name: Host browser for the agents
+        env:
+          CDP_PORT: "9222"
+          MCP_IMAGE: node:22-alpine
+        run: |
+          set -euo pipefail
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" "CDP_PORT=${CDP_PORT} MCP_IMAGE=${MCP_IMAGE} bash -s" <<'SH' | perl "${RUNNER_TEMP}/sanitize.pl"
+          set -uo pipefail
+          fetch() { curl -fsS -m 3 "$1" 2>/dev/null || wget -qO- -T 3 "$1" 2>/dev/null; }
+          cdp_version() { fetch "http://127.0.0.1:${CDP_PORT}/json/version" | grep -oE '"Browser" *: *"[^"]*"' | sed 's/.*: *//'; }
+          BROWSER=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
+          [ -n "$BROWSER" ] || { echo "[x] no Chromium or Chrome on the host"; exit 1; }
+          PROFILE="${HOME}/.config/paseo-chromium"
+          mkdir -p "$PROFILE"
+
+          # install_file DEST MODE: stdin -> DEST (as root) only when it changed; prints "changed".
+          install_file() {
+            tmp=$(mktemp); cat > "$tmp"
+            if ! sudo -n cmp -s "$tmp" "$1" 2>/dev/null; then sudo -n install -m "$2" "$tmp" "$1" && echo changed; fi
+            rm -f "$tmp"
+          }
+          changed=$(install_file /usr/local/bin/paseo-browser 755 <<EOF
+          #!/bin/sh
+          # Managed by instabox-paseo-lite.yaml: Chromium for the paseo-lite agents, DevTools on 127.0.0.1 only.
+          set -- --remote-debugging-address=127.0.0.1 --remote-debugging-port=${CDP_PORT} --user-data-dir=${PROFILE} --no-first-run --no-default-browser-check --password-store=basic
+          if [ -S /tmp/.X11-unix/X1 ] && [ "\${PASEO_BROWSER_HEADLESS:-0}" != 1 ]; then
+            export DISPLAY=:1
+          else
+            set -- "\$@" --headless=new
+          fi
+          exec ${BROWSER} "\$@"
+          EOF
+          )
+
+          if [ -d /run/systemd/system ]; then
+            changed="${changed}$(install_file /etc/systemd/system/paseo-browser.service 644 <<EOF
+          [Unit]
+          Description=Chromium for the paseo-lite agents (DevTools on 127.0.0.1:${CDP_PORT})
+          After=network.target
+
+          [Service]
+          User=$(id -un)
+          Environment=HOME=${HOME}
+          ExecStart=/usr/local/bin/paseo-browser
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          )"
+            sudo -n systemctl daemon-reload
+            sudo -n systemctl enable paseo-browser >/dev/null 2>&1
+            # Restarting closes its tabs, so only when the setup changed or it is down.
+            if [ -n "$changed" ] || ! systemctl is-active -q paseo-browser; then sudo -n systemctl restart paseo-browser; fi
+            restart_headless() {
+              sudo -n mkdir -p /etc/systemd/system/paseo-browser.service.d
+              printf '[Service]\nEnvironment=PASEO_BROWSER_HEADLESS=1\n' | install_file /etc/systemd/system/paseo-browser.service.d/headless.conf 644 >/dev/null
+              sudo -n systemctl daemon-reload; sudo -n systemctl restart paseo-browser
+            }
+          else
+            # No systemd: started now, but not again after the machine is stopped and started.
+            if [ -n "$changed" ] || [ -z "$(cdp_version)" ]; then
+              pkill -f -- "--user-data-dir=${PROFILE}" 2>/dev/null; sleep 1
+              setsid nohup /usr/local/bin/paseo-browser >/dev/null 2>&1 < /dev/null &
+            fi
+            restart_headless() { pkill -f -- "--user-data-dir=${PROFILE}" 2>/dev/null; sleep 1; PASEO_BROWSER_HEADLESS=1 setsid nohup /usr/local/bin/paseo-browser >/dev/null 2>&1 < /dev/null & }
+            echo "[!] no systemd: the browser is not restarted after a machine stop/start (redeploy then)"
+          fi
+
+          wait_cdp() { for _ in $(seq 1 20); do v=$(cdp_version); [ -n "$v" ] && { echo "$v"; return 0; }; sleep 1; done; return 1; }
+          if v=$(wait_cdp); then
+            echo "[+] browser up: ${v} on 127.0.0.1:${CDP_PORT} ($([ -S /tmp/.X11-unix/X1 ] && [ ! -f /etc/systemd/system/paseo-browser.service.d/headless.conf ] && echo "on the desktop" || echo headless))"
+          else
+            echo "[!] no DevTools answer on the desktop, retrying headless"
+            restart_headless
+            if v=$(wait_cdp); then echo "[+] browser up: ${v} on 127.0.0.1:${CDP_PORT} (headless)"
+            else
+              echo "[x] the browser did not start"
+              { sudo -n journalctl -u paseo-browser -n 20 --no-pager 2>/dev/null || true; } | sed 's/^/    /'
+              exit 1
+            fi
+          fi
+
+          # MCP server for the agents: pull the image and fill a persistent npm cache now, so the
+          # agents' first start is fast.
+          docker pull -q "$MCP_IMAGE" >/dev/null
+          docker run --rm -v paseo-npm-cache:/root/.npm "$MCP_IMAGE" npx -y chrome-devtools-mcp@latest --help >/dev/null 2>&1 \
+            || echo "[!] could not pre-install chrome-devtools-mcp (the agents will fetch it on first use)"
+          MCP_CMD="docker run -i --rm --init --network host -v paseo-npm-cache:/root/.npm ${MCP_IMAGE} npx -y chrome-devtools-mcp@latest --browserUrl=http://127.0.0.1:${CDP_PORT}"
+
+          if docker exec -u 1000:1000 -e HOME=/home/paseo paseo-lite sh -c \
+              "claude mcp remove -s user chrome-devtools >/dev/null 2>&1; claude mcp add -s user chrome-devtools -- ${MCP_CMD}" >/dev/null 2>&1; then
+            echo "[+] Claude Code: chrome-devtools MCP added"
+          else
+            echo "[!] Claude Code: could not add the chrome-devtools MCP"
+          fi
+          # init-paseo-lite.sh rewrites config.toml on every deploy, so append once per deploy.
+          args=$(printf '"%s", ' ${MCP_CMD#docker }); args="[${args%, }]"
+          if docker exec -u 0 paseo-lite sh -c '
+              f=/home/paseo/.codex/config.toml
+              grep -q "^\[mcp_servers.chrome-devtools\]" "$f" 2>/dev/null && exit 0
+              printf "\n[mcp_servers.chrome-devtools]\ncommand = \"docker\"\nargs = %s\nstartup_timeout_sec = 120\n" "$1" >> "$f"
+              chown 1000:1000 "$f"' sh "$args"; then
+            echo "[+] Codex: chrome-devtools MCP added"
+          else
+            echo "[!] Codex: could not add the chrome-devtools MCP"
+          fi
+          SH
 
       - name: Apply mode (${{ inputs.mode }})
         env:
