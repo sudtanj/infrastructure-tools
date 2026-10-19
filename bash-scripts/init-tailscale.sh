@@ -9,6 +9,19 @@
 #          on:   always make sure DNS64 works
 #          off:  never touch DNS
 #      TS_DNS64_SERVERS (default: Google public DNS64 resolvers)
+#      TS_EXIT_NODE = 1 (default) | 0
+#          1: enable IP forwarding and advertise this node as a tailnet exit node
+#             (approve it by hand in the admin console: Machines > Edit route settings)
+#          0: stop advertising it (forwarding sysctls are left alone)
+#      TS_ACCEPT_ROUTES = 1 (default) | 0
+#          1: use subnet routes other nodes advertise (e.g. a home LAN behind the Orange Pi).
+#             Turned back off if an accepted route would capture the VPC gateway or metadata server.
+#          0: ignore them, reach peers by their 100.x address only
+#      TS_PING_PEER (or TAILSCALE_PING_PEER) = peers that must answer, comma separated: a tailnet IP or
+#          name pings it, host:port opens a TCP connection (e.g. 100.64.0.5:20129 for a router), and an
+#          http(s):// URL must get an HTTP response from curl (e.g. http://100.64.0.5:20129/v1/models).
+#          CODEX_BASE_URL, when set, is checked the same way (its /models must answer over HTTP).
+#          Neither set: up to 3 online peers are pinged and a failure only warns.
 
 set -euo pipefail
 
@@ -36,7 +49,19 @@ if [ -z "$TS_AUTHKEY" ] && [ -n "${TS_AUTHKEY_FILE:-}" ] && [ -r "$TS_AUTHKEY_FI
   TS_AUTHKEY=$(head -n1 "$TS_AUTHKEY_FILE" | tr -d '[:space:]')
 fi
 TS_CHECK_MINUTES="${TS_CHECK_MINUTES:-720}"
+TS_PING_PEER="${TS_PING_PEER:-${TAILSCALE_PING_PEER:-}}"
 STAMP="${TS_CACHE_DIR}/.last-check"
+TS_SYSCTL_CONF="/etc/sysctl.d/99-tailscale.conf"
+case "${TS_EXIT_NODE:-1}" in
+  1|true|yes|on)  TS_EXIT_NODE=1; TS_EXIT_BOOL=true ;;
+  0|false|no|off) TS_EXIT_NODE=0; TS_EXIT_BOOL=false ;;
+  *) echo "[x] TS_EXIT_NODE must be 1 or 0 (got '${TS_EXIT_NODE}')" >&2; exit 1 ;;
+esac
+case "${TS_ACCEPT_ROUTES:-1}" in
+  1|true|yes|on)  TS_ACCEPT_ROUTES=1; TS_ACCEPT_BOOL=true ;;
+  0|false|no|off) TS_ACCEPT_ROUTES=0; TS_ACCEPT_BOOL=false ;;
+  *) echo "[x] TS_ACCEPT_ROUTES must be 1 or 0 (got '${TS_ACCEPT_ROUTES}')" >&2; exit 1 ;;
+esac
 
 # Reuse an existing install before falling back to the default
 if [ -z "$TS_BIN_DIR" ]; then
@@ -342,6 +367,38 @@ $SUDO mkdir -p "$TS_STATE_DIR" /run/tailscale
 $SUDO chmod 700 "$TS_STATE_DIR"
 $SUDO chmod 755 /run/tailscale
 
+# ---------- IP forwarding (exit node) ----------
+# An exit node routes other devices' traffic, so the kernel must forward packets. tailscaled masquerades it
+# behind this VM's own address, so GCE "IP forwarding" on the instance is not needed.
+# IPv6 forwarding=1 makes the kernel ignore router advertisements on interfaces with accept_ra=1, which
+# drops the IPv6 default route (fatal on an IPv6-only VM), so those interfaces are switched to accept_ra=2 first.
+if [ "$TS_EXIT_NODE" = "1" ]; then
+  IFACE=$(ip -o route get 8.8.8.8 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' || true)
+  [ -z "$IFACE" ] && IFACE=$(ip -o -6 route get 2001:4860:4860::8888 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' || true)
+  WANT_SYSCTL=""
+  for k in default ${IFACE:+"$IFACE"}; do
+    # 0 = RAs disabled on purpose, 2 = already fine; only 1 breaks once forwarding is on
+    if [ "$(sysctl -n "net.ipv6.conf.${k}.accept_ra" 2>/dev/null || true)" = "1" ] \
+       || grep -qx "net.ipv6.conf.${k}.accept_ra = 2" "$TS_SYSCTL_CONF" 2>/dev/null; then
+      WANT_SYSCTL+="net.ipv6.conf.${k}.accept_ra = 2"$'\n'
+    fi
+  done
+  WANT_SYSCTL+="net.ipv4.ip_forward = 1"$'\n'
+  [ -e /proc/sys/net/ipv6/conf/all/forwarding ] && WANT_SYSCTL+="net.ipv6.conf.all.forwarding = 1"$'\n'
+
+  if ! printf '%s' "$WANT_SYSCTL" | cmp -s - "$TS_SYSCTL_CONF" 2>/dev/null; then
+    echo "[>] writing ${TS_SYSCTL_CONF}"
+    $SUDO mkdir -p "$(dirname "$TS_SYSCTL_CONF")"
+    printf '%s' "$WANT_SYSCTL" | $SUDO tee "$TS_SYSCTL_CONF" >/dev/null
+  fi
+  # Applied in file order: accept_ra before forwarding
+  if $SUDO sysctl -q -p "$TS_SYSCTL_CONF" >/dev/null 2>&1; then
+    echo "[+] IP forwarding enabled for exit node"
+  else
+    echo "[!] could not apply ${TS_SYSCTL_CONF}" >&2
+  fi
+fi
+
 # ---------- systemd unit (rewritten only if content differs) ----------
 WANT_UNIT=$(cat <<UNIT
 [Unit]
@@ -413,6 +470,12 @@ TS="${TS_BIN_DIR}/tailscale"
 TS_IP=$($SUDO "$TS" --socket="$TS_SOCKET" ip -4 2>/dev/null | head -1 || true)
 if [ -n "$TS_IP" ] && [ -z "${TS_FORCE_REAUTH:-}" ]; then
   echo "[+] already authenticated: ${TS_IP} (set TS_FORCE_REAUTH=1 to re-register with the key)"
+  # `set` changes only these prefs (unlike `up`, which needs every non-default flag repeated)
+  if $SUDO "$TS" --socket="$TS_SOCKET" set --advertise-exit-node="$TS_EXIT_BOOL" --accept-routes="$TS_ACCEPT_BOOL"; then
+    echo "[+] advertise exit node: ${TS_EXIT_BOOL}, accept routes: ${TS_ACCEPT_BOOL}"
+  else
+    echo "[!] could not set --advertise-exit-node=${TS_EXIT_BOOL} --accept-routes=${TS_ACCEPT_BOOL}" >&2
+  fi
 elif [ -z "$TS_AUTHKEY" ]; then
   echo "[!] not authenticated and TS_AUTHKEY not set" >&2
 else
@@ -424,7 +487,8 @@ else
     --hostname="$TS_HOSTNAME" \
     --advertise-tags=tag:home \
     --accept-dns=true \
-    --accept-routes=false \
+    --accept-routes="$TS_ACCEPT_BOOL" \
+    --advertise-exit-node="$TS_EXIT_BOOL" \
     --timeout=60s \
     ${TS_FORCE_REAUTH:+--force-reauth} \
     ${TS_EXTRA_ARGS:-}
@@ -440,7 +504,7 @@ fi
 
 # ---------- verification ----------
 # Fails the script (exit 1) if Tailscale is not healthy.
-# Optional: TS_PING_PEER=<tailscale-ip-or-name> also pings a peer end to end.
+# Also checks that tailnet peers answer through tailscale0 (TS_PING_PEER, or auto-picked online peers).
 echo "[>] verifying tailscale health"
 FAIL=0
 WARN=0
@@ -532,13 +596,110 @@ else
   warn "MemoryMax not applied (cgroup memory controller unavailable?)"
 fi
 
-# 9. Optional end-to-end peer ping
-if [ -n "${TS_PING_PEER:-}" ]; then
-  if $SUDO "$TS" --socket="$TS_SOCKET" ping -c 2 --timeout 5s "$TS_PING_PEER" >/dev/null 2>&1; then
-    pass "ping to ${TS_PING_PEER} succeeded"
+# 9. Exit node: forwarding on
+EXIT_STATE="disabled (TS_EXIT_NODE=0)"
+if [ "$TS_EXIT_NODE" = "1" ]; then
+  if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" = "1" ]; then
+    pass "IPv4 forwarding is on"
   else
-    bad "ping to ${TS_PING_PEER} failed"
+    bad "net.ipv4.ip_forward is not 1; the exit node cannot route traffic"
   fi
+  case " ${TS_EXTRA_ARGS:-} " in
+    *--netfilter-mode=off*) warn "TS_EXTRA_ARGS has --netfilter-mode=off: exit node traffic is not NATed unless you add masquerade rules yourself" ;;
+  esac
+  # Approval is done by hand in the admin console (Edit route settings), so it is not checked here
+  EXIT_STATE="advertised (approve it in the admin console)"
+fi
+
+# 10. Subnet routes: accepted ones must not capture the VM's own network
+# tailscaled's table 52 is looked up before the main table, so a peer advertising a range that
+# covers the VPC gateway or the metadata server would cut the VM off. Turned back off then.
+ROUTES_STATE="ignored (TS_ACCEPT_ROUTES=0)"
+if [ "$TS_ACCEPT_ROUTES" = "1" ]; then
+  sleep 1   # give tailscaled a moment to install the routes after `set`/`up`
+  GW=$(ip -4 route show table main default 2>/dev/null | sed -n 's/.* via \([0-9.]*\).*/\1/p' | head -1 || true)
+  CAPTURED=""
+  for addr in 169.254.169.254 ${GW:+"$GW"}; do
+    if ip -o route get "$addr" 2>/dev/null | grep -q ' dev tailscale0'; then CAPTURED+="${addr} "; fi
+  done
+  if [ -n "$CAPTURED" ]; then
+    warn "an accepted subnet route captures ${CAPTURED% } (VPC gateway/metadata); turning accept-routes back off"
+    $SUDO "$TS" --socket="$TS_SOCKET" set --accept-routes=false \
+      || bad "could not turn accept-routes off; the VM may lose its VPC network"
+    ROUTES_STATE="turned off (an advertised route overlaps the VPC)"
+  else
+    pass "subnet routes accepted (VPC gateway and metadata server still on the main route)"
+    ROUTES_STATE="accepted (approve them on the advertising node)"
+  fi
+fi
+
+# 11. Peer reachability, as real traffic through tailscale0 (ICMP, or TCP for host:port)
+# `tailscale ping` alone only proves the WireGuard path: it answers even when the tailnet ACL or the
+# peer's firewall drops everything, so it is only used to tell those two failures apart.
+# Peers named in TS_PING_PEER must answer (failure fails the run), and so must CODEX_BASE_URL when
+# set (the runner forwards the CODEX_ secrets to every script): its /models has to give an HTTP
+# answer, so Codex in paseo-lite can reach its endpoint. With neither, up to 3 online peers are
+# picked from `tailscale status` and a failure is only a warning.
+PING_STATE="no peers checked"
+PEER_STRICT=1
+PEERS=()
+read -ra PEERS <<< "$(printf '%s' "$TS_PING_PEER" | tr ',' ' ')"
+CODEX_CHECK_URL=""
+if [ -n "${CODEX_BASE_URL:-}" ]; then
+  CODEX_CHECK_URL="${CODEX_BASE_URL%/}/models"
+  PEERS+=("$CODEX_CHECK_URL")
+fi
+if [ "${#PEERS[@]}" -eq 0 ]; then
+  PEER_STRICT=0
+  # Line 1 is this node; peers are "100.x.y.z  name  owner  os  state"
+  mapfile -t PEERS < <($SUDO "$TS" --socket="$TS_SOCKET" status 2>/dev/null \
+    | tail -n +2 | grep -E '^100\.' | grep -vw offline | awk '{print $1}' | head -3 || true)
+  if [ "${#PEERS[@]}" -eq 0 ]; then warn "no online tailnet peers visible (none online, or the ACL hides them from tag:home)"; fi
+fi
+peer_fail() { if [ "$PEER_STRICT" = "1" ]; then bad "$@"; else warn "$@"; fi; }
+PEER_OK=0
+for peer in "${PEERS[@]}"; do
+  host="$peer" port="" url=""
+  # scheme://[user:pass@]host[:port]/...
+  if [[ "$peer" =~ ^https?://([^@/]*@)?([^/:]+)(:([0-9]+))? ]]; then
+    url="$peer"; host="${BASH_REMATCH[2]}"; port="${BASH_REMATCH[4]}"
+  # host:port (one colon only, so an IPv6 address is never split)
+  elif [[ "$peer" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
+  fi
+  if [ -n "$url" ]; then
+    # Any HTTP status passes (a 401 still proves the service answers); 000 = no HTTP response
+    # Only host[:port] is printed: the URL may carry credentials (and CODEX_BASE_URL is a secret)
+    what="curl ${host}${port:+:$port}"
+    if [ "$url" = "$CODEX_CHECK_URL" ]; then what="curl CODEX_BASE_URL (${host}${port:+:$port})/models"; fi
+    code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$url" 2>/dev/null || true)
+    if [ -n "$code" ] && [ "$code" != "000" ]; then ok_peer=1; what+=" (HTTP ${code})"; else ok_peer=0; fi
+  elif [ -n "$port" ]; then
+    what="TCP ${host}:${port}"
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null && ok_peer=1 || ok_peer=0
+  elif command -v ping >/dev/null 2>&1; then
+    what="ping ${host}"
+    $SUDO ping -c 2 -W 3 "$host" >/dev/null 2>&1 && ok_peer=1 || ok_peer=0
+  else
+    what="tailscale ping ${host} (no ping binary: path only, ACL not checked)"
+    $SUDO "$TS" --socket="$TS_SOCKET" ping -c 2 --timeout 5s "$host" >/dev/null 2>&1 && ok_peer=1 || ok_peer=0
+  fi
+  if [ "$ok_peer" = "1" ]; then
+    pass "${what} succeeded"
+    PEER_OK=$((PEER_OK + 1))
+    continue
+  fi
+  # Why: not routed into the tailnet, no WireGuard path, or dropped by ACL/firewall
+  if [[ "$host" =~ ^[0-9.]+$ ]] && ! ip -o route get "$host" 2>/dev/null | grep -q ' dev tailscale0'; then
+    peer_fail "${what} failed: ${host} is not routed via tailscale0 (a subnet IP whose route is not advertised, approved, or accepted here?)"
+  elif $SUDO "$TS" --socket="$TS_SOCKET" ping -c 1 --timeout 5s "$host" >/dev/null 2>&1; then
+    peer_fail "${what} failed, but tailscale ping works: dropped by the tailnet ACL (tag:home -> ${host}${port:+:$port}) or the peer's firewall/listen address"
+  else
+    peer_fail "${what} failed and tailscale ping fails too: no path to the peer (offline, or blocked UDP/DERP)"
+  fi
+done
+if [ "${#PEERS[@]}" -gt 0 ]; then
+  PING_STATE="${PEER_OK}/${#PEERS[@]} reachable ($([ "$PEER_STRICT" = "1" ] && echo "TS_PING_PEER/CODEX_BASE_URL" || echo "auto-picked"))"
 fi
 
 if [ "$FAIL" -ne 0 ]; then
@@ -588,6 +749,9 @@ echo "[>] summary"
 echo "[*] action: ${ACTION}"
 echo "[*] version: $(installed_version)"
 echo "[*] dns64: ${DNS64_STATE}"
+echo "[*] exit node: ${EXIT_STATE}"
+echo "[*] subnet routes: ${ROUTES_STATE}"
+echo "[*] peers: ${PING_STATE}"
 if ip link show tailscale0 >/dev/null 2>&1; then
   echo "[*] interface: tailscale0 present"
 else

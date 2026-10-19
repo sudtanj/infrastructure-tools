@@ -541,6 +541,34 @@ if [ "$INIT_DEBUG" = "1" ]; then
   docker logs --tail 15 "$CONTAINER_NAME" 2>&1 | redact | sed 's/^/    | /' || true
 fi
 
+# --- Codex endpoint reachability (never fails the run) ---
+# The container uses --network=host, so curl on the host takes the same route Codex does (tailnet
+# and subnet routes included). GET <base>/models: any HTTP status proves the endpoint answers.
+# The key goes in on stdin (curl -K -) so it never shows in ps; only the URL's host is printed.
+if [ -n "$CODEX_BASE_URL" ] && command -v curl >/dev/null 2>&1; then
+  C_HOST=$(url_host "$CODEX_BASE_URL")
+  C_RC=0
+  C_CODE=$({ [ -n "$CODEX_API_KEY" ] && printf 'header = "Authorization: Bearer %s"\n' "$CODEX_API_KEY"; true; } \
+    | curl -s -o /dev/null -m 10 -w '%{http_code}' -K - "${CODEX_BASE_URL%/}/models" 2>/dev/null) || C_RC=$?
+  case "${C_CODE:-000}" in
+    2??)     echo "[+] Codex endpoint ${C_HOST} answers (HTTP ${C_CODE})" ;;
+    401|403) echo "[!] Codex endpoint ${C_HOST} answers but rejects CODEX_API_KEY (HTTP ${C_CODE})" >&2 ;;
+    000)
+      case "$C_RC" in
+        6)  C_WHY="name does not resolve (MagicDNS names fail with DNS64; use the 100.x or LAN IP)" ;;
+        7)  C_WHY="connection refused (nothing listening on that address and port?)" ;;
+        28) C_WHY="timed out (not routed into the tailnet, or dropped by the tailnet ACL / peer firewall)" ;;
+        *)  C_WHY="curl exit ${C_RC}" ;;
+      esac
+      C_ROUTE=""
+      if [[ "$C_HOST" =~ ^[0-9.]+$ ]]; then
+        C_ROUTE=$(ip -o route get "$C_HOST" 2>/dev/null | grep -q ' dev tailscale0' && echo ", routed via tailscale0" || echo ", NOT routed via tailscale0")
+      fi
+      echo "[!] Codex endpoint ${C_HOST} unreachable: ${C_WHY}${C_ROUTE}; Codex prompts will fail" >&2 ;;
+    *)       echo "[+] Codex endpoint ${C_HOST} answers (HTTP ${C_CODE}, no /models there)" ;;
+  esac
+fi
+
 # The pairing link is a credential for the relay - never print it in CI logs.
 echo "[*] pair a device on the VM: docker exec ${CONTAINER_NAME} paseo-lite pair"
 echo "[+] init done"

@@ -273,7 +273,7 @@ jobs:
           # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for BYOK).
           # GH_USERNAME / GH_EMAIL set the global git identity inside the paseo-lite container.
           # DOZZLE_ forwards DOZZLE_PASSWORD (and optional overrides) to init-dozzle.sh.
-          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_"
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -354,6 +354,7 @@ jobs:
           N8N_VERSION_NOTIFICATIONS_ENABLED: ${{ secrets.N8N_VERSION_NOTIFICATIONS_ENABLED }}
           N8N_VOLUME_NAME: ${{ secrets.N8N_VOLUME_NAME }}
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TAILSCALE_PING_PEER: ${{ secrets.TAILSCALE_PING_PEER }}
         run: |
           set +e
           SECONDS=0
