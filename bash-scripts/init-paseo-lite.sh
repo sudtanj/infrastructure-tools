@@ -80,20 +80,31 @@ PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
 # The daemon itself needs a few MB; the cap is for the agent CLIs it runs.
-# paseo-lite shares one codex app-server across projects and caps concurrent
-# claude processes (PASEO_CLAUDE_MAX_LIVE), so the budget is predictable.
+# paseo-lite shares one codex app-server across projects and, with
+# PASEO_CLAUDE_MAX_LIVE=auto, runs as many agents at once as the container's
+# memory and CPU allow (one on a 1 GB VM), adding workers only while the
+# machine stays calm. So the container is sized from the host: everything
+# but a reserve for the host itself (sshd, tailscale, docker), never less
+# than the 1 GB VM's 640 MB / 0.75 CPU.
 # Container swap disabled (memory-swap == memory): a clean OOM-kill of the
 # container + auto-restart beats thrashing. Host gets its own swap below.
-CPU_LIMIT="${CPU_LIMIT:-0.75}"
-MEM_MB="${MEM_MB:-640}"
-PIDS_LIMIT="${PIDS_LIMIT:-256}"
-CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-1}"
+HOST_MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+HOST_CPUS=$(nproc 2>/dev/null || echo 1)
+HOST_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 ))
+AUTO_MEM_MB=$(( HOST_MEM_MB - HOST_RESERVE_MB > 640 ? HOST_MEM_MB - HOST_RESERVE_MB : 640 ))
+if [ "$HOST_CPUS" -gt 2 ]; then AUTO_CPU_LIMIT="$(( HOST_CPUS - 1 ))"; else AUTO_CPU_LIMIT="0.75"; fi
+CPU_LIMIT="${CPU_LIMIT:-$AUTO_CPU_LIMIT}"
+MEM_MB="${MEM_MB:-$AUTO_MEM_MB}"
+# Each agent runs git, rg, shells: room for ~256 processes per 640 MB.
+AUTO_PIDS_LIMIT=$(( MEM_MB * 256 / 640 ))
+PIDS_LIMIT="${PIDS_LIMIT:-$AUTO_PIDS_LIMIT}"
+CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
 CLAUDE_IDLE_SECS="${PASEO_CLAUDE_IDLE_SECS:-60}"
 CODEX_IDLE_SECS="${PASEO_CODEX_IDLE_SECS:-300}"
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="3"
+CONFIG_REV="4"
 DNS64_MODE="${DNS64_MODE:-auto}"
 DNS1="${DNS1:-2a00:1098:2b::1}"
 DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
@@ -354,7 +365,7 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   --memory-reservation "$(( MEM_MB * 80 / 100 ))m" \
   --memory-swap "${MEM_MB}m" \
   --pids-limit "$PIDS_LIMIT" \
-  --ulimit nproc=512:512 \
+  --ulimit nproc=$(( PIDS_LIMIT * 2 )):$(( PIDS_LIMIT * 2 )) \
   --ulimit core=0 \
   --oom-score-adj 500 \
   --log-driver json-file \
