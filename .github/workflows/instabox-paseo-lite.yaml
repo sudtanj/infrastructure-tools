@@ -79,7 +79,7 @@ env:
 
 jobs:
   keepalive:
-    name: "${{ github.event_name == 'schedule' && 'Keep-alive' || 'Wake' }}"
+    name: "Wake / keep-alive"
     if: github.event_name == 'schedule' || inputs.mode == 'wake'
     runs-on: ubuntu-latest
     timeout-minutes: 5
