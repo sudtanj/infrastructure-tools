@@ -96,6 +96,12 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   kept, so a login made over VNC is never overwritten by an older profile.
 #   Uncheck `browser` when dispatching to skip Chrome entirely.
 #
+# FORCE
+#   Each script's schedule (SCHEDULE cron, RUN_EVERY_*) is enforced by the
+#   private repo's runner.ts, not here. Check `force` when dispatching to pass
+#   runner.ts --force, so it runs every script now regardless of its schedule.
+#   Off by default; scheduled runs never force.
+#
 # EXIT NODE TARGET
 #   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
 #     tag:vpn            a tagged node (recommended -- survives IP changes)
@@ -207,6 +213,11 @@ on:
         description: "Start Chrome with the saved chrome-cdp-session profile and save it afterwards"
         required: false
         default: true
+        type: boolean
+      force:
+        description: "Ignore each script's own schedule (cron) and run it now"
+        required: false
+        default: false
         type: boolean
 
 permissions:
@@ -1033,6 +1044,7 @@ jobs:
           REQUESTED: ${{ inputs.script || 'all' }}
           VERBOSE: ${{ inputs.verbose || 'false' }}
           KEEP_GOING: ${{ inputs.keep_going || 'false' }}
+          FORCE: ${{ inputs.force || 'false' }}
           INSTALL: ${{ needs.discover.outputs.install }}
           STRIP_FLAG: ${{ needs.discover.outputs.strip_flag }}
           # The scripts only get the secrets they read: HONEYGAIN_EMAIL /
@@ -1172,6 +1184,21 @@ jobs:
           fi
           echo "Executing ${#scripts[@]} script(s) with: ${RUNNER}"
 
+          # `force` hands runner.ts --force, so it runs each script now instead
+          # of gating it on its SCHEDULE / RUN_EVERY_*. Only runner.ts gets it:
+          # workerlib/exec-entry.ts would take the flag for a script path.
+          FORCE_TARGET=runner.ts
+          if [ "$FORCE" = "true" ]; then
+            echo "Force mode: ${FORCE_TARGET} ignores script schedules for this run."
+            found=0
+            for s in "${scripts[@]}"; do
+              [ "$(basename "$s")" = "$FORCE_TARGET" ] && found=1
+            done
+            if [ "$found" -eq 0 ]; then
+              echo "::warning::force is on but ${FORCE_TARGET} is not among the selected scripts; nothing will be forced."
+            fi
+          fi
+
           # The VPN keys are job-level env; the scripts have no business
           # inheriting them. An unset secret arrives as an empty string, so
           # drop those to keep "not configured" meaning unset.
@@ -1210,15 +1237,19 @@ jobs:
             log="/tmp/ts-${safe}.log"
 
             echo "==> ${name}"
+            ARGS=()
+            if [ "$FORCE" = "true" ] && [ "$name" = "$FORCE_TARGET" ]; then
+              ARGS+=(--force)
+            fi
             case "$RUNNER" in
-              tsx)    rc=0; npx --no-install tsx "$s" > "$log" 2>&1 || rc=$? ;;
-              ts-node) rc=0; npx --no-install ts-node "$s" > "$log" 2>&1 || rc=$? ;;
+              tsx)    rc=0; npx --no-install tsx "$s" "${ARGS[@]+"${ARGS[@]}"}" > "$log" 2>&1 || rc=$? ;;
+              ts-node) rc=0; npx --no-install ts-node "$s" "${ARGS[@]+"${ARGS[@]}"}" > "$log" 2>&1 || rc=$? ;;
               *)
                 # Node's own type stripping, flag only when needed.
                 if [ "$STRIP_FLAG" = "true" ]; then
-                  rc=0; node --experimental-strip-types "$s" > "$log" 2>&1 || rc=$?
+                  rc=0; node --experimental-strip-types "$s" "${ARGS[@]+"${ARGS[@]}"}" > "$log" 2>&1 || rc=$?
                 else
-                  rc=0; node "$s" > "$log" 2>&1 || rc=$?
+                  rc=0; node "$s" "${ARGS[@]+"${ARGS[@]}"}" > "$log" 2>&1 || rc=$?
                 fi
                 ;;
             esac
