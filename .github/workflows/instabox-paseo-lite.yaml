@@ -116,7 +116,7 @@ jobs:
           fi
           # on-demand puts the daemon on a public URL: without a password anyone could drive the agents.
           if [ "$MODE" = "on-demand" ] && [ "$HAS_PASEO_PASSWORD" != "true" ]; then
-            echo "::error::on-demand mode publishes port 6768 publicly; set the PASEO_PASSWORD secret first"
+            echo "::error::on-demand mode puts Paseo on a public URL; set the PASEO_PASSWORD secret first"
             exit 1
           fi
           echo "[+] INSTABOX_API_KEY is set | machine: ${MACHINE_NAME} | mode: ${MODE}"
