@@ -100,7 +100,8 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   Each script's schedule (SCHEDULE cron, RUN_EVERY_*) is enforced by the
 #   private repo's runner.ts, not here. Check `force` when dispatching to pass
 #   runner.ts --force, so it runs every script now regardless of its schedule.
-#   Off by default; scheduled runs never force.
+#   Off by default; scheduled runs never force. Set `only` to a script name
+#   (e.g. springwood_ad) to pass runner.ts --only, so just that one runs.
 #
 # EXIT NODE TARGET
 #   TAILSCALE_EXIT_NODE accepts any of the three forms Tailscale itself takes:
@@ -219,6 +220,11 @@ on:
         required: false
         default: false
         type: boolean
+      only:
+        description: "runner.ts runs only this script (e.g. springwood_ad); empty for all"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -1045,6 +1051,7 @@ jobs:
           VERBOSE: ${{ inputs.verbose || 'false' }}
           KEEP_GOING: ${{ inputs.keep_going || 'false' }}
           FORCE: ${{ inputs.force || 'false' }}
+          ONLY: ${{ inputs.only || '' }}
           INSTALL: ${{ needs.discover.outputs.install }}
           STRIP_FLAG: ${{ needs.discover.outputs.strip_flag }}
           # The scripts only get the secrets they read: HONEYGAIN_EMAIL /
@@ -1240,6 +1247,9 @@ jobs:
             ARGS=()
             if [ "$FORCE" = "true" ] && [ "$name" = "$FORCE_TARGET" ]; then
               ARGS+=(--force)
+            fi
+            if [ -n "$ONLY" ] && [ "$name" = "$FORCE_TARGET" ]; then
+              ARGS+=(--only "$ONLY")
             fi
             case "$RUNNER" in
               tsx)    rc=0; npx --no-install tsx "$s" "${ARGS[@]+"${ARGS[@]}"}" > "$log" 2>&1 || rc=$? ;;
