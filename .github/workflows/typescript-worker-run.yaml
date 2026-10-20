@@ -1055,8 +1055,12 @@ jobs:
           INSTALL: ${{ needs.discover.outputs.install }}
           STRIP_FLAG: ${{ needs.discover.outputs.strip_flag }}
           # The scripts only get the secrets they read: HONEYGAIN_EMAIL /
-          # HONEYGAIN_PASSWORD, set on the job. A script that needs another
-          # secret must have it added here.
+          # HONEYGAIN_PASSWORD, set on the job, and the CODEX_ endpoint the
+          # ads reword their text through (zilong-router over the tailnet).
+          # A script that needs another secret must have it added here.
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
         run: |
           set -uo pipefail
           cd "private/$TSWORKER_DIR"
