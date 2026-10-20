@@ -731,6 +731,7 @@ jobs:
 
       # The same packages as chrome-cdp-session.yaml, so the browser has the
       # same fingerprint in both (real GL, audio device, desktop fonts). No VNC.
+      # ffmpeg rides along: the YouTube Short is made from the ad photo with it.
       - name: Install Chrome and a virtual display
         if: ${{ env.USE_BROWSER == 'true' }}
         run: |
@@ -739,7 +740,7 @@ jobs:
           sudo apt-get update -qq
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
           sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
-            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio ffmpeg \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           fc-cache -f >/dev/null
