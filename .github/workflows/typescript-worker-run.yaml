@@ -570,6 +570,9 @@ jobs:
       USE_BROWSER: ${{ github.event_name != 'workflow_dispatch' || inputs.browser }}
       STATE_TAG: chrome-cdp-state
       PROFILE_DIR: /home/runner/chrome-profile
+      # The runner's record of the schedule slots it ran, kept in the profile so it is saved,
+      # encrypted, with it: a late tick then catches a missed slot without repeating a done one.
+      TYPESCRIPT_WORKER_STATE_DIR: /home/runner/chrome-profile/worker-state
 
     steps:
       - name: Checkout private repo
