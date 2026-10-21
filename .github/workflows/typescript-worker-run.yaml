@@ -555,7 +555,7 @@ jobs:
     # covers the "folder exists but holds no .ts" case.
     if: ${{ needs.discover.outputs.count != '0' }}
     runs-on: ubuntu-latest
-    # Above the longest tick: setup, honeygain_lucky_pot (5 min) and tech_short (60 min), so
+    # Above the longest tick: setup, honeygain_lucky_pot (5 min) and tech_short (80 min), so
     # one slow script ends at its own timeout instead of GitHub killing the job and the scripts left in it.
     timeout-minutes: 90
     env:
