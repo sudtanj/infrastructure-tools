@@ -182,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           # The runner image ships a Chrome that can be weeks old; take today's stable.
-          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get update -qq
           # Mesa for a real GL renderer, PulseAudio for an audio device, and the
           # fonts an ordinary desktop has (a bare runner has very few).
