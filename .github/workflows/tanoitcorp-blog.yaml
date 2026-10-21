@@ -1,0 +1,207 @@
+name: "Tanoit Corp blog: write and publish new tech posts"
+
+# ---------------------------------------------------------------------------
+# Every two days, adds new tech news posts to the Tanoit Corp site
+# (cloudflare-projects/tanoitcorp in the PRIVATE repo) and commits them there;
+# that push deploys the site through the private repo's deploy-tanoitcorp.yml.
+#
+# HOW THIS WORKS
+#   1. The runner joins the tailnet, through TAILSCALE_EXIT_NODE when set, as
+#      ats-cv.yaml does, so the CODEX_ endpoint (zilong-router) is reachable.
+#   2. `cloudflare-projects/tanoitcorp/blog/generate.ts`, checked out from the
+#      PRIVATE repo, reads popular tech news feeds, has the model pick the
+#      most significant fresh stories and write an original article on each
+#      (keeping the source's cover image, credited), and renders the static
+#      blog, RSS feed, sitemap and homepage cards from blog/posts.json.
+#   3. The result is committed and pushed to the private repo, then
+#      cloudflare-private-deploy.yaml is started to deploy it; the runner
+#      leaves the tailnet, even on failure.
+#
+# SECRETS: PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read and write: it
+#   pushes the posts), BUILD_REF (optional), CODEX_BASE_URL, CODEX_MODEL,
+#   CODEX_API_KEY, TAILSCALE_EXIT_NODE (optional), and
+#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS or TAILSCALE_AUTH_KEY.
+#
+# THIS REPO IS PUBLIC: the script prints counts and fixed messages only.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # 01:17 UTC on odd days of the month: every two days (twice in a row at a month's end).
+    - cron: '17 1 */2 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Starts cloudflare-private-deploy.yaml after a push.
+  actions: write
+
+concurrency:
+  group: tanoitcorp-blog
+  cancel-in-progress: false
+
+jobs:
+  blog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # Kept in .git/config: the commit step pushes with it.
+          persist-credentials: true
+          # The generator imports chat() from the worker's scripts.
+          sparse-checkout: |
+            cloudflare-projects/tanoitcorp
+            typescript-worker/scripts
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
+          node-version: 24
+
+      - name: Verify required secrets
+        env:
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in CODEX_BASE_URL CODEX_MODEL; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          # Not a secret, but a real address in a public log.
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+          echo "Secrets present."
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # Same credential handling as typescript-worker-run.yaml: the OAuth
+      # client secret is exchanged for a single-use, ephemeral, 10-minute auth
+      # key; only HTTP statuses are ever printed.
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      - name: Write the posts
+        env:
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: node private/cloudflare-projects/tanoitcorp/blog/generate.ts
+
+      - name: Commit and push the posts
+        id: push
+        working-directory: private
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- cloudflare-projects/tanoitcorp)" ]; then
+            echo "Nothing new to commit."
+            exit 0
+          fi
+          git add cloudflare-projects/tanoitcorp
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "tanoitcorp: publish new blog posts"
+          # main may have moved during the run; the posts only touch the blog's files.
+          git pull -q --rebase
+          git push -q
+          echo "Posts pushed."
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # Deploy now instead of waiting up to 15 minutes for its poll to see the commit.
+      - name: Deploy the site
+        if: steps.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run cloudflare-private-deploy.yaml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+          echo "Deploy started."
+
+      - name: Leave the tailnet
+        if: always()
+        run: sudo tailscale logout 2>&1 | tail -3 || true
