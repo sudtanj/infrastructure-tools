@@ -56,8 +56,8 @@ variable "instance_ocpus" {
   default = 2
 
   validation {
-    condition     = var.instance_ocpus >= 1 && var.instance_ocpus <= 4
-    error_message = "Always Free A1.Flex allows 1-4 OCPUs."
+    condition     = var.instance_ocpus >= 1 && var.instance_ocpus <= 2
+    error_message = "Always Free A1.Flex allows 1-2 OCPUs (halved from 4 in June 2026)."
   }
 }
 
@@ -66,8 +66,8 @@ variable "instance_memory_in_gbs" {
   default = 12
 
   validation {
-    condition     = var.instance_memory_in_gbs >= 1 && var.instance_memory_in_gbs <= 24
-    error_message = "Always Free A1.Flex allows 1-24 GB memory."
+    condition     = var.instance_memory_in_gbs >= 1 && var.instance_memory_in_gbs <= 12
+    error_message = "Always Free A1.Flex allows 1-12 GB memory (halved from 24 GB in June 2026)."
   }
 }
 
