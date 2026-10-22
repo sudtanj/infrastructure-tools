@@ -1,0 +1,200 @@
+name: "Commute traffic: home to work, to Telegram"
+
+# ---------------------------------------------------------------------------
+# Every working day (Monday to Friday) at 08:00 local time, opens Google Maps
+# in a real Google Chrome on the runner (driven over CDP by
+# commute_traffic/commute_traffic.ts in the PRIVATE repo), reads the driving
+# time from home to work in live traffic, reads Google's prediction for
+# leaving at 11:00, and sends the summary with a screenshot of the route to
+# Telegram.
+#
+# HOW THIS WORKS
+#   1. The cron fires at 07:45 in UTC+7 (GitHub often starts scheduled runs
+#      late, so it starts early); the run then waits until 08:00 local time
+#      in COMMUTE_TZ. Weekends are skipped, and public holidays too when
+#      HOLIDAY_COUNTRY is set (date.nager.at; if that service is down the run
+#      goes ahead).
+#   2. Google Chrome (preinstalled on the runner) starts on a virtual
+#      display with CDP on loopback and a fresh, throwaway profile. No
+#      Google login, tailnet or saved profile is needed.
+#   3. The script, checked out from the PRIVATE repo, opens the route twice:
+#      "leave now", and "depart at 11:00" (the typical range Google Maps
+#      shows), then sends to Telegram.
+#
+# SECRETS (Settings > Secrets and variables > Actions)
+#   PRIVATE_REPO       "owner/name" of the private repo holding the script
+#   PRIVATE_REPO_TOKEN Contents: Read on it
+#   BUILD_REF          OPTIONAL branch to run the script from, default main
+#   TELEGRAM_TOKEN     bot token from @BotFather
+#   TELEGRAM_CHAT_ID   your chat ID: send the bot a message, then open
+#                      https://api.telegram.org/bot<TOKEN>/getUpdates and
+#                      copy message.chat.id
+#   HOME_ADDRESS       home, as you would type it in Google Maps, or "lat,lng"
+#   WORK_ADDRESS       work, same format
+#   COMMUTE_TZ         OPTIONAL IANA time zone, default Asia/Jakarta. Outside
+#                      UTC+7, change the cron below too (it is in UTC).
+#   HOLIDAY_COUNTRY    OPTIONAL two-letter country code (e.g. ID) to skip
+#                      public holidays
+#
+# THIS REPO IS PUBLIC: the addresses, chat ID and time zone live only in
+# secrets. The log prints only which step was reached and route counts; the
+# times, routes, map links and screenshot go only to Telegram. No artifacts
+# are uploaded.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # 00:45 UTC = 07:45 in UTC+7, Monday to Friday.
+    - cron: '45 0 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commute-traffic
+  cancel-in-progress: false
+
+jobs:
+  traffic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMMUTE_TZ: ${{ secrets.COMMUTE_TZ || 'Asia/Jakarta' }}
+      PREDICT_TIME: '11:00'
+
+    steps:
+      - name: Check secrets
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HOME_ADDRESS: ${{ secrets.HOME_ADDRESS }}
+          WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in PRIVATE_REPO PRIVATE_REPO_TOKEN TELEGRAM_TOKEN TELEGRAM_CHAT_ID HOME_ADDRESS WORK_ADDRESS; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          if [[ ! "$COMMUTE_TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$COMMUTE_TZ" ]; then
+            echo "::error::COMMUTE_TZ must be an IANA time zone such as Asia/Jakarta."
+            exit 1
+          fi
+          echo "Secrets present."
+
+      - name: Skip non-working days, wait for 08:00
+        id: gate
+        env:
+          HOLIDAY_COUNTRY: ${{ secrets.HOLIDAY_COUNTRY }}
+        run: |
+          set -euo pipefail
+          export TZ="$COMMUTE_TZ"
+          # Manual runs always go ahead, right away.
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            if [ "$(date +%u)" -gt 5 ]; then
+              echo "Weekend; nothing to do."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ -n "${HOLIDAY_COUNTRY:-}" ]; then
+              if [[ ! "$HOLIDAY_COUNTRY" =~ ^[A-Za-z]{2}$ ]]; then
+                echo "::error::HOLIDAY_COUNTRY must be a two-letter country code."
+                exit 1
+              fi
+              # Whole hours from UTC, e.g. +0700 -> 7.
+              z="$(date +%z)"
+              offset="$((10#${z:1:2}))"
+              [ "${z:0:1}" = "-" ] && offset="-$offset"
+              code="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+                "https://date.nager.at/api/v3/IsTodayPublicHoliday/${HOLIDAY_COUNTRY}?offset=${offset}" || true)"
+              case "$code" in
+                200) echo "Public holiday; nothing to do."; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+                204) echo "Working day." ;;
+                *)   echo "::warning::Holiday check unavailable (HTTP ${code:-none}); going ahead." ;;
+              esac
+            fi
+            wait="$(( $(date -d '08:00' +%s) - $(date +%s) ))"
+            if [ "$wait" -gt 0 ] && [ "$wait" -le 3600 ]; then
+              echo "Waiting ${wait}s for 08:00."
+              sleep "$wait"
+            fi
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout private repo
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: commute_traffic
+          path: private
+
+      - name: Set up Node
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Playwright (CDP client only)
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci --prefix private/commute_traffic --no-audit --no-fund
+
+      # Headful Chrome on a virtual display: headless Chrome announces itself
+      # as HeadlessChrome, which Google may treat as a bot.
+      - name: Start Chrome
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v google-chrome >/dev/null 2>&1 || ! command -v Xvfb >/dev/null 2>&1; then
+            curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq /tmp/chrome.deb xvfb >/dev/null
+          fi
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
+          sleep 2
+          export DISPLAY=:99 TZ="$COMMUTE_TZ" LANG=en_US.UTF-8
+          setsid nohup google-chrome \
+            --user-data-dir=/tmp/chrome-profile \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --lang=en-US \
+            --no-first-run \
+            --no-default-browser-check \
+            --password-store=basic \
+            --disable-dev-shm-usage \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            about:blank >/tmp/chrome.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+              echo "Chrome ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Chrome did not open CDP within 30s."
+          exit 1
+
+      - name: Read traffic and send to Telegram
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HOME_ADDRESS: ${{ secrets.HOME_ADDRESS }}
+          WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
+          CHROME_CDP_URL: http://127.0.0.1:9222
+        # 24 runs .ts files directly (type stripping), so there is no build.
+        run: node private/commute_traffic/commute_traffic.ts
+
+      - name: Stop Chrome
+        if: always() && steps.gate.outputs.run == 'true'
+        run: pkill -f -- '--user-data-dir=/tmp/chrome-profile' 2>/dev/null || true
