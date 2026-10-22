@@ -1,18 +1,22 @@
-name: "Commute traffic: home to work, to Telegram"
+name: "Commute traffic: home and work, to Telegram"
 
 # ---------------------------------------------------------------------------
-# Every working day (Monday to Friday) at 08:00 and 11:00 local time, opens
-# Google Maps in the saved chrome-cdp-session Chrome, browsing through the
-# home exit node, and reads the driving time from home to work in live
-# traffic; the 08:00 run adds Google's prediction for leaving at 11:00. The
-# script, commute_traffic/commute_traffic.ts in the PRIVATE repo, drives
+# Every working day (Monday to Friday) opens Google Maps in the saved
+# chrome-cdp-session Chrome, browsing through the home exit node, and reads
+# the driving time in live traffic:
+#   08:00  home to work, plus Google's prediction for leaving at 11:00
+#   11:00  home to work, live only
+#   17:00  work to home, plus the prediction for leaving at 18:00
+#   18:00  work to home, live only
+# The script, commute_traffic/commute_traffic.ts in the PRIVATE repo, drives
 # that Chrome over CDP; the summary and a screenshot of the route go to
-# Telegram.
+# Telegram. Manual runs pick the direction by the time of day (from 14:00,
+# work to home) unless the `direction` input says otherwise.
 #
 # HOW THIS WORKS
-#   1. The crons fire at 08:00 and 11:00 in UTC+7 (GitHub can start
-#      scheduled runs a few minutes late). Weekends in COMMUTE_TZ are skipped, and public
-#      holidays too when HOLIDAY_COUNTRY is set (date.nager.at; if that
+#   1. The crons fire at 08:00, 11:00, 17:00 and 18:00 in UTC+7 (GitHub can
+#      start scheduled runs a few minutes late). Weekends in COMMUTE_TZ are
+#      skipped, and public holidays too when HOLIDAY_COUNTRY is set (date.nager.at; if that
 #      service is down the run goes ahead).
 #   2. The saved Chrome profile (release tag `chrome-cdp-state` on the private
 #      repo) is restored, as in tokopedia-search.yaml, so Google sees a known
@@ -21,9 +25,9 @@ name: "Commute traffic: home to work, to Telegram"
 #   3. The runner joins the tailnet through TAILSCALE_EXIT_NODE, so Google
 #      sees the home IP, never a datacenter one, then Chrome starts with CDP
 #      on loopback.
-#   4. The script opens the route "leave now" and, on the 08:00 run, "depart
-#      at 11:00" (the typical range Google Maps shows), then opens it in Waze Live Map
-#      for the accidents, hazards, road closures and heavy jams reported on
+#   4. The script opens the route "leave now" and, on the 08:00 and 17:00
+#      runs, "depart at 11:00" or "depart at 18:00" (the typical range Google
+#      Maps shows), then opens it in Waze Live Map for the accidents, hazards, road closures and heavy jams reported on
 #      it, and queues the summary on the runner. Waze is optional: if it
 #      fails, the summary goes out without it.
 #   5. Chrome stops and the runner leaves the tailnet, even on failure.
@@ -60,10 +64,19 @@ name: "Commute traffic: home to work, to Telegram"
 
 on:
   schedule:
-    # 01:00 and 04:00 UTC = 08:00 and 11:00 in UTC+7, Monday to Friday.
+    # 01:00, 04:00, 10:00 and 11:00 UTC = 08:00, 11:00, 17:00 and 18:00 in
+    # UTC+7, Monday to Friday.
     - cron: '0 1 * * 1-5'
     - cron: '0 4 * * 1-5'
+    - cron: '0 10 * * 1-5'
+    - cron: '0 11 * * 1-5'
   workflow_dispatch:
+    inputs:
+      direction:
+        description: 'Route direction (auto: from 14:00 work to home)'
+        type: choice
+        options: [auto, to-work, to-home]
+        default: auto
 
 permissions:
   contents: read
@@ -79,6 +92,8 @@ jobs:
     env:
       COMMUTE_TZ: ${{ secrets.COMMUTE_TZ || 'Asia/Jakarta' }}
       PREDICT_TIME: '11:00'
+      RETURN_PREDICT_TIME: '18:00'
+      COMMUTE_DIRECTION: ${{ inputs.direction || 'auto' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
       TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
