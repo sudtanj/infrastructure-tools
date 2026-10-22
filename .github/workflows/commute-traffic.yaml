@@ -6,7 +6,7 @@ name: "Commute traffic: home to work, to Telegram"
 # and reads the driving time from home to work in live traffic and Google's
 # prediction for leaving at 11:00. The script,
 # commute_traffic/commute_traffic.ts in the PRIVATE repo, drives that Chrome
-# over CDP and sends the summary with a screenshot of the route to Telegram.
+# over CDP; the summary and a screenshot of the route go to Telegram.
 #
 # HOW THIS WORKS
 #   1. The cron fires at 07:45 in UTC+7 (GitHub often starts scheduled runs
@@ -22,8 +22,12 @@ name: "Commute traffic: home to work, to Telegram"
 #      sees the home IP, never a datacenter one, then Chrome starts with CDP
 #      on loopback.
 #   4. The script opens the route twice: "leave now", and "depart at 11:00"
-#      (the typical range Google Maps shows), then sends to Telegram.
+#      (the typical range Google Maps shows), and queues the summary on the
+#      runner.
 #   5. Chrome stops and the runner leaves the tailnet, even on failure.
+#   6. The queue (the summary, or the error and a screenshot of the page) is
+#      sent to Telegram, from the runner's own network: Telegram times out
+#      through the home exit node.
 #
 # SECRETS (Settings > Secrets and variables > Actions)
 #   PRIVATE_REPO       "owner/name" of the private repo holding the script
@@ -350,11 +354,9 @@ jobs:
           echo "::error::Chrome did not open CDP within 30s."
           exit 1
 
-      - name: Read traffic and send to Telegram
+      - name: Read traffic
         if: steps.gate.outputs.run == 'true'
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           HOME_ADDRESS: ${{ secrets.HOME_ADDRESS }}
           WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
           CHROME_CDP_URL: http://127.0.0.1:9222
@@ -367,3 +369,10 @@ jobs:
           pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
           # A node left joined keeps an exit-node route and a tailnet slot.
           sudo tailscale logout 2>&1 | tail -3 || true
+
+      - name: Send to Telegram
+        if: always() && steps.gate.outputs.run == 'true'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node private/commute_traffic/commute_traffic.ts --send
