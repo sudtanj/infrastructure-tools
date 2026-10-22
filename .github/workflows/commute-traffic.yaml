@@ -21,8 +21,10 @@ name: "Commute traffic: home to work, to Telegram"
 #      sees the home IP, never a datacenter one, then Chrome starts with CDP
 #      on loopback.
 #   4. The script opens the route twice: "leave now", and "depart at 11:00"
-#      (the typical range Google Maps shows), and queues the summary on the
-#      runner.
+#      (the typical range Google Maps shows), then opens it in Waze Live Map
+#      for the accidents, hazards, road closures and heavy jams reported on
+#      it, and queues the summary on the runner. Waze is optional: if it
+#      fails, the summary goes out without it.
 #   5. Chrome stops and the runner leaves the tailnet, even on failure.
 #   6. The queue (the summary, or the error and a screenshot of the page) is
 #      sent to Telegram, from the runner's own network: Telegram times out
@@ -49,9 +51,10 @@ name: "Commute traffic: home to work, to Telegram"
 #                      public holidays
 #
 # THIS REPO IS PUBLIC: the addresses, chat ID and time zone live only in
-# secrets. The log prints only the step reached, route counts and, on
-# failure, the kind of page Google showed; the times, routes, map links and
-# screenshots go only to Telegram. No artifacts are uploaded.
+# secrets. The log prints only the step reached, route and report counts
+# and, on failure, the kind of page Google showed; the times, routes, map
+# links, Waze reports and screenshots go only to Telegram. No artifacts are
+# uploaded.
 # ---------------------------------------------------------------------------
 
 on:
