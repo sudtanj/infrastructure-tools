@@ -1,0 +1,330 @@
+name: "Job apply: fill in and submit one application"
+
+# ---------------------------------------------------------------------------
+# Fills in and submits the job application at `job_url` in the saved
+# chrome-cdp-session Chrome, then reports counts only. Manual runs only,
+# separate from the typescript worker.
+#
+# HOW THIS WORKS
+#   1. The runner restores the saved Chrome profile (logins), joins the tailnet, through
+#      TAILSCALE_EXIT_NODE when set, so the form sees a home IP and zilong-router
+#      is reachable, and starts Chrome with CDP on localhost.
+#   2. `job-hunter/job_apply.ts`, checked out from the PRIVATE repo with
+#      `job-hunt/` (the CV, its PDF and profile.json), opens the URL and finds
+#      the form (Greenhouse, Ashby, Lever, or embedded in a careers page). Code
+#      reads the questions and fills every widget; profile.json answers the
+#      standard ones (name, email, phone rule, links, location), and the
+#      CODEX_ endpoint (zilong-router; a small free model is enough) only picks
+#      option numbers or writes short texts for the rest, checked against the
+#      options. A required question with no answer, a captcha or an emailed
+#      verification code stops it; after the submit it fails unless the page
+#      confirms the application.
+#   3. Chrome stops and the runner leaves the tailnet, even on failure. The
+#      profile is only read, never saved back, so a session open meanwhile
+#      keeps its own.
+#
+# SETUP (once)
+#   Fill in `job-hunt/profile.json` in the private repo (contact details, the
+#   phone rule, and facts a CV lacks: work authorisation, sponsorship,
+#   relocation, notice period). Try the first application with `dry_run`.
+#
+#   secret PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read; the profile
+#                                release needs it too), BUILD_REF (optional),
+#                                STATE_KEY, TAILSCALE_OAUTH_CLIENT_SECRET +
+#                                TAILSCALE_TAGS or TAILSCALE_AUTH_KEY,
+#                                TAILSCALE_EXIT_NODE (optional): as in
+#                                job-hunter.yaml
+#   secret CODEX_BASE_URL        the AI endpoint, OpenAI-compatible, ending in
+#                                /v1; CODEX_MODEL and CODEX_API_KEY with it
+#
+# THIS REPO IS PUBLIC: `job_url` is visible to anyone, and so is this run's
+# log. The script prints the form's questions and where each answer came
+# from, never an answer, the CV or the URL.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_url:
+        description: 'Link to the application form (visible to anyone: this repo is public)'
+        type: string
+        required: true
+      dry_run:
+        description: 'Fill in the form but stop before the submit'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # The one Chrome profile and one CDP port: two applications at once would clash.
+  group: job-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # The script never talks to GitHub; no token in .git/config.
+          persist-credentials: false
+          # job-hunt holds the CV and its PDF.
+          sparse-checkout: |
+            job-hunter
+            job-hunt
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
+          node-version: 24
+
+      # Before the VPN: faster. No lifecycle scripts run, and no browser is
+      # downloaded: Chrome is the runner's own.
+      - name: Install Playwright
+        run: npm install --prefix private/job-hunter --no-save --no-package-lock --ignore-scripts --no-audit --no-fund 'playwright-core@^1.64.0'
+
+      - name: Verify required secrets
+        env:
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          JOB_URL: ${{ inputs.job_url }}
+        run: |
+          set -euo pipefail
+          # The URL is public input; keep it out of the log lines below.
+          echo "::add-mask::${JOB_URL}"
+          if [[ ! "$JOB_URL" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::job_url must be an https:// link."
+            exit 1
+          fi
+          missing=()
+          for v in CODEX_BASE_URL CODEX_MODEL STATE_KEY; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          # Not a secret, but a real address in a public log.
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+          echo "Secrets present."
+
+      # Same encrypted profile and format as chrome-cdp-session.yaml, restored
+      # the same way as typescript-worker-run.yaml (before the VPN: faster).
+      - name: Restore the Chrome profile
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "::error::No saved Chrome profile. Run chrome-cdp-session first."
+            exit 1
+          fi
+          mkdir -p "$PROFILE_DIR" /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages as chrome-cdp-session.yaml, so the form sees the
+      # browser it saw at login (real GL, audio device, desktop fonts).
+      - name: Install Chrome and a virtual display
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # Same credential handling as typescript-worker-run.yaml: the OAuth
+      # client secret is exchanged for a single-use, ephemeral, 10-minute auth
+      # key; only HTTP statuses are ever printed.
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      # After the tailnet, so the form sees the exit node's IP, never this
+      # datacenter one. Flags as in job-hunter.yaml.
+      - name: Start Chrome
+        run: |
+          set -euo pipefail
+          TZ=UTC
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # Not printed: the zone narrows down where the exit node is.
+            TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+            if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+              echo "::warning::Could not detect the time zone; using UTC."
+              TZ=UTC
+            fi
+          else
+            echo "::warning::No TAILSCALE_EXIT_NODE: the form sees a datacenter IP, which may trigger a captcha."
+          fi
+          export TZ LANG=en_US.UTF-8 LANGUAGE=en_US
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          # Open a new tab, not the tabs the session left open.
+          jq '.session.restore_on_startup = 5
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+          setsid nohup google-chrome \
+            --user-data-dir="$PROFILE_DIR" \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
+            --lang=en-US \
+            --accept-lang=en-US \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-dev-shm-usage \
+            --start-maximized \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            >/tmp/chrome.log 2>&1 &
+          echo $! > /tmp/chrome.pid
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+              echo "Chrome ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Chrome did not open CDP within 30s."
+          exit 1
+
+      - name: Fill in and submit the application
+        env:
+          JOB_URL: ${{ inputs.job_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CHROME_CDP_URL: http://127.0.0.1:9222
+        run: |
+          echo "::add-mask::${JOB_URL}"
+          export JOB_HUNT_DIR="$PWD/private/job-hunt"
+          node private/job-hunter/job_apply.ts
+
+      - name: Stop Chrome, leave the tailnet
+        if: always()
+        run: |
+          # Nothing to save (the profile is not uploaded); just stop it.
+          pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
+          # A node left joined keeps an exit-node route and a tailnet slot.
+          sudo tailscale logout 2>&1 | tail -3 || true
