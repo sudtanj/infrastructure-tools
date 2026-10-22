@@ -25,11 +25,16 @@ name: "Commute traffic: home and work, to Telegram"
 #   3. The runner joins the tailnet through TAILSCALE_EXIT_NODE, so Google
 #      sees the home IP, never a datacenter one, then Chrome starts with CDP
 #      on loopback.
-#   4. The script opens the route "leave now" and, on the 08:00 and 17:00
-#      runs, "depart at 11:00" or "depart at 18:00" (the typical range Google
-#      Maps shows), then opens it in Waze Live Map for the accidents, hazards, road closures and heavy jams reported on
-#      it, and queues the summary on the runner. Waze is optional: if it
-#      fails, the summary goes out without it.
+#   4. The script opens the route "leave now" (with arrival times and each
+#      route's streets) and, on the 08:00 and 17:00 runs, "depart at 11:00"
+#      or "depart at 18:00" (the typical range Google Maps shows). Then it
+#      adds, each optional (a failure only drops that part):
+#      - Waze Live Map: accidents, hazards, closures, heavy jams on the route
+#      - Jakarta's odd-even (ganjil-genap) plate rule on the route's streets
+#      - live snapshots from DKI's public CCTV (jakcctv.jakarta.go.id) on the
+#        first route's streets
+#      - rain on the way and air quality from Open-Meteo (free, no key)
+#      and queues the summary and the photos on the runner.
 #   5. Chrome stops and the runner leaves the tailnet, even on failure.
 #   6. The queue (the summary, or the error and a screenshot of the page) is
 #      sent to Telegram, from the runner's own network: Telegram times out
@@ -54,11 +59,14 @@ name: "Commute traffic: home and work, to Telegram"
 #                      UTC+7, change the cron below too (it is in UTC).
 #   HOLIDAY_COUNTRY    OPTIONAL two-letter country code (e.g. ID) to skip
 #                      public holidays
+#   PLATE_PARITY       OPTIONAL "odd" or "even" (or the plate's last digit),
+#                      to say whether today's odd-even rule bars your car
 #
-# THIS REPO IS PUBLIC: the addresses, chat ID and time zone live only in
-# secrets. The log prints only the step reached, route and report counts
-# and, on failure, the kind of page Google showed; the times, routes, map
-# links, Waze reports and screenshots go only to Telegram. No artifacts are
+# THIS REPO IS PUBLIC: the addresses, chat ID, time zone and plate live only
+# in secrets. The log prints only the step reached, route, report and camera
+# counts and, on failure, the kind of page Google showed; the times, routes,
+# streets, map links, Waze reports, weather, CCTV and screenshots go only to
+# Telegram. No artifacts are
 # uploaded.
 # ---------------------------------------------------------------------------
 
@@ -367,6 +375,7 @@ jobs:
         env:
           HOME_ADDRESS: ${{ secrets.HOME_ADDRESS }}
           WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
+          PLATE_PARITY: ${{ secrets.PLATE_PARITY }}
           CHROME_CDP_URL: http://127.0.0.1:9222
         run: node private/commute_traffic/commute_traffic.ts
 
