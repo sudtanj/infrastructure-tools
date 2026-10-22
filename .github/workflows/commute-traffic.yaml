@@ -1,16 +1,17 @@
 name: "Commute traffic: home to work, to Telegram"
 
 # ---------------------------------------------------------------------------
-# Every working day (Monday to Friday) at 08:00 local time, opens Google Maps
-# in the saved chrome-cdp-session Chrome, browsing through the home exit node,
-# and reads the driving time from home to work in live traffic and Google's
-# prediction for leaving at 11:00. The script,
-# commute_traffic/commute_traffic.ts in the PRIVATE repo, drives that Chrome
-# over CDP; the summary and a screenshot of the route go to Telegram.
+# Every working day (Monday to Friday) at 08:00 and 11:00 local time, opens
+# Google Maps in the saved chrome-cdp-session Chrome, browsing through the
+# home exit node, and reads the driving time from home to work in live
+# traffic; the 08:00 run adds Google's prediction for leaving at 11:00. The
+# script, commute_traffic/commute_traffic.ts in the PRIVATE repo, drives
+# that Chrome over CDP; the summary and a screenshot of the route go to
+# Telegram.
 #
 # HOW THIS WORKS
-#   1. The cron fires at 08:00 in UTC+7 (GitHub can start scheduled runs a
-#      few minutes late). Weekends in COMMUTE_TZ are skipped, and public
+#   1. The crons fire at 08:00 and 11:00 in UTC+7 (GitHub can start
+#      scheduled runs a few minutes late). Weekends in COMMUTE_TZ are skipped, and public
 #      holidays too when HOLIDAY_COUNTRY is set (date.nager.at; if that
 #      service is down the run goes ahead).
 #   2. The saved Chrome profile (release tag `chrome-cdp-state` on the private
@@ -20,8 +21,8 @@ name: "Commute traffic: home to work, to Telegram"
 #   3. The runner joins the tailnet through TAILSCALE_EXIT_NODE, so Google
 #      sees the home IP, never a datacenter one, then Chrome starts with CDP
 #      on loopback.
-#   4. The script opens the route twice: "leave now", and "depart at 11:00"
-#      (the typical range Google Maps shows), then opens it in Waze Live Map
+#   4. The script opens the route "leave now" and, on the 08:00 run, "depart
+#      at 11:00" (the typical range Google Maps shows), then opens it in Waze Live Map
 #      for the accidents, hazards, road closures and heavy jams reported on
 #      it, and queues the summary on the runner. Waze is optional: if it
 #      fails, the summary goes out without it.
@@ -59,8 +60,9 @@ name: "Commute traffic: home to work, to Telegram"
 
 on:
   schedule:
-    # 01:00 UTC = 08:00 in UTC+7, Monday to Friday.
+    # 01:00 and 04:00 UTC = 08:00 and 11:00 in UTC+7, Monday to Friday.
     - cron: '0 1 * * 1-5'
+    - cron: '0 4 * * 1-5'
   workflow_dispatch:
 
 permissions:
