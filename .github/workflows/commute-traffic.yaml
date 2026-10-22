@@ -2,11 +2,11 @@ name: "Commute traffic: home to work, to Telegram"
 
 # ---------------------------------------------------------------------------
 # Every working day (Monday to Friday) at 08:00 local time, opens Google Maps
-# in a real Google Chrome on the runner (driven over CDP by
-# commute_traffic/commute_traffic.ts in the PRIVATE repo), reads the driving
-# time from home to work in live traffic, reads Google's prediction for
-# leaving at 11:00, and sends the summary with a screenshot of the route to
-# Telegram.
+# in the saved chrome-cdp-session Chrome, browsing through the home exit node,
+# and reads the driving time from home to work in live traffic and Google's
+# prediction for leaving at 11:00. The script,
+# commute_traffic/commute_traffic.ts in the PRIVATE repo, drives that Chrome
+# over CDP and sends the summary with a screenshot of the route to Telegram.
 #
 # HOW THIS WORKS
 #   1. The cron fires at 07:45 in UTC+7 (GitHub often starts scheduled runs
@@ -14,21 +14,30 @@ name: "Commute traffic: home to work, to Telegram"
 #      in COMMUTE_TZ. Weekends are skipped, and public holidays too when
 #      HOLIDAY_COUNTRY is set (date.nager.at; if that service is down the run
 #      goes ahead).
-#   2. Google Chrome (preinstalled on the runner) starts on a virtual
-#      display with CDP on loopback and a fresh, throwaway profile. No
-#      Google login, tailnet or saved profile is needed.
-#   3. The script, checked out from the PRIVATE repo, opens the route twice:
-#      "leave now", and "depart at 11:00" (the typical range Google Maps
-#      shows), then sends to Telegram.
+#   2. The saved Chrome profile (release tag `chrome-cdp-state` on the private
+#      repo) is restored, as in tokopedia-search.yaml, so Google sees a known
+#      browser. It is only read, never saved back. Without a saved profile
+#      the run uses a fresh one.
+#   3. The runner joins the tailnet through TAILSCALE_EXIT_NODE, so Google
+#      sees the home IP, never a datacenter one, then Chrome starts with CDP
+#      on loopback.
+#   4. The script opens the route twice: "leave now", and "depart at 11:00"
+#      (the typical range Google Maps shows), then sends to Telegram.
+#   5. Chrome stops and the runner leaves the tailnet, even on failure.
 #
 # SECRETS (Settings > Secrets and variables > Actions)
 #   PRIVATE_REPO       "owner/name" of the private repo holding the script
-#   PRIVATE_REPO_TOKEN Contents: Read on it
+#   PRIVATE_REPO_TOKEN Contents: Read on it (clones the script, downloads the
+#                      profile)
 #   BUILD_REF          OPTIONAL branch to run the script from, default main
+#   STATE_KEY          passphrase of the saved Chrome profile, as in
+#                      chrome-cdp-session.yaml
+#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, or TAILSCALE_AUTH_KEY
+#                      the same tailnet credentials as the worker workflows
+#   TAILSCALE_EXIT_NODE exit node, as in the worker workflows
 #   TELEGRAM_TOKEN     bot token from @BotFather
-#   TELEGRAM_CHAT_ID   your chat ID: send the bot a message, then open
-#                      https://api.telegram.org/bot<TOKEN>/getUpdates and
-#                      copy message.chat.id
+#   TELEGRAM_CHAT_ID   your chat ID (e.g. from @userinfobot); press Start in
+#                      your bot once so it may message you
 #   HOME_ADDRESS       home, as you would type it in Google Maps, or "lat,lng"
 #   WORK_ADDRESS       work, same format
 #   COMMUTE_TZ         OPTIONAL IANA time zone, default Asia/Jakarta. Outside
@@ -37,9 +46,9 @@ name: "Commute traffic: home to work, to Telegram"
 #                      public holidays
 #
 # THIS REPO IS PUBLIC: the addresses, chat ID and time zone live only in
-# secrets. The log prints only which step was reached and route counts; the
-# times, routes, map links and screenshot go only to Telegram. No artifacts
-# are uploaded.
+# secrets. The log prints only the step reached, route counts and, on
+# failure, the kind of page Google showed; the times, routes, map links and
+# screenshots go only to Telegram. No artifacts are uploaded.
 # ---------------------------------------------------------------------------
 
 on:
@@ -58,10 +67,16 @@ concurrency:
 jobs:
   traffic:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       COMMUTE_TZ: ${{ secrets.COMMUTE_TZ || 'Asia/Jakarta' }}
       PREDICT_TIME: '11:00'
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
 
     steps:
       - name: Check secrets
@@ -72,12 +87,18 @@ jobs:
           WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
           PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
-          for v in PRIVATE_REPO PRIVATE_REPO_TOKEN TELEGRAM_TOKEN TELEGRAM_CHAT_ID HOME_ADDRESS WORK_ADDRESS; do
+          for v in PRIVATE_REPO PRIVATE_REPO_TOKEN STATE_KEY TAILSCALE_EXIT_NODE TELEGRAM_TOKEN TELEGRAM_CHAT_ID HOME_ADDRESS WORK_ADDRESS; do
             if [ -z "${!v:-}" ]; then missing+=("$v"); fi
           done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing secret(s): ${missing[*]}"
             exit 1
@@ -86,9 +107,11 @@ jobs:
             echo "::error::COMMUTE_TZ must be an IANA time zone such as Asia/Jakarta."
             exit 1
           fi
+          # Not a secret, but a real address in a public log.
+          echo "::add-mask::${TAILSCALE_EXIT_NODE}"
           echo "Secrets present."
 
-      - name: Skip non-working days, wait for 08:00
+      - name: Skip non-working days
         id: gate
         env:
           HOLIDAY_COUNTRY: ${{ secrets.HOLIDAY_COUNTRY }}
@@ -119,11 +142,6 @@ jobs:
                 *)   echo "::warning::Holiday check unavailable (HTTP ${code:-none}); going ahead." ;;
               esac
             fi
-            wait="$(( $(date -d '08:00' +%s) - $(date +%s) ))"
-            if [ "$wait" -gt 0 ] && [ "$wait" -le 3600 ]; then
-              echo "Waiting ${wait}s for 08:00."
-              sleep "$wait"
-            fi
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
 
@@ -142,40 +160,188 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
           node-version: 24
 
       - name: Install Playwright (CDP client only)
         if: steps.gate.outputs.run == 'true'
         run: npm ci --prefix private/commute_traffic --no-audit --no-fund
 
-      # Headful Chrome on a virtual display: headless Chrome announces itself
-      # as HeadlessChrome, which Google may treat as a bot.
+      # Same encrypted profile and format as chrome-cdp-session.yaml, restored
+      # as in tokopedia-search.yaml (before the VPN: faster).
+      - name: Restore the Chrome profile
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROFILE_DIR"
+          names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "::warning::No saved Chrome profile; using a fresh one."
+            exit 0
+          fi
+          mkdir -p /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages as chrome-cdp-session.yaml, so Google sees the
+      # browser it saw before (real GL, audio device, desktop fonts).
+      - name: Install Chrome and a virtual display
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
+          sudo apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          fc-cache -f >/dev/null
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Install Tailscale
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # After setup, right before the tailnet, so the 08:00 reading is on time.
+      - name: Wait for 08:00
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          export TZ="$COMMUTE_TZ"
+          wait="$(( $(date -d '08:00' +%s) - $(date +%s) ))"
+          if [ "$wait" -gt 0 ] && [ "$wait" -le 3600 ]; then
+            echo "Waiting ${wait}s for 08:00."
+            sleep "$wait"
+          fi
+
+      # Same credential handling as typescript-worker-run.yaml: the OAuth
+      # client secret is exchanged for a single-use, ephemeral, 10-minute auth
+      # key; only HTTP statuses are ever printed.
+      - name: Join the tailnet
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}")
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      # After the tailnet, so Google sees the exit node's IP, never this
+      # datacenter one. Flags as in tokopedia-search.yaml.
       - name: Start Chrome
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
-          if ! command -v google-chrome >/dev/null 2>&1 || ! command -v Xvfb >/dev/null 2>&1; then
-            curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq /tmp/chrome.deb xvfb >/dev/null
-          fi
-          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
-          sleep 2
-          export DISPLAY=:99 TZ="$COMMUTE_TZ" LANG=en_US.UTF-8
+          export TZ="$COMMUTE_TZ" LANG=en_US.UTF-8 LANGUAGE=en_US
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          # Open a new tab, not the tabs the session left open.
+          jq '.session.restore_on_startup = 5
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
           setsid nohup google-chrome \
-            --user-data-dir=/tmp/chrome-profile \
+            --user-data-dir="$PROFILE_DIR" \
             --remote-debugging-address=127.0.0.1 \
             --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
             --lang=en-US \
+            --accept-lang=en-US \
             --no-first-run \
             --no-default-browser-check \
-            --password-store=basic \
             --disable-dev-shm-usage \
+            --start-maximized \
             --window-position=0,0 \
             --window-size=1920,1080 \
-            about:blank >/tmp/chrome.log 2>&1 &
+            >/tmp/chrome.log 2>&1 &
           for _ in $(seq 1 30); do
-            if curl -fs http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+            if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
               echo "Chrome ready."
               exit 0
             fi
@@ -192,9 +358,12 @@ jobs:
           HOME_ADDRESS: ${{ secrets.HOME_ADDRESS }}
           WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
           CHROME_CDP_URL: http://127.0.0.1:9222
-        # 24 runs .ts files directly (type stripping), so there is no build.
         run: node private/commute_traffic/commute_traffic.ts
 
-      - name: Stop Chrome
+      - name: Stop Chrome, leave the tailnet
         if: always() && steps.gate.outputs.run == 'true'
-        run: pkill -f -- '--user-data-dir=/tmp/chrome-profile' 2>/dev/null || true
+        run: |
+          # Nothing to save (the profile is not uploaded); just stop it.
+          pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
+          # A node left joined keeps an exit-node route and a tailnet slot.
+          sudo tailscale logout 2>&1 | tail -3 || true
