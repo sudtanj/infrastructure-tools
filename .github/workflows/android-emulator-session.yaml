@@ -211,20 +211,39 @@ jobs:
           # Reuse the restored AVD instead of recreating it over the saved data.
           force-avd-creation: false
           disable-animations: false
-          # No -no-window: the window is drawn on Xvfb for VNC.
-          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          # Without a profile the AVD gets a 320x640 screen, default RAM and 2
+          # cores, and a Play Store image never finishes booting. The runner
+          # has 4 vCPUs and 16 GB.
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 8G
+          # No -no-window: the window is drawn on Xvfb for VNC. Snapshots are
+          # on: the emulator saves RAM to the AVD when it is killed after the
+          # session, the AVD is saved with it, and the next run resumes in
+          # seconds. A snapshot from another emulator version or CPU is
+          # rejected and the emulator cold boots instead.
+          emulator-options: -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
-          # Name any library the windowed emulator still lacks, instead of a
-          # silent boot timeout.
-          pre-emulator-launch-script: |
-            ldd "$ANDROID_HOME/emulator/qemu/linux-x86_64/qemu-system-x86_64" | grep 'not found' || true
           script: bash .github/scripts/android-emulator-session.sh
 
       - name: Save state
         run: |
           set -euo pipefail
           id="${{ github.run_id }}"
+          # `emu kill` returns before the emulator finishes writing its
+          # snapshot; packing it half-written would break the next boot.
+          for _ in $(seq 1 90); do
+            pgrep -f qemu-system-x86_64 >/dev/null || break
+            sleep 2
+          done
+          if pgrep -f qemu-system-x86_64 >/dev/null; then
+            echo "::warning::Emulator still running after 3 minutes; dropping its snapshot."
+            sudo pkill -9 -f qemu-system-x86_64 || true
+            rm -rf ~/.android/avd/session.avd/snapshots
+          fi
           mkdir -p /tmp/save
           cd /tmp/save
           # Release assets cap at 2 GiB each.
