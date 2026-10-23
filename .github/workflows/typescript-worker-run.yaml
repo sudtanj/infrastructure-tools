@@ -1008,17 +1008,19 @@ jobs:
         if: ${{ env.BROWSER_ATTENDED == 'true' }}
         run: |
           set -euo pipefail
-          ip="$(sudo tailscale ip -4 chrome-cdp 2>/dev/null || true)"
+          # The session may still be starting: give it 5 minutes to answer.
+          for i in $(seq 1 30); do
+            ip="$(sudo tailscale ip -4 chrome-cdp 2>/dev/null || true)"
+            [ -n "$ip" ] && curl -fs --max-time 10 "http://${ip}:9222/json/version" > /dev/null && break
+            ip=""
+            sleep 10
+          done
           if [ -z "$ip" ]; then
-            echo "::error::No chrome-cdp node on the tailnet. Start chrome-cdp-session first."
+            echo "::error::The chrome-cdp-session browser does not answer on CDP. Start chrome-cdp-session first."
             exit 1
           fi
           echo "::add-mask::${ip}"
           URL="http://${ip}:9222"
-          if ! curl -fs --max-time 15 "$URL/json/version" > /dev/null; then
-            echo "::error::The chrome-cdp-session browser does not answer on CDP. Is the session still running?"
-            exit 1
-          fi
           {
             printf 'export CHROME_CDP_URL=%q\n' "$URL"
             printf 'export CDP_URL=%q\n' "$URL"
