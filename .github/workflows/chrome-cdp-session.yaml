@@ -178,7 +178,7 @@ jobs:
 
       - name: Install latest Chrome, virtual display and VNC
         # Every command is bounded, and each phase is named, so a hang fails fast and says where.
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
@@ -191,8 +191,19 @@ jobs:
           # Mesa for a real GL renderer, PulseAudio for an audio device, and the
           # fonts an ordinary desktop has (a bare runner has very few).
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          # A mirror can stall a download forever: give apt a network timeout, bound
+          # each try, and retry after repairing whatever a killed dpkg left behind.
+          apt_install() {
+            for attempt in 1 2 3; do
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -qq \
+                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 "$@" >/dev/null && return 0
+              echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
+            done
+            return 1
+          }
           echo "Installing Chrome and the display packages."
-          sudo timeout -k 15 600 apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox \
+          apt_install /tmp/chrome.deb xvfb x11vnc openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
