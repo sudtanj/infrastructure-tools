@@ -150,7 +150,7 @@ jobs:
             libpulse0 libnss3 libxkbfile1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libgl1 libegl1 >/dev/null
-          setsid nohup Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+          setsid nohup Xvfb :99 -screen 0 900x1400x24 >/dev/null 2>&1 &
           sleep 2
           mkdir -p ~/.vnc
           x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
@@ -211,7 +211,10 @@ jobs:
           avd-name: session
           # Reuse the restored AVD instead of recreating it over the saved data.
           force-avd-creation: false
-          disable-animations: false
+          # Every animation frame is drawn on the CPU; off, taps settle at once.
+          disable-animations: true
+          # Typing over VNC goes straight to the device.
+          enable-hw-keyboard: true
           # Without a profile the AVD gets a 320x640 screen, default RAM and 2
           # cores, and a Play Store image never finishes booting. The runner
           # has 4 vCPUs and 16 GB.
@@ -228,6 +231,9 @@ jobs:
           emulator-options: -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
+          # Shrinks the screen to 720x1280 (frames are drawn on the CPU); Xvfb
+          # above is sized to show that window unscaled.
+          pre-emulator-launch-script: bash .github/scripts/android-emulator-config.sh
           script: bash .github/scripts/android-emulator-session.sh
 
       - name: Save state
