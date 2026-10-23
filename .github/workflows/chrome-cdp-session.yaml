@@ -212,6 +212,7 @@ jobs:
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Join the tailnet
+        timeout-minutes: 8
         env:
           TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
           TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
@@ -238,8 +239,20 @@ jobs:
           # --accept-routes: devices behind a subnet router (the Orange Pi running kongming)
           # reach CDP from their LAN address, and the replies have to go back through that router.
           secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
-          sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
-            --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp --accept-routes
+          # `tailscale up` can wait forever for Running after the login went
+          # through; bound each try and retry.
+          for attempt in 1 2 3; do
+            if sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
+              --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp --accept-routes --timeout=90s; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Tailscale did not reach Running after 3 tries."
+              exit 1
+            fi
+            echo "::warning::tailscale up did not finish (try ${attempt}); retrying."
+            sleep 5
+          done
 
           # Saved straight away, so a cancelled run still keeps the identity.
           sudo cat /var/lib/tailscale/tailscaled.state \
