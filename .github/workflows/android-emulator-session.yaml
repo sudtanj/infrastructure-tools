@@ -201,10 +201,11 @@ jobs:
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
         with:
-          # Android 17, newest stable Play Store x86_64 image (4 KB pages).
-          # Pinned, not "latest": a new image breaks the saved AVD, so bump it
-          # by hand and run once with `fresh`. Quoted, or YAML turns it into 37.
-          api-level: '37.0'
+          # Android 15, the best-tested Play Store x86_64 image on CI. The
+          # Android 17 image bootlooped (Pixel Launcher crashing) under
+          # software graphics. Pinned, not "latest": a new image breaks the
+          # saved AVD, so bump it by hand and run once with `fresh`.
+          api-level: 35
           target: google_apis_playstore
           arch: x86_64
           avd-name: session
