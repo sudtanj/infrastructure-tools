@@ -12,6 +12,10 @@ if [ "$max" -gt 320 ]; then max=320; fi
 # any key unused for 7 days and the VNC approval is needed again.
 adb shell settings put global adb_allowed_connection_time 0
 
+# Back/Home/Recents buttons instead of swipe gestures, which are hard to do
+# with a VNC mouse or a script.
+adb shell cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton
+
 echo "Emulator ready. Waiting for the stop file (limit ${max} minutes)."
 deadline=$((SECONDS + max * 60))
 while [ "$SECONDS" -lt "$deadline" ]; do
