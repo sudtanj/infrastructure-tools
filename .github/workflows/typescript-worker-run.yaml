@@ -1093,6 +1093,7 @@ jobs:
             --restore-last-session \
             --no-first-run \
             --no-default-browser-check \
+            --disable-blink-features=AutomationControlled \
             --disable-dev-shm-usage \
             --start-maximized \
             --window-position=0,0 \
@@ -1378,8 +1379,8 @@ jobs:
               # No `set -e` here: the failure has to be recorded before this
               # step exits non-zero, or the summary loses the row.
               if [ "$KEEP_GOING" != "true" ]; then
-                echo "::error::${name} failed and keep_going is off; skipping the remaining scripts."
                 rest=("${scripts[@]:$((i + 1))}")
+                [ "${#rest[@]}" -eq 0 ] || echo "::error::${name} failed and keep_going is off; skipping the remaining scripts."
                 for r in "${rest[@]+"${rest[@]}"}"; do
                   printf 'skip\t%s\n' "$(basename "$r")" >> /tmp/ts-results.txt
                 done
