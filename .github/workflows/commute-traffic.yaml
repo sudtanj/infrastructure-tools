@@ -9,9 +9,10 @@ name: "Commute traffic: home and work, to Telegram"
 #   17:00  work to home, plus the prediction for leaving at 18:00
 #   18:00  work to home, live only
 # The script, commute_traffic/commute_traffic.ts in the PRIVATE repo, drives
-# that Chrome over CDP; the summary and a map of the routes over the
-# traffic layer go to Telegram. Manual runs pick the direction by the time of
-# day (from 14:00, work to home) unless the `direction` input says otherwise.
+# that Chrome over CDP; the summary, a map of route 1 coloured by its own
+# Waze jams and a Google Maps screenshot go to Telegram. Manual runs pick the
+# direction by the time of day (from 14:00, work to home) unless the
+# `direction` input says otherwise.
 #
 # HOW THIS WORKS
 #   1. The crons fire at 08:00, 11:00, 17:00 and 18:00 in UTC+7 (GitHub can
