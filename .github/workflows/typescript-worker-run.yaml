@@ -753,6 +753,10 @@ jobs:
           set -euo pipefail
           echo "Downloading Chrome."
           curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
+          # and dpkg fsyncs each file. Neither matters on a throwaway runner.
+          sudo rm -f /var/lib/man-db/auto-update
+          echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
           echo "Updating package lists."
           sudo timeout -k 15 300 apt-get update -qq
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
