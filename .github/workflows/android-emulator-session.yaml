@@ -144,7 +144,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb x11vnc >/dev/null
+          # The windowed emulator (unlike -no-window) links PulseAudio and Qt's
+          # X11 plugins; without them qemu exits at once and adb times out.
+          sudo apt-get install -y -qq xvfb x11vnc \
+            libpulse0 libnss3 libxkbfile1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libgl1 libegl1 >/dev/null
           setsid nohup Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
           sleep 2
           mkdir -p ~/.vnc
@@ -208,6 +213,12 @@ jobs:
           disable-animations: false
           # No -no-window: the window is drawn on Xvfb for VNC.
           emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          # A cold first boot on software graphics can pass the 600s default.
+          emulator-boot-timeout: 900
+          # Name any library the windowed emulator still lacks, instead of a
+          # silent boot timeout.
+          pre-emulator-launch-script: |
+            ldd "$ANDROID_HOME/emulator/qemu/linux-x86_64/qemu-system-x86_64" | grep 'not found' || true
           script: bash .github/scripts/android-emulator-session.sh
 
       - name: Save state
