@@ -215,6 +215,11 @@ on:
         required: false
         default: true
         type: boolean
+      session_browser:
+        description: "Drive the running chrome-cdp-session browser instead (watch and solve captchas over VNC)"
+        required: false
+        default: false
+        type: boolean
       force:
         description: "Ignore each script's own schedule (cron) and run it now"
         required: false
@@ -567,7 +572,9 @@ jobs:
       HONEYGAIN_EMAIL: ${{ secrets.HONEYGAIN_EMAIL }}
       HONEYGAIN_PASSWORD: ${{ secrets.HONEYGAIN_PASSWORD }}
       # Schedules have no inputs, and GitHub's loose compare makes null != false false, so test the event.
-      USE_BROWSER: ${{ github.event_name != 'workflow_dispatch' || inputs.browser }}
+      USE_BROWSER: ${{ github.event_name != 'workflow_dispatch' || (inputs.browser && !inputs.session_browser) }}
+      # A person is at the session browser over VNC: scripts may wait for them (e.g. a captcha).
+      BROWSER_ATTENDED: ${{ github.event_name == 'workflow_dispatch' && inputs.session_browser }}
       STATE_TAG: chrome-cdp-state
       PROFILE_DIR: /home/runner/chrome-profile
       # The runner's record of the schedule slots it ran, kept in the profile so it is saved,
@@ -994,6 +1001,29 @@ jobs:
           fi
 
       # ------------------------- Chrome (CDP) -------------------------
+
+      # The chrome-cdp-session browser, reached over the tailnet, instead of a
+      # local Chrome; its own run saves the profile. Its address is masked by redact().
+      - name: Use the chrome-cdp-session browser
+        if: ${{ env.BROWSER_ATTENDED == 'true' }}
+        run: |
+          set -euo pipefail
+          ip="$(sudo tailscale ip -4 chrome-cdp 2>/dev/null || true)"
+          if [ -z "$ip" ]; then
+            echo "::error::No chrome-cdp node on the tailnet. Start chrome-cdp-session first."
+            exit 1
+          fi
+          echo "::add-mask::${ip}"
+          URL="http://${ip}:9222"
+          if ! curl -fs --max-time 15 "$URL/json/version" > /dev/null; then
+            echo "::error::The chrome-cdp-session browser does not answer on CDP. Is the session still running?"
+            exit 1
+          fi
+          {
+            printf 'export CHROME_CDP_URL=%q\n' "$URL"
+            printf 'export CDP_URL=%q\n' "$URL"
+          } > /tmp/chrome-cdp.env
+          echo "Using the chrome-cdp-session browser."
 
       - name: Start Chrome
         id: chrome
@@ -1427,7 +1457,9 @@ jobs:
             echo
             echo "- Commit: \`${{ needs.discover.outputs.sha }}\` on \`${{ needs.discover.outputs.ref }}\`"
             echo "- Exit node: \`$(cat /tmp/exit-node-fp.txt 2>/dev/null || echo '<never connected>') (fingerprint, address withheld)\`"
-            if [ -s /tmp/chrome-cdp.env ]; then
+            if [ "$BROWSER_ATTENDED" = "true" ]; then
+              browser='the chrome-cdp-session browser'
+            elif [ -s /tmp/chrome-cdp.env ]; then
               browser='started with the saved profile'
             else
               browser='<not used>'
