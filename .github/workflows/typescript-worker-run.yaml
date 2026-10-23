@@ -1009,14 +1009,20 @@ jobs:
         run: |
           set -euo pipefail
           # The session may still be starting: give it 5 minutes to answer.
+          ok=false
           for i in $(seq 1 30); do
             ip="$(sudo tailscale ip -4 chrome-cdp 2>/dev/null || true)"
-            [ -n "$ip" ] && curl -fs --max-time 10 "http://${ip}:9222/json/version" > /dev/null && break
-            ip=""
+            rc=none
+            if [ -n "$ip" ]; then
+              curl -fs --max-time 10 "http://${ip}:9222/json/version" > /dev/null && { ok=true; break; } || rc=$?
+            fi
             sleep 10
           done
-          if [ -z "$ip" ]; then
-            echo "::error::The chrome-cdp-session browser does not answer on CDP. Start chrome-cdp-session first."
+          if [ "$ok" != true ]; then
+            # States and exit codes only: node names and IPs stay out of the public log.
+            nodes="$(sudo tailscale status --json | jq -r '[.Peer[]? | select(.HostName | test("^chrome-cdp")) | if .Online then "online" else "offline" end] | join(",")')"
+            ping=no; [ -n "$ip" ] && sudo tailscale ping -c 3 --timeout 5s "$ip" > /dev/null 2>&1 && ping=yes
+            echo "::error::The chrome-cdp-session browser does not answer on CDP (chrome-cdp nodes: ${nodes:-none}; resolved: $([ -n "$ip" ] && echo yes || echo no); curl exit: ${rc}; tailscale ping: ${ping}). Start chrome-cdp-session first."
             exit 1
           fi
           echo "::add-mask::${ip}"
