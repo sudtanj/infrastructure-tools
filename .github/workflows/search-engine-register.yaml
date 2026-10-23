@@ -1,0 +1,406 @@
+name: "Register Cloudflare sites with Google and Bing (Yahoo)"
+
+# ---------------------------------------------------------------------------
+# Finds every website served by this Cloudflare account's Workers and Pages
+# and registers it with Google Search Console and Bing Webmaster Tools, so new
+# sites get crawled and indexed without clicking through either console.
+# Yahoo, DuckDuckGo and Ecosia serve Bing's index and have no submission of
+# their own, so Bing covers them.
+#
+# NO NEW SECRETS. The search engines are reached through the saved, signed-in
+# chrome-cdp-session Chrome profile (or the running chrome-cdp-session browser
+# with `session_browser`), and DNS proofs go through CLOUDFLARE_API_TOKEN.
+#
+# HOW THIS WORKS (.github/scripts/search-engine-register.ts)
+#   1. discover - custom hostnames of every Pages project, Workers custom
+#                 domain and Workers route. *.pages.dev, *.workers.dev and
+#                 wildcard routes are skipped: their DNS is not ours.
+#   2. inspect  - keep a hostname only if https://<host>/ answers 200 with
+#                 HTML, stays on that host and is not noindex (drops APIs,
+#                 proxies, redirects). Sitemaps come from robots.txt, else
+#                 /sitemap.xml, /sitemap_index.xml.
+#   3. google   - per zone, in Search Console in the browser: add the Domain
+#                 property, put its google-site-verification TXT record on
+#                 the zone apex via the Cloudflare API, Verify, then submit
+#                 every host's sitemaps.
+#   4. bing     - the browser reads the account's Webmaster API key from
+#                 Settings > API access (generating it on first use); then per
+#                 host over the API: AddSite, a DNS-only CNAME
+#                 <code>.<host> -> verify.bing.com, VerifySite, sitemaps, and
+#                 the newest sitemap URLs within the daily quota.
+#   Every step is idempotent. The DNS records it creates must stay, or the
+#   engines drop the verification; they carry a comment saying so.
+#
+# SETUP (once)
+#   1. In a chrome-cdp-session run, over VNC, sign in to Google (Search
+#      Console) and to bing.com/webmasters (with the same Google account is
+#      fine). The run saves the profile.
+#   2. Edit the EXISTING Cloudflare API token (same value, no secret change)
+#      and add: Zone: Zone Read, Zone: DNS Edit, Zone: Workers Routes Read,
+#      Account: Workers Scripts Read (has Edit already if it deploys Workers),
+#      Account: Cloudflare Pages Read (or Edit), on the zones to register.
+#   3. Try a manual run with `dry_run`.
+#
+#   secrets used, all already set for other workflows:
+#     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+#     PRIVATE_REPO, PRIVATE_REPO_TOKEN, STATE_KEY   saved Chrome profile
+#     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS, or TAILSCALE_AUTH_KEY
+#     TAILSCALE_EXIT_NODE (optional)  the engines see a home IP, not Azure's
+#   optional repo variables:
+#     SEO_EXCLUDE_HOSTS    hostnames never to register
+#     SEO_INCLUDE_HOSTS    hostnames to register even if the home page check
+#                          fails (e.g. a bot challenge); must be in a zone
+#     SEO_BING_URL_LIMIT   URLs per site per run for Bing (default 100,
+#                          always capped by Bing's daily quota)
+#
+# THIS REPO IS PUBLIC: hostnames are logged as site-1, zone-1 ... unless the
+# manual run asks for them. The profile is only read, never saved back.
+# ---------------------------------------------------------------------------
+
+on:
+  # Weekly: new sites are picked up within a week, and Bing's URL quota is not
+  # spent re-sending the same pages daily. Run it by hand after launching a site.
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      engines:
+        description: "Which search engines"
+        type: choice
+        options: ["google,bing", "google", "bing"]
+        default: "google,bing"
+      dry_run:
+        description: "Only report what would be created, verified and submitted"
+        type: boolean
+        default: false
+      session_browser:
+        description: "Drive the running chrome-cdp-session browser (watch over VNC) instead of a fresh Chrome"
+        type: boolean
+        default: false
+      show_hostnames:
+        description: "Print real hostnames in the PUBLIC log instead of site-1, zone-1 ..."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-engine-register
+  cancel-in-progress: false
+
+jobs:
+  register:
+    name: "Register sites"
+    # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+      TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+      TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+      SESSION_BROWSER: ${{ github.event_name == 'workflow_dispatch' && inputs.session_browser }}
+      STATE_TAG: chrome-cdp-state
+      PROFILE_DIR: /home/runner/chrome-profile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 24 runs .ts files directly (type stripping), so there is no build.
+          node-version: 24
+
+      # No lifecycle scripts run, and no browser is downloaded: Chrome is the runner's own.
+      - name: Install Playwright
+        run: npm install --prefix .github/scripts --no-save --no-package-lock --ignore-scripts --no-audit --no-fund 'playwright-core@^1.64.0'
+
+      - name: Verify required secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ "$SESSION_BROWSER" != "true" ]; then
+            for v in PRIVATE_REPO PRIVATE_REPO_TOKEN STATE_KEY; do
+              if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+            done
+          fi
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secret(s): ${missing[*]}"
+            exit 1
+          fi
+          # Not a secret, but a real address in a public log.
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+          echo "Secrets present."
+
+      # Same encrypted profile and format as chrome-cdp-session.yaml, restored
+      # as in job-apply.yaml (before the VPN: faster).
+      - name: Restore the Chrome profile
+        if: ${{ env.SESSION_BROWSER != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
+          set -euo pipefail
+          names="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null || true)"
+          id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
+          if [ -z "$id" ]; then
+            echo "::error::No saved Chrome profile. Run chrome-cdp-session first and sign in to Google and Bing Webmaster Tools."
+            exit 1
+          fi
+          mkdir -p "$PROFILE_DIR" /tmp/state
+          cd /tmp/state
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          sha256sum -c --quiet "state-${id}.sha256"
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | tar -x --zstd -C "$PROFILE_DIR"
+          rm -rf /tmp/state
+          echo "Saved Chrome profile restored."
+
+      # The same packages and safeguards as typescript-worker-run.yaml, so the
+      # consoles see the browser they saw at login.
+      - name: Install Chrome and a virtual display
+        if: ${{ env.SESSION_BROWSER != 'true' }}
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          echo "Downloading Chrome."
+          curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
+          # and dpkg fsyncs each file. Neither matters on a throwaway runner.
+          sudo rm -f /var/lib/man-db/auto-update
+          echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
+          echo "Updating package lists."
+          sudo timeout -k 15 300 apt-get update -qq
+          echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
+          apt_install() {
+            for attempt in 1 2 3; do
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
+                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" && return 0
+              echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
+            done
+            return 1
+          }
+          echo "Installing Chrome and the display packages."
+          apt_install /tmp/chrome.deb xvfb openbox \
+            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
+            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
+          # The fonts package downloads from SourceForge and can hang; it is optional.
+          echo "Installing optional fonts."
+          sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          timeout 120 fc-cache -f >/dev/null || true
+          rm /tmp/chrome.deb
+          google-chrome --version
+          setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
+          sleep 2
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=speakers sink_properties=device.description=Speakers >/dev/null 2>&1 || true
+          pactl set-default-sink speakers >/dev/null 2>&1 || true
+          DISPLAY=:99 setsid nohup openbox >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+          if ! command -v tailscale >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
+          tailscale version
+
+      # Same credential handling as job-apply.yaml: the OAuth client secret is
+      # exchanged for a single-use, ephemeral, 10-minute auth key; only HTTP
+      # statuses are ever printed.
+      - name: Join the tailnet
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          args=(--accept-dns=false --hostname="github-actions-${GITHUB_RUN_ID}" --timeout=90s)
+
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # The only place a secret reaches a command line: strict shape first.
+            if [[ ! "$TAILSCALE_EXIT_NODE" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+              exit 1
+            fi
+            args+=(--exit-node="$TAILSCALE_EXIT_NODE")
+          fi
+
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            if [[ ! "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."
+              exit 1
+            fi
+            umask 077
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            code="$(printf '%s' "$secret" | curl -sS --max-time 20 -o /tmp/ts-oauth.json -w '%{http_code}' \
+              -d client_id=ignored --data-urlencode client_secret@- \
+              https://api.tailscale.com/api/v2/oauth/token || true)"
+            access_token="$(jq -r '.access_token // empty' /tmp/ts-oauth.json 2>/dev/null || true)"
+            rm -f /tmp/ts-oauth.json
+            if [ "$code" != "200" ] || [ -z "$access_token" ]; then
+              echo "::error::Tailscale rejected the OAuth client secret (HTTP ${code:-none})."
+              exit 1
+            fi
+            echo "::add-mask::${access_token}"
+            printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
+              capabilities: {devices: {create: {
+                reusable: false, ephemeral: true, preauthorized: true,
+                tags: ($t | split(","))}}},
+              expirySeconds: 600,
+              description: "github-actions"}')"
+            code="$(curl -sS --max-time 20 -o /tmp/ts-key.json -w '%{http_code}' \
+              -H @/tmp/ts-auth-header -H 'Content-Type: application/json' -d "$body" \
+              https://api.tailscale.com/api/v2/tailnet/-/keys || true)"
+            rm -f /tmp/ts-auth-header
+            authkey="$(jq -r '.key // empty' /tmp/ts-key.json 2>/dev/null || true)"
+            rm -f /tmp/ts-key.json
+            if [ "$code" != "200" ] || [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key (HTTP ${code:-none}). It needs the Auth Keys write scope and the tag(s) in TAILSCALE_TAGS."
+              exit 1
+            fi
+            echo "::add-mask::${authkey}"
+            args+=(--advertise-tags="$TAILSCALE_TAGS")
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+
+          # `tailscale up` can wait forever after the login went through; bound each try and retry.
+          for attempt in 1 2 3; do
+            if sudo tailscale up --authkey="$authkey" "${args[@]}"; then break; fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Tailscale did not reach Running after 3 tries."
+              exit 1
+            fi
+            echo "::warning::tailscale up did not finish (try ${attempt}); retrying."
+            sleep 5
+          done
+          # Never print raw `tailscale status`: it lists every tailnet IP and host name.
+          state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
+          if [ "$state" != "Running" ]; then
+            echo "::error::Tailscale is not connected (BackendState=${state})."
+            exit 1
+          fi
+          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
+
+      # The chrome-cdp-session browser, reached over the tailnet; its own run saves the profile.
+      - name: Use the chrome-cdp-session browser
+        if: ${{ env.SESSION_BROWSER == 'true' }}
+        run: |
+          set -euo pipefail
+          # The session may still be starting: give it 5 minutes to answer.
+          ok=false
+          for i in $(seq 1 30); do
+            ip="$(sudo tailscale ip -4 chrome-cdp 2>/dev/null || true)"
+            if [ -n "$ip" ] && curl -fs --max-time 10 "http://${ip}:9222/json/version" > /dev/null; then
+              ok=true
+              break
+            fi
+            sleep 10
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::The chrome-cdp-session browser does not answer on CDP. Start chrome-cdp-session first."
+            exit 1
+          fi
+          echo "::add-mask::${ip}"
+          echo "CHROME_CDP_URL=http://${ip}:9222" >> "$GITHUB_ENV"
+          echo "Using the chrome-cdp-session browser."
+
+      # After the tailnet, so the consoles see the exit node's IP. Flags as in job-apply.yaml.
+      - name: Start Chrome
+        if: ${{ env.SESSION_BROWSER != 'true' }}
+        run: |
+          set -euo pipefail
+          TZ=UTC
+          if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then
+            # Not printed: the zone narrows down where the exit node is.
+            TZ="$(curl -fsS --max-time 15 https://ipinfo.io/timezone || true)"
+            if [[ ! "$TZ" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || [ ! -e "/usr/share/zoneinfo/$TZ" ]; then
+              echo "::warning::Could not detect the time zone; using UTC."
+              TZ=UTC
+            fi
+          else
+            echo "::warning::No TAILSCALE_EXIT_NODE: Google and Bing see a datacenter IP and may ask to sign in again."
+          fi
+          export TZ LANG=en_US.UTF-8 LANGUAGE=en_US
+          rm -f "$PROFILE_DIR"/Singleton{Lock,Socket,Cookie}
+          prefs="$PROFILE_DIR/Default/Preferences"
+          mkdir -p "$PROFILE_DIR/Default"
+          [ -s "$prefs" ] || echo '{}' > "$prefs"
+          # Open a new tab, not the tabs the session left open.
+          jq '.session.restore_on_startup = 5
+              | .profile.exit_type = "Normal"
+              | .profile.exited_cleanly = true' "$prefs" > "$prefs.tmp" && mv "$prefs.tmp" "$prefs"
+          setsid nohup google-chrome \
+            --user-data-dir="$PROFILE_DIR" \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
+            --password-store=basic \
+            --disable-blink-features=AutomationControlled \
+            --use-gl=angle \
+            --use-angle=gl \
+            --ignore-gpu-blocklist \
+            --enable-gpu-rasterization \
+            --lang=en-US \
+            --accept-lang=en-US \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-dev-shm-usage \
+            --start-maximized \
+            --window-position=0,0 \
+            --window-size=1920,1080 \
+            >/tmp/chrome.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+              echo "CHROME_CDP_URL=http://127.0.0.1:9222" >> "$GITHUB_ENV"
+              echo "Chrome ready."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Chrome did not open CDP within 30s."
+          exit 1
+
+      - name: Register with Google and Bing
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SEO_EXCLUDE_HOSTS: ${{ vars.SEO_EXCLUDE_HOSTS }}
+          SEO_INCLUDE_HOSTS: ${{ vars.SEO_INCLUDE_HOSTS }}
+          BING_URL_LIMIT: ${{ vars.SEO_BING_URL_LIMIT }}
+          ENGINES: ${{ inputs.engines || 'google,bing' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SHOW_HOSTNAMES: ${{ inputs.show_hostnames }}
+        run: node .github/scripts/search-engine-register.ts
+
+      - name: Stop Chrome, leave the tailnet
+        if: always()
+        run: |
+          # Nothing to save (the profile is not uploaded); just stop our own Chrome.
+          pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
+          # A node left joined keeps an exit-node route and a tailnet slot.
+          sudo tailscale logout 2>&1 | tail -3 || true
