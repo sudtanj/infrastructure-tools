@@ -5,6 +5,9 @@ name: "Android emulator session over Tailscale"
 # as `android-emulator`, so a person and an agent can share the same logged-in
 # device:
 #   adb      android-emulator:5555   (adb, scrcpy, Maestro)
+#            A new adb client gets the "Allow USB debugging?" prompt once:
+#            accept it over VNC with "Always allow from this computer". The
+#            approval is stored in the AVD, so it survives later runs.
 #   VNC      android-emulator:5900   (watch or click the emulator window)
 #
 # The whole AVD (app data, logins) is encrypted and stored as release assets
@@ -28,9 +31,6 @@ name: "Android emulator session over Tailscale"
 #                                  (releases), not just read
 #   TAILSCALE_OAUTH_CLIENT_SECRET  OAuth client (tskey-client-...)
 #   TAILSCALE_TAGS                 e.g. "tag:ci"
-#   ADB_KEY, ADB_KEY_PUB           shared adb key pair from `adb keygen`; the
-#                                  emulator trusts the host key, so remote
-#                                  clients using it skip the auth prompt
 #   STATE_KEY                      passphrase that encrypts the saved AVD
 #   VNC_PASSWORD                   VNC password (only the first 8 chars count)
 # ---------------------------------------------------------------------------
@@ -74,13 +74,11 @@ jobs:
         env:
           TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
           TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
-          ADB_KEY: ${{ secrets.ADB_KEY }}
-          ADB_KEY_PUB: ${{ secrets.ADB_KEY_PUB }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -euo pipefail
           missing=()
-          for name in PRIVATE_REPO GH_TOKEN TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS ADB_KEY ADB_KEY_PUB STATE_KEY VNC_PASSWORD; do
+          for name in PRIVATE_REPO GH_TOKEN TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS STATE_KEY VNC_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
@@ -98,16 +96,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Install shared adb key
-        env:
-          ADB_KEY: ${{ secrets.ADB_KEY }}
-          ADB_KEY_PUB: ${{ secrets.ADB_KEY_PUB }}
+      # A throwaway key for this run's own adb. The emulator trusts whatever
+      # host key it finds at launch, so it never has to match a past run.
+      - name: Generate adb key
         run: |
           set -euo pipefail
           mkdir -p ~/.android
-          printf '%s\n' "$ADB_KEY" > ~/.android/adbkey
-          printf '%s\n' "$ADB_KEY_PUB" > ~/.android/adbkey.pub
-          chmod 600 ~/.android/adbkey
+          "$ANDROID_HOME/platform-tools/adb" keygen ~/.android/adbkey >/dev/null
 
       - name: Prepare state release
         run: |
