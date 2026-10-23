@@ -774,6 +774,8 @@ jobs:
           tailscale version
 
       - name: Join the tailnet through the exit node
+        # Backstop: a hung join must not hold the queue for the 90-minute job timeout.
+        timeout-minutes: 6
         run: |
           set -euo pipefail
           TARGET="$TAILSCALE_EXIT_NODE"
@@ -885,12 +887,26 @@ jobs:
             tag_args=()
           fi
 
-          sudo tailscale up \
-            --authkey="$authkey" \
-            "${tag_args[@]}" \
-            --exit-node="$TARGET" \
-            --accept-dns="$TAILSCALE_ACCEPT_DNS" \
-            --hostname="github-actions-${GITHUB_RUN_ID}"
+          # `tailscale up` can wait forever for Running after the login went
+          # through; bound each try and retry. The key is only spent once the
+          # node is registered, and a registered node does not need it again.
+          for attempt in 1 2 3; do
+            if sudo tailscale up \
+              --authkey="$authkey" \
+              "${tag_args[@]}" \
+              --exit-node="$TARGET" \
+              --accept-dns="$TAILSCALE_ACCEPT_DNS" \
+              --hostname="github-actions-${GITHUB_RUN_ID}" \
+              --timeout=90s; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Tailscale did not reach Running after 3 tries."
+              exit 1
+            fi
+            echo "::warning::tailscale up did not finish (try ${attempt}); retrying."
+            sleep 5
+          done
 
       - name: Verify the exit node is actually in use
         run: |
