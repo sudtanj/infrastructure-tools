@@ -747,18 +747,23 @@ jobs:
       # same fingerprint in both (real GL, audio device, desktop fonts). No VNC.
       # ffmpeg rides along: the YouTube Short is made from the ad photo with it.
       - name: Install Chrome and a virtual display
+        timeout-minutes: 15
         if: ${{ env.USE_BROWSER == 'true' }}
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update -qq
+          echo "Downloading Chrome."
+          curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          echo "Updating package lists."
+          sudo timeout -k 15 300 apt-get update -qq
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
-          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
+          echo "Installing Chrome and the display packages."
+          sudo timeout -k 15 600 apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio ffmpeg \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           # The fonts package downloads from SourceForge and can hang; it is optional.
+          echo "Installing optional fonts."
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
-          fc-cache -f >/dev/null
+          timeout 120 fc-cache -f >/dev/null || true
           rm /tmp/chrome.deb
           google-chrome --version
           setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &

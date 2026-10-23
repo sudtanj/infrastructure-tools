@@ -177,27 +177,34 @@ jobs:
           echo "Saved profile restored."
 
       - name: Install latest Chrome, virtual display and VNC
+        # Every command is bounded, and each phase is named, so a hang fails fast and says where.
+        timeout-minutes: 15
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -euo pipefail
           # The runner image ships a Chrome that can be weeks old; take today's stable.
-          curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update -qq
+          echo "Downloading Chrome."
+          curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          echo "Updating package lists."
+          sudo timeout -k 15 300 apt-get update -qq
           # Mesa for a real GL renderer, PulseAudio for an audio device, and the
           # fonts an ordinary desktop has (a bare runner has very few).
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
-          sudo apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox \
+          echo "Installing Chrome and the display packages."
+          sudo timeout -k 15 600 apt-get install -y -qq /tmp/chrome.deb xvfb x11vnc openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
           # The fonts package downloads from SourceForge and can hang; it is optional.
           # -k: apt-get ignores SIGTERM while dpkg runs, so follow up with SIGKILL.
+          echo "Installing optional fonts."
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
-          fc-cache -f >/dev/null
+          timeout 120 fc-cache -f >/dev/null || true
           rm /tmp/chrome.deb
           google-chrome --version
           # GLX on the display lets Chrome use Mesa instead of SwiftShader.
+          echo "Starting the display and VNC."
           setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
           sleep 2
           # A null sink: pages see a normal speaker output and AudioContext works.
@@ -209,7 +216,7 @@ jobs:
           mkdir -p ~/.vnc
           x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
           # localhost only; Tailscale serve is the sole way in.
-          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log
+          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log >/dev/null 2>&1
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Join the tailnet
