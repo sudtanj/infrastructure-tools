@@ -18,7 +18,8 @@ name: "Android emulator session over Tailscale"
 # The Tailscale node identity (`tailscaled.state.enc`, same release) is kept
 # too, so every run is the same non-ephemeral machine with the same 100.x IP
 # and MagicDNS name. Deleting the machine in the Tailscale admin console makes
-# the next run join as a new machine with a new IP.
+# the next run join as a new machine with a new IP. The runner's adb key
+# (`adbkey.enc`) is kept there as well, generated on the first run.
 #
 # STOP IT WITH THE STOP FILE, NOT THE CANCEL BUTTON
 #   adb -s android-emulator:5555 shell touch /data/local/tmp/stop-session
@@ -96,14 +97,6 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # A throwaway key for this run's own adb. The emulator trusts whatever
-      # host key it finds at launch, so it never has to match a past run.
-      - name: Generate adb key
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.android
-          "$ANDROID_HOME/platform-tools/adb" keygen ~/.android/adbkey >/dev/null
-
       - name: Prepare state release
         run: |
           set -euo pipefail
@@ -137,6 +130,33 @@ jobs:
             | tar -x --zstd -C ~/.android/avd
           rm -rf /tmp/state
           echo "Saved state restored."
+
+      # The runner's adb key, made once and kept encrypted beside the state.
+      # The emulator hands its host key to Android only on a cold boot; a
+      # snapshot resume keeps trusting the previous run's key, so a new key
+      # every run would leave this run's adb unauthorized.
+      - name: Restore or generate adb key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          if grep -qx 'adbkey.enc' /tmp/state-assets.txt; then
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p adbkey.enc -D /tmp
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/adbkey.enc \
+              | tar -x -C ~/.android
+            rm /tmp/adbkey.enc
+            echo "adb key restored."
+          else
+            "$ANDROID_HOME/platform-tools/adb" keygen ~/.android/adbkey >/dev/null
+            tar -C ~/.android -c adbkey adbkey.pub \
+              | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -out /tmp/adbkey.enc
+            gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/adbkey.enc --clobber
+            rm /tmp/adbkey.enc
+            # A saved snapshot trusts an older key; cold boot so Android is
+            # handed this one. App data and approved clients are kept.
+            rm -rf ~/.android/avd/session.avd/snapshots
+            echo "New adb key generated; cold booting this once."
+          fi
+          chmod 600 ~/.android/adbkey
 
       - name: Start virtual display and VNC
         env:
