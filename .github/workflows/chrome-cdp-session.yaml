@@ -192,7 +192,8 @@ jobs:
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
           # The fonts package downloads from SourceForge and can hang; it is optional.
-          sudo timeout 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
+          # -k: apt-get ignores SIGTERM while dpkg runs, so follow up with SIGKILL.
+          sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           fc-cache -f >/dev/null
           rm /tmp/chrome.deb
           google-chrome --version
