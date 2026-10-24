@@ -33,9 +33,10 @@ name: "Android emulator session over Tailscale"
 #   With `exit_node` on (the default), the runner's internet traffic, and so
 #   the emulator's, leaves through the tailnet exit node TAILSCALE_EXIT_NODE,
 #   as in typescript-worker-run: apps see that node's IP, not GitHub's. It is
-#   switched on after the state is downloaded and off before it is uploaded,
-#   so the multi-GB transfers don't go through it. If the egress IP doesn't
-#   change, the run stops before the emulator starts.
+#   switched on just before the emulator starts (after the state and system
+#   image downloads) and off before the state is uploaded, so the multi-GB
+#   transfers don't go through it. If the egress IP doesn't change, the
+#   emulator is not started.
 #
 # SECRETS
 #   TAILSCALE_EXIT_NODE            exit node: tag:name, MagicDNS name or 100.x
@@ -249,46 +250,13 @@ jobs:
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
           echo "Joined the tailnet as android-emulator."
 
-      - name: Use the exit node
-        if: ${{ inputs.exit_node }}
-        env:
-          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
-        run: |
-          set -euo pipefail
-          target="$(printf '%s' "$TAILSCALE_EXIT_NODE" | tr -d '[:space:]')"
-          if [ -z "$target" ]; then
-            echo "::error title=No exit node::TAILSCALE_EXIT_NODE is not set; run with exit_node off to go without one."
-            exit 1
-          fi
-          # Public log: the node and both egress IPs are masked.
-          echo "::add-mask::${target}"
-          # It reaches a command line, so only the forms Tailscale takes.
-          if [[ ! "$target" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
-            exit 1
-          fi
-          before="$(curl -fsS --max-time 10 https://api.ipify.org || true)"
-          [ -z "$before" ] || echo "::add-mask::${before}"
-          sudo tailscale set --exit-node="$target"
-          after=""
-          for _ in $(seq 1 12); do
-            after="$(curl -fsS --max-time 10 https://api.ipify.org || true)"
-            [ -n "$after" ] && [ "$after" != "$before" ] && break
-            sleep 5
-          done
-          [ -z "$after" ] || echo "::add-mask::${after}"
-          if [ -z "$after" ] || [ "$after" = "$before" ]; then
-            echo "::error title=Exit node not in use::The egress IP did not change. Check the node is online and advertises an exit node."
-            sudo tailscale set --exit-node= || true
-            exit 1
-          fi
-          echo "Internet traffic now leaves through the exit node (fingerprint $(printf '%s' "$target" | sha256sum | cut -c1-12))."
-
       # `script` runs line by line, so the session logic lives in its own file.
       - uses: reactivecircus/android-emulator-runner@v2
         id: emulator
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
+          USE_EXIT_NODE: ${{ inputs.exit_node }}
+          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
         with:
           # Android 15, the best-tested Play Store x86_64 image on CI. The
           # Android 17 image bootlooped (Pixel Launcher crashing) under
@@ -324,7 +292,10 @@ jobs:
           emulator-boot-timeout: 900
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb
           # above is the same size; the session script fills it with the window.
-          pre-emulator-launch-script: bash .github/scripts/android-emulator-config.sh
+          # The exit node goes on here, after the SDK and system image downloads.
+          pre-emulator-launch-script: |
+            bash .github/scripts/android-emulator-exit-node.sh
+            bash .github/scripts/android-emulator-config.sh
           script: bash .github/scripts/android-emulator-session.sh
 
       # Before Save state, so the upload goes straight to GitHub.
@@ -339,6 +310,11 @@ jobs:
         if: ${{ always() && (steps.emulator.outcome == 'success' || steps.emulator.outcome == 'failure' || steps.emulator.outcome == 'cancelled') }}
         run: |
           set -euo pipefail
+          # Failed before launch (e.g. the exit node check): the AVD is as restored.
+          if [ ! -e /tmp/emulator-launched ]; then
+            echo "The emulator never started; nothing to save."
+            exit 0
+          fi
           id="${{ github.run_id }}"
           adb="$ANDROID_HOME/platform-tools/adb"
           snapshots=~/.android/avd/session.avd/snapshots
