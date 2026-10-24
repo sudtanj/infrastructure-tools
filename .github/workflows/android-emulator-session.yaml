@@ -23,7 +23,9 @@ name: "Android emulator session over Tailscale"
 #
 # STOP IT WITH THE STOP FILE, NOT THE CANCEL BUTTON
 #   adb -s android-emulator:5555 shell touch /data/local/tmp/stop-session
-# A cancelled run (or one killed by the job timeout) uploads nothing; the next
+# A run saves whether the emulator step succeeds or fails (a boot timeout, a
+# session script error), so setup done over VNC is kept either way. A
+# cancelled run (or one killed by the job timeout) uploads nothing; the next
 # run resumes from the previous save. Hitting `max_minutes` does save.
 #
 # SECRETS
@@ -218,6 +220,7 @@ jobs:
 
       # `script` runs line by line, so the session logic lives in its own file.
       - uses: reactivecircus/android-emulator-runner@v2
+        id: emulator
         env:
           MAX_MINUTES: ${{ inputs.max_minutes }}
         with:
@@ -257,6 +260,10 @@ jobs:
           script: bash .github/scripts/android-emulator-session.sh
 
       - name: Save state
+        # Also after a failed emulator step: the AVD may hold work done over
+        # VNC. Not when the emulator never ran (an earlier step failed: the
+        # AVD may be half restored), nor on cancel.
+        if: ${{ !cancelled() && (steps.emulator.outcome == 'success' || steps.emulator.outcome == 'failure') }}
         run: |
           set -euo pipefail
           id="${{ github.run_id }}"
