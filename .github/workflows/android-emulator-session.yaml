@@ -25,9 +25,8 @@ name: "Android emulator session over Tailscale"
 #   adb -s android-emulator:5555 shell touch /data/local/tmp/stop-session
 # Every run in which the emulator started saves, however it ends: stop file,
 # `max_minutes`, a boot timeout, the emulator crashing, or the Cancel button.
-# The snapshot (quick resume) is kept only if the emulator wrote it during
-# this run and shut down cleanly; otherwise the disk is saved without it and
-# the next run cold boots, so app data and logins are never rolled back.
+# Only the disk is kept, no quick-resume snapshot: every run cold boots, so
+# app data and logins are never rolled back.
 #
 # PINEDRAMA AUTOPLAY
 #   Daily at 07:00 and 17:00 UTC+7 (GitHub can start a scheduled run late),
@@ -172,9 +171,9 @@ jobs:
           rm -rf /tmp/state
           echo "Saved state restored."
 
-      # The runner's adb key, made once and kept encrypted beside the state.
-      # The emulator hands its host key to Android only on a cold boot; a
-      # snapshot resume keeps trusting the previous run's key, so a new key
+      # The emulator hands its host key to Android only on a cold boot. Runs
+      # cold boot now (-no-snapshot), but a fixed key keeps adb authorized if
+      # snapshots ever come back.
       # every run would leave this run's adb unauthorized.
       - name: Restore or generate adb key
         run: |
@@ -313,13 +312,12 @@ jobs:
           ram-size: 6144M
           heap-size: 512M
           disk-size: 8G
-          # No -no-window: the window is drawn on Xvfb for VNC. Snapshots are
-          # on: the emulator saves RAM to the AVD when it is killed after the
-          # session, the AVD is saved with it, and the next run resumes in
-          # seconds. A snapshot from another emulator version or CPU is
-          # rejected and the emulator cold boots instead.
+          # No -no-window: the window is drawn on Xvfb for VNC. -no-snapshot:
+          # every run cold boots (a few minutes) from the saved disk, which
+          # keeps all app data and logins. Quick-resume snapshots hung the boot
+          # when one failed to load ("Missing section footer ... Error -22").
           # No cameras: the default back camera renders a 3D scene on the CPU.
-          emulator-options: -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
+          emulator-options: -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb
@@ -349,21 +347,12 @@ jobs:
           fi
           id="${{ github.run_id }}"
           adb="$ANDROID_HOME/platform-tools/adb"
-          snapshots=~/.android/avd/session.avd/snapshots
-          keep_snapshot=true
-          if [ "${{ steps.emulator.outcome }}" = cancelled ]; then
-            if pgrep -f qemu-system-x86_64 >/dev/null; then
-              # Cancelled with the emulator up: shut it down cleanly, which
-              # flushes the disk and writes a fresh snapshot.
-              timeout 60 "$adb" -s emulator-5554 shell sync || true
-              timeout 30 "$adb" -s emulator-5554 emu kill || true
-            else
-              # Stopped by the cancel itself, maybe partway through a write.
-              keep_snapshot=false
-            fi
+          if [ "${{ steps.emulator.outcome }}" = cancelled ] && pgrep -f qemu-system-x86_64 >/dev/null; then
+            # Cancelled with the emulator up: flush the guest's disk, then stop it.
+            timeout 60 "$adb" -s emulator-5554 shell sync || true
+            timeout 30 "$adb" -s emulator-5554 emu kill || true
           fi
-          # `emu kill` returns before the emulator finishes writing its
-          # snapshot; packing it half-written would break the next boot.
+          # The disk images are complete only once qemu has exited.
           for _ in $(seq 1 90); do
             pgrep -f qemu-system-x86_64 >/dev/null || break
             sleep 2
@@ -371,18 +360,10 @@ jobs:
           if pgrep -f qemu-system-x86_64 >/dev/null; then
             echo "::warning::Emulator still running after 3 minutes; killing it."
             sudo pkill -9 -f qemu-system-x86_64 || true
-            keep_snapshot=false
           fi
-          # A snapshot not rewritten since launch is the one restored at the
-          # start (the emulator crashed): loading it would roll the disk back
-          # and lose this run's work.
-          if [ -z "$(find "$snapshots" -name ram.bin -newer /tmp/emulator-launched 2>/dev/null)" ]; then
-            keep_snapshot=false
-          fi
-          if [ "$keep_snapshot" = false ]; then
-            echo "::warning::Saving the disk without a snapshot; the next run cold boots."
-            rm -rf "$snapshots"
-          fi
+          # Every run cold boots (-no-snapshot); an old snapshot would only
+          # add gigabytes to the upload.
+          rm -rf ~/.android/avd/session.avd/snapshots
           mkdir -p /tmp/save
           cd /tmp/save
           # Release assets cap at 2 GiB each.

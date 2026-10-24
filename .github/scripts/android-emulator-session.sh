@@ -74,7 +74,7 @@ log_memory() {
 
 # qemu can die without a word (the OOM killer, a crash in its host video
 # decoder); adb then only says "offline" and the stop file never comes. End
-# the run so Save state runs (it drops the stale snapshot).
+# the run so Save state runs.
 emulator_died() {
   echo "::error title=Emulator exited::qemu-system-x86_64 is gone; ending the session."
   sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true

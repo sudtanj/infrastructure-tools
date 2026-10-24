@@ -9,8 +9,7 @@ cfg="${ANDROID_AVD_HOME:-$HOME/.android/avd}/session.avd/config.ini"
 sed -i -E '/^(hw\.lcd\.(width|height|density)|hw\.ramSize|showDeviceFrame)=/d' "$cfg"
 # The AVD is created once and restored after that, so the RAM size is set here
 # too, not only by `ram-size`. With 4 GB the guest swapped constantly once an
-# ARM app ran under translation. A changed size makes the saved snapshot
-# unusable: that run cold boots once, keeping the disk.
+# ARM app ran under translation.
 cat >> "$cfg" <<'EOF'
 hw.ramSize=6144
 hw.lcd.width=720
@@ -20,5 +19,5 @@ showDeviceFrame=no
 EOF
 grep -E '^(hw\.lcd\.|hw\.ramSize|hw\.cpu\.ncore)' "$cfg"
 
-# Save state keeps the snapshot only if it was written after this.
+# Save state skips runs that fail before this point (the AVD is as restored).
 touch /tmp/emulator-launched
