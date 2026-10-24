@@ -37,12 +37,41 @@ fill_screen() {
 }
 fill_screen || echo "::warning::Could not make the emulator window full screen."
 
+# Host memory and the emulator's resident size, for telling an OOM kill from
+# a crash afterwards.
+log_memory() {
+  local pid rss
+  pid="$(pgrep -f qemu-system-x86_64 | head -1)" || true
+  rss="$( [ -n "$pid" ] && ps -o rss= -p "$pid" | awk '{ printf "%d", $1 / 1024 }' )" || true
+  free -m | awk -v rss="${rss:-?}" '/^Mem:/ { printf "memory: host used %d MiB, available %d MiB; emulator RSS %s MiB\n", $3, $7, rss }'
+}
+
+# qemu can die without a word (the OOM killer, a crash in its host video
+# decoder); adb then only says "offline" and the stop file never comes. End
+# the run so the state is still saved, and drop the snapshot: it is the one
+# restored at the start, and loading it would roll the disk back to then.
+# Cold booting from the disk keeps what was done in this run.
+emulator_died() {
+  echo "::error title=Emulator exited::qemu-system-x86_64 is gone; ending the session."
+  sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true
+  log_memory
+  rm -rf "${ANDROID_AVD_HOME:-$HOME/.android/avd}/session.avd/snapshots"
+  exit 1
+}
+
 echo "Emulator ready. Waiting for the stop file (limit ${max} minutes)."
+log_memory
 deadline=$((SECONDS + max * 60))
+next_memory_log=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do
+  pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
   if adb shell test -e /data/local/tmp/stop-session 2>/dev/null; then
     echo "Stop file found."
     break
+  fi
+  if [ "$SECONDS" -ge "$next_memory_log" ]; then
+    log_memory
+    next_memory_log=$((SECONDS + 300))
   fi
   sleep 15
 done
