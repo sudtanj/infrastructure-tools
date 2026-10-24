@@ -174,7 +174,6 @@ jobs:
       # The emulator hands its host key to Android only on a cold boot. Runs
       # cold boot now (-no-snapshot), but a fixed key keeps adb authorized if
       # snapshots ever come back.
-      # every run would leave this run's adb unauthorized.
       - name: Restore or generate adb key
         run: |
           set -euo pipefail
