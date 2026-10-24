@@ -33,7 +33,8 @@ if [ ! -s /etc/ssh/ssh_host_ed25519_key ]; then
   tmpkey="$(mktemp -u /tmp/opi-selfcheck-key.XXXXXX)"
   ssh-keygen -q -t ed25519 -N '' -f "$tmpkey" && SSHD_ARGS=(-h "$tmpkey")
 fi
-mkdir -p /run/sshd
+# sshd -t refuses a privsep dir that is group-writable (e.g. created under a umask of 002)
+install -d -m 755 -o root -g root /run/sshd
 sshd_value() { sshd -T "${SSHD_ARGS[@]}" -C "user=opi-selfcheck,host=probe,addr=$1" 2>/dev/null | awk -v k="$2" '$1 == k { print $2; exit }'; }
 expect_sshd() {
   local addr="$1" key="$2" want="$3" got
