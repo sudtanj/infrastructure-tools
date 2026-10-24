@@ -168,8 +168,9 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #     can push to THIS repo can change what gets executed. Keep push access to
 #     trusted people on both.
 #   * The scripts receive only the secrets they read (HONEYGAIN_EMAIL /
-#     HONEYGAIN_PASSWORD), as environment variables. Add a secret to the job
-#     env when a script starts needing it. They do NOT get PRIVATE_REPO_TOKEN
+#     HONEYGAIN_PASSWORD, TELEGRAM_TOKEN / TELEGRAM_CHAT_ID), as environment
+#     variables. Add a secret to the job env when a script starts needing it.
+#     They do NOT get PRIVATE_REPO_TOKEN
 #     (the clone credential), TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET
 #     (the VPN credentials), STATE_KEY or GITHUB_TOKEN.
 #   * A successful script's output is NOT printed: it goes to a log file and
@@ -1141,6 +1142,9 @@ jobs:
           CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
           CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
           CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          # gcp_billing sends its summary to Telegram.
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -uo pipefail
           cd "private/$TSWORKER_DIR"

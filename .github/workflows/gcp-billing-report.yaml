@@ -1,8 +1,12 @@
 name: "GCP Billing Report"
 
-# Every morning, sums up the Google Cloud bill for the current invoice month from the
-# Cloud Billing export in BigQuery and sends it to Telegram: total, credits, net amount,
-# a month-end estimate, cost per service, the top SKUs (resources) and the last 7 days.
+# Sums up the Google Cloud bill for an invoice month from the Cloud Billing export in
+# BigQuery and sends it to Telegram: total, credits, net amount, a month-end estimate,
+# cost per service, the top SKUs (resources) and the last 7 days.
+#
+# Manual only: the export is off, so the daily summary comes from the private repo's
+# typescript-worker script gcp_billing, which reads the Billing Reports page in the
+# logged-in Chrome (typescript-worker-run.yaml). Re-add a schedule here once the export is on.
 #
 # One-time setup:
 #   1. Billing > Billing export > BigQuery export: turn on "Standard usage cost" and point it
@@ -18,8 +22,6 @@ name: "GCP Billing Report"
 #   GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT  (shared with the GCP workflows)
 #   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID                                     (shared with the other alerts)
 on:
-  schedule:
-    - cron: "0 1 * * *"   # 08:00 WIB
   workflow_dispatch:
     inputs:
       month:
