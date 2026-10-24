@@ -1,0 +1,119 @@
+#!/bin/bash
+# /usr/local/sbin/opi-selfcheck: asserts the lockdown of the opi-zero3-armbian image.
+#
+#   opi-selfcheck --image   pristine image (build chroot / loop-mounted image): config only, and
+#                           no user, provisioning file or secret may be present yet
+#   opi-selfcheck           running board: config plus services, firewall, sysctl, Docker
+#
+# Run at the end of customize-image.sh, by the CI image inspection and simulation (also after
+# package upgrades, to prove updates don't undo anything), and by hand on the real board.
+# Prints TAP-style lines; exits 1 when any check fails. Needs root.
+
+set -uo pipefail
+
+MODE=runtime
+[ "${1:-}" = "--image" ] && MODE=image
+FAILED=0
+ok()   { echo "ok - $*"; }
+fail() { echo "not ok - $*"; FAILED=1; }
+check() { local desc="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$desc"; else fail "$desc"; fi; }
+
+# --- accounts and consoles ---
+root_pw="$(getent shadow root | cut -d: -f2)"
+case "$root_pw" in '!'*|'*'*) ok "root password locked" ;; *) fail "root password locked" ;; esac
+check "no first-login wizard" test ! -e /root/.not_logged_in_yet
+if grep -rqs -- '--autologin' /etc/systemd/system/; then fail "no console autologin"; else ok "no console autologin"; fi
+docker_members="$(getent group docker | cut -d: -f4)"
+[ -z "$docker_members" ] && ok "docker group has no members" || fail "docker group has no members (${docker_members})"
+
+# --- sshd effective configuration ---
+SSHD_ARGS=()
+if [ ! -s /etc/ssh/ssh_host_ed25519_key ]; then
+  # No host keys yet (they are created on first boot): test with a throwaway one
+  tmpkey="$(mktemp -u /tmp/opi-selfcheck-key.XXXXXX)"
+  ssh-keygen -q -t ed25519 -N '' -f "$tmpkey" && SSHD_ARGS=(-h "$tmpkey")
+fi
+mkdir -p /run/sshd
+sshd_value() { sshd -T "${SSHD_ARGS[@]}" -C "user=opi-selfcheck,host=probe,addr=$1" 2>/dev/null | awk -v k="$2" '$1 == k { print $2; exit }'; }
+expect_sshd() {
+  local addr="$1" key="$2" want="$3" got
+  got="$(sshd_value "$addr" "$key")"
+  [ "$got" = "$want" ] && ok "sshd ${key}=${want} from ${addr}" || fail "sshd ${key}=${want} from ${addr} (got '${got}')"
+}
+if sshd -t "${SSHD_ARGS[@]}" 2>/dev/null; then ok "sshd config valid"; else fail "sshd config valid"; fi
+expect_sshd 203.0.113.9 permitrootlogin no
+expect_sshd 203.0.113.9 passwordauthentication no
+expect_sshd 2001:db8::9 passwordauthentication no
+expect_sshd 192.168.1.10 passwordauthentication yes
+expect_sshd 100.100.10.10 passwordauthentication yes
+expect_sshd 192.168.1.10 permitrootlogin no
+expect_sshd 203.0.113.9 allowtcpforwarding no
+expect_sshd 203.0.113.9 x11forwarding no
+expect_sshd 203.0.113.9 maxauthtries 3
+[ -n "${tmpkey:-}" ] && rm -f "$tmpkey" "${tmpkey}.pub"
+
+# --- package-owned files stay pristine, so upgrades never stop on a conffile prompt ---
+changed="$(dpkg --verify nftables docker-ce containerd.io unattended-upgrades openssh-server 2>/dev/null \
+           | awk '$2 == "c" { print $3 }' | tr '\n' ' ')"
+[ -z "$changed" ] && ok "no package conffile modified" || fail "no package conffile modified (${changed})"
+if grep -qs 'opi' /etc/ssh/sshd_config; then fail "sshd_config is the package's own"; else ok "sshd_config is the package's own"; fi
+
+# --- files, units, Docker and apt config ---
+for f in /etc/opi/nftables.conf /etc/ssh/sshd_config.d/00-opi-hardening.conf /etc/sysctl.d/90-opi-hardening.conf \
+         /etc/modprobe.d/opi-blacklist.conf /etc/docker/daemon.json /usr/local/sbin/opi-provision \
+         /usr/local/lib/opi-image/opi-init-tailscale-docker.sh /etc/dpkg/dpkg.cfg.d/90opi-nodoc \
+         /etc/apt/apt.conf.d/50opi-lists; do
+  check "present: ${f}" test -s "$f"
+done
+for u in docker.service opi-firewall.service opi-provision.service ssh.service; do
+  [ "$(systemctl is-enabled "$u" 2>/dev/null)" = enabled ] && ok "enabled: ${u}" || fail "enabled: ${u}"
+done
+for u in bluetooth.service aw859a-bluetooth.service ModemManager.service avahi-daemon.service; do
+  state="$(systemctl is-enabled "$u" 2>/dev/null)"
+  case "$state" in enabled|enabled-runtime) fail "not enabled: ${u}" ;; *) ok "not enabled: ${u}" ;; esac
+done
+check "docker daemon.json valid" dockerd --validate --config-file /etc/docker/daemon.json
+origins="$(apt-config dump Unattended-Upgrade::Origins-Pattern 2>/dev/null | grep -o '"[^"]*"' | tr '\n' ' ')"
+if [ -n "$origins" ] && ! grep -q 'label=Debian"' <<< "$origins" && grep -q 'Debian-Security' <<< "$origins"; then
+  ok "unattended-upgrades: security origin only"
+else
+  fail "unattended-upgrades: security origin only (${origins})"
+fi
+[ "$(apt-config dump APT::Periodic::Unattended-Upgrade 2>/dev/null | grep -o '"[0-9]*"')" = '"1"' ] \
+  && ok "unattended-upgrades enabled" || fail "unattended-upgrades enabled"
+
+if [ "$MODE" = image ]; then
+  # --- a pristine image carries no login and no secret ---
+  humans="$(awk -F: '$3 >= 1000 && $3 < 65534 { print $1 }' /etc/passwd | tr '\n' ' ')"
+  [ -z "$humans" ] && ok "no user accounts" || fail "no user accounts (${humans})"
+  check "no provisioning file" test ! -e /boot/opi-provision.env
+  if grep -rIlsE 'tskey-(client|auth)-[A-Za-z0-9]' /etc /root /home /boot /usr/local /var/lib 2>/dev/null | grep -q .; then
+    fail "no Tailscale keys in the image"
+  else
+    ok "no Tailscale keys in the image"
+  fi
+else
+  # --- running board ---
+  for u in docker.service opi-firewall.service ssh.service; do
+    check "active: ${u}" systemctl is-active -q "$u"
+  done
+  [ "$(systemctl is-failed opi-provision.service 2>/dev/null)" = failed ] && fail "opi-provision did not fail" || ok "opi-provision did not fail"
+  if nft list chain inet opi_host input 2>/dev/null | grep -q 'policy drop'; then
+    ok "firewall: input policy drop"
+  else
+    fail "firewall: input policy drop"
+  fi
+  for kv in kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.unprivileged_bpf_disabled=1 \
+            net.ipv4.conf.all.accept_redirects=0 net.ipv6.conf.all.accept_redirects=0 fs.protected_regular=2; do
+    k="${kv%%=*}" want="${kv#*=}"
+    got="$(sysctl -n "$k" 2>/dev/null)"
+    # unprivileged_bpf_disabled=2 (locked) is stronger than 1
+    { [ "$got" = "$want" ] || { [ "$k" = kernel.unprivileged_bpf_disabled ] && [ "$got" = 2 ]; }; } \
+      && ok "sysctl ${k}=${got}" || fail "sysctl ${k}=${want} (got '${got}')"
+  done
+  [ "$(docker info -f '{{.LoggingDriver}}' 2>/dev/null)" = local ] && ok "docker log driver local" || fail "docker log driver local"
+  [ "$(docker info -f '{{.LiveRestoreEnabled}}' 2>/dev/null)" = true ] && ok "docker live-restore" || fail "docker live-restore"
+fi
+
+[ "$FAILED" -eq 0 ] && echo "# opi-selfcheck (${MODE}): all passed" || echo "# opi-selfcheck (${MODE}): FAILED"
+exit "$FAILED"

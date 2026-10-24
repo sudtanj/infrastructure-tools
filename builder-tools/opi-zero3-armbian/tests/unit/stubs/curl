@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "curl $*" >> /tmp/stub-calls
+exit 0

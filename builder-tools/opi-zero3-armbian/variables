@@ -1,0 +1,10 @@
+# Armbian build framework, pinned. The workflow moves ARMBIAN_BRANCH to the newest release
+# branch (vYY.MM) and ARMBIAN_COMMIT to its head, then commits and builds.
+ARMBIAN_REPO="https://github.com/armbian/build"
+ARMBIAN_BRANCH="v26.08"
+ARMBIAN_COMMIT="23ca24aec803e0bb17607f75bbb0516f151277a5"
+
+# Target
+BOARD="orangepizero3"
+KERNEL_BRANCH="current"
+RELEASE="trixie"

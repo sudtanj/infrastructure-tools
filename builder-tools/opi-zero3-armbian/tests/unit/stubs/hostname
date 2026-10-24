@@ -1,0 +1,4 @@
+#!/bin/bash
+# A container can't change its host name; record it instead
+echo "hostname $*" >> /tmp/stub-calls
+exit 0

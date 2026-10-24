@@ -1,0 +1,243 @@
+name: Builder Tools - Build Orange Pi Zero 3 Armbian image
+
+# Builds a minimal, locked-down Armbian (Debian trixie) image for the Orange Pi Zero 3 that only
+# runs Docker: see builder-tools/opi-zero3-armbian/README.md.
+#
+#   unit       shellcheck, bats unit tests (opi-provision, configs vs the real Debian packages),
+#              firewall integration test with real packets in network namespaces
+#   build      the image, from the candidate Armbian commit
+#   inspect    boot chain, board kernel Docker support, size, opi-selfcheck inside the image
+#   simulate   boots the image's root filesystem in QEMU shaped like a Zero 3 (4x A53, 1 GiB):
+#              provisioning, SSH, Docker, a real bash-scripts/ deploy, then apt upgrades + reboot
+#   promote    upstream updates: every Monday `check` looks for new fixes on the pinned Armbian
+#              release branch; the new head is built and tested as a candidate and only committed
+#              to `variables` once everything above passed, so a breaking upstream change never
+#              lands on main. A newer release branch (new kernel line, U-Boot, ...) is only
+#              announced; it is tried when a manual run asks for it (input new_release)
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: "Also try new fixes on the pinned Armbian release branch (promoted when tests pass)"
+        type: boolean
+        default: true
+      new_release:
+        description: "Move to the newest Armbian release branch instead (promoted when tests pass)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'builder-tools/opi-zero3-armbian/**'
+      - 'bash-scripts/opi-init-tailscale-docker.sh'
+      - 'bash-scripts/init-dozzle.sh'
+      - '.github/workflows/builder-tools-opi-zero3-armbian.yml'
+  pull_request:
+    paths:
+      - 'builder-tools/opi-zero3-armbian/**'
+      - 'bash-scripts/opi-init-tailscale-docker.sh'
+      - '.github/workflows/builder-tools-opi-zero3-armbian.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opi-zero3-armbian-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+env:
+  DIR: builder-tools/opi-zero3-armbian
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      branch: ${{ steps.decide.outputs.branch }}
+      commit: ${{ steps.decide.outputs.commit }}
+      bump: ${{ steps.decide.outputs.bump }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pick the Armbian commit to build
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          TRY_UPSTREAM: ${{ github.event_name == 'schedule' || inputs.upstream == true }}
+          NEW_RELEASE: ${{ inputs.new_release == true }}
+        run: |
+          set -euo pipefail
+          . <(sed 's|\r$||' "$DIR/variables")
+          branch="$ARMBIAN_BRANCH" commit="$ARMBIAN_COMMIT" bump=false
+          newest_branch="$(git ls-remote --heads "$ARMBIAN_REPO" \
+                    | sed -n 's|.*refs/heads/\(v[0-9][0-9]\.[0-9][0-9]\)$|\1|p' | sort -V | tail -n1)"
+          [ -n "$newest_branch" ] || { echo "::error::no Armbian release branch found"; exit 1; }
+          # Stability: by default only fixes on the pinned release branch are followed
+          want_branch="$ARMBIAN_BRANCH"
+          if [ "$NEW_RELEASE" = true ]; then
+            want_branch="$newest_branch"
+          elif [ "$newest_branch" != "$ARMBIAN_BRANCH" ]; then
+            echo "::notice::Armbian $newest_branch is out (pinned: $ARMBIAN_BRANCH). Run this workflow with new_release to build and test it."
+          fi
+          if [ "$TRY_UPSTREAM" = true ] || [ "$NEW_RELEASE" = true ]; then
+            head="$(git ls-remote "$ARMBIAN_REPO" "refs/heads/$want_branch" | cut -f1)"
+            [ -n "$head" ] || { echo "::error::cannot resolve $want_branch"; exit 1; }
+            if [ "$head" != "$ARMBIAN_COMMIT" ]; then
+              branch="$want_branch" commit="$head" bump=true
+            fi
+          fi
+          echo "pinned=$ARMBIAN_BRANCH@$ARMBIAN_COMMIT building=$branch@$commit bump=$bump"
+          build=true
+          case "$EVENT" in
+            pull_request) build=false ;;              # unit tests only
+            schedule) [ "$bump" = true ] || build=false ;;
+          esac
+          {
+            echo "build=$build"
+            echo "branch=$branch"
+            echo "commit=$commit"
+            echo "bump=$bump"
+          } >> "$GITHUB_OUTPUT"
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning -e SC1090,SC1091 \
+            "$DIR"/userpatches/customize-image.sh "$DIR"/userpatches/overlay/opi-provision \
+            "$DIR"/userpatches/overlay/opi-selfcheck "$DIR"/tests/*.sh "$DIR"/tests/unit/run.sh \
+            "$DIR"/tests/unit/stubs/*
+
+      - name: Unit tests (bats, in Debian of the image's release)
+        run: "$DIR/tests/unit/run.sh"
+
+      - name: Firewall integration test (network namespaces)
+        run: |
+          command -v nft >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nftables >/dev/null; }
+          sudo "$DIR/tests/firewall-netns.sh"
+
+  build:
+    needs: [check, unit]
+    if: needs.check.outputs.build == 'true'
+    # Native arm64: the rootfs is built and customized without QEMU
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      ARMBIAN_COMMIT: ${{ needs.check.outputs.commit }}
+    outputs:
+      artifact: ${{ steps.prepare.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get variables
+        run: |
+          # The candidate commit from `check` wins over the pinned one
+          sed 's|\r$||' "$DIR/variables" | grep -E '^[A-Z_]+=' | grep -v '^ARMBIAN_COMMIT=' | tr -d '"' >> "$GITHUB_ENV"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Download Armbian build framework
+        run: |
+          set -euo pipefail
+          git init -q armbian
+          git -C armbian fetch -q --depth 1 "$ARMBIAN_REPO" "$ARMBIAN_COMMIT"
+          git -C armbian checkout -q FETCH_HEAD
+          cp -r "$DIR/userpatches" armbian/userpatches
+          # Baked into the image for first-boot Tailscale; one copy of the script in this repo
+          install -m 755 bash-scripts/opi-init-tailscale-docker.sh \
+            armbian/userpatches/overlay/opi-init-tailscale-docker.sh
+          chmod 755 armbian/userpatches/customize-image.sh
+
+      - name: Build image
+        working-directory: armbian
+        run: |
+          ./compile.sh build \
+            BOARD="$BOARD" BRANCH="$KERNEL_BRANCH" RELEASE="$RELEASE" \
+            BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no \
+            CONSOLE_AUTOLOGIN=no OPENSSHD_REGENERATE_HOST_KEYS=true \
+            COMPRESS_OUTPUTIMAGE=sha,xz
+
+      - name: Prepare artifacts
+        id: prepare
+        run: |
+          set -euo pipefail
+          ls -la armbian/output/images
+          img="$(find armbian/output/images -maxdepth 1 -name '*.img.xz' -printf '%f\n' | head -n1)"
+          [ -n "$img" ] || { echo "::error::no image produced"; exit 1; }
+          echo "artifact=${img%.img.xz}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare.outputs.artifact }}
+          retention-days: 14
+          compression-level: 0  # already xz
+          path: |
+            armbian/output/images/*.img.xz
+            armbian/output/images/*.img.xz.sha
+
+  inspect:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: image
+      - name: Inspect image
+        run: |
+          (cd image && sha256sum -c ./*.img.xz.sha)
+          sudo "$DIR/tests/image-inspect.sh" image/*.img.xz
+
+  simulate:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: image
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm sshpass xz-utils >/dev/null
+      - name: Simulate an Orange Pi Zero 3 (QEMU, 4x Cortex-A53, 1 GiB)
+        run: sudo "$DIR/tests/simulate.sh" image/*.img.xz
+
+  promote:
+    needs: [check, inspect, simulate]
+    if: needs.check.outputs.bump == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Commit the tested Armbian pin
+        env:
+          BRANCH: ${{ needs.check.outputs.branch }}
+          COMMIT: ${{ needs.check.outputs.commit }}
+        run: |
+          set -euo pipefail
+          sed -i -e "s|^ARMBIAN_BRANCH=.*|ARMBIAN_BRANCH=\"$BRANCH\"|" \
+                 -e "s|^ARMBIAN_COMMIT=.*|ARMBIAN_COMMIT=\"$COMMIT\"|" "$DIR/variables"
+          if git diff --quiet; then echo "already pinned"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DIR/variables"
+          # [skip ci]: this exact commit was just built and tested
+          git commit -m "opi-zero3-armbian: update Armbian build to $BRANCH (${COMMIT:0:8}) [skip ci]"
+          git push

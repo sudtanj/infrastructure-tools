@@ -43,6 +43,7 @@ on:
     paths:
       - 'builder-tools/**'
       - '!builder-tools/mi3-padavan-firmware-builder/**'
+      - '!builder-tools/opi-zero3-armbian/**'
       - '.github/workflows/builder-tools-docker-publish.yml'
   schedule:
     - cron: '17 4 * * 1'

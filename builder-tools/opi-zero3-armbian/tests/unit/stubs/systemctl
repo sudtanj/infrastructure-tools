@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test stub: records the call; `show` reports armbian-firstrun as finished
+echo "systemctl $*" >> /tmp/stub-calls
+[ "${1:-}" = show ] && echo exited
+exit 0

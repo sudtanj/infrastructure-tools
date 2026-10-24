@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stands in for opi-init-tailscale-docker.sh: dumps the environment it was given
+env | sort > /tmp/ts-env
+exit "$(cat /tmp/ts-rc 2>/dev/null || echo 0)"

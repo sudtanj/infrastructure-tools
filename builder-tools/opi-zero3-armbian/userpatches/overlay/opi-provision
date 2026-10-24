@@ -1,0 +1,186 @@
+#!/bin/bash
+# /usr/local/sbin/opi-provision, run by opi-provision.service when /boot/opi-provision.env exists.
+#
+# The image ships with no login at all (root locked, no user), because CI artifacts of a public
+# repo are downloadable by anyone. This script turns the env file written onto the SD card after
+# flashing into: the SSH/sudo user, host name, time zone, optional Wi-Fi and, optionally,
+# Tailscale through the same opi-init-tailscale-docker.sh the Orange Pi workflow uses. The file is
+# shredded once the user exists; secret values are never logged. Running it again with a new
+# file updates the same settings (password, keys, Wi-Fi, ...).
+#
+# Keys (KEY=value per line, # comments, optional quotes; anything else is ignored):
+#   OPI_SSH_USER              login + sudo user (required)
+#   OPI_SSH_PASSWORD          its password, 8+ characters (required: sudo needs it, and the
+#                             Orange Pi workflow logs in with it; password SSH is LAN/tailnet only)
+#   OPI_SSH_AUTHORIZED_KEYS   public keys, several separated by a literal \n
+#   OPI_HOSTNAME              host name (default: keep orangepizero3)
+#   OPI_TIMEZONE              e.g. Asia/Jakarta (default UTC)
+#   WIFI_SSID, WIFI_PASSWORD, WIFI_COUNTRY   join Wi-Fi (DHCP), e.g. WIFI_COUNTRY=ID
+#   TAILSCALE_OAUTH_CLIENT_SECRET, OPI_TS_*  passed to opi-init-tailscale-docker.sh (see it for
+#                             the full list); without the secret, Tailscale is skipped
+
+set -euo pipefail
+umask 077
+
+ENV_FILE="${1:-/boot/opi-provision.env}"
+STATE_DIR=/var/lib/opi-provision
+TS_SCRIPT=/usr/local/lib/opi-image/opi-init-tailscale-docker.sh
+
+log() { echo "[opi-provision] $*"; }
+die() { echo "[opi-provision] ERROR: $*" >&2; exit 1; }
+
+[ -f "$ENV_FILE" ] || { log "no ${ENV_FILE}, nothing to do"; exit 0; }
+
+declare -A CFG=()
+ALLOWED='^(OPI_SSH_USER|OPI_SSH_PASSWORD|OPI_SSH_AUTHORIZED_KEYS|OPI_HOSTNAME|OPI_TIMEZONE|WIFI_SSID|WIFI_PASSWORD|WIFI_COUNTRY|TAILSCALE_OAUTH_CLIENT_SECRET|OPI_TS_[A-Z0-9_]+)$'
+# Parsed, never sourced: the file is data, and a typo must not run as root
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%$'\r'}"
+  [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+  if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+    log "skipping a malformed line"
+    continue
+  fi
+  key="${BASH_REMATCH[2]}" val="${BASH_REMATCH[3]}"
+  if [[ ! "$key" =~ $ALLOWED ]]; then
+    log "ignoring unknown key ${key}"
+    continue
+  fi
+  if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then
+    val="${BASH_REMATCH[1]}"
+  fi
+  CFG[$key]="$val"
+done < "$ENV_FILE"
+
+USER_NAME="${CFG[OPI_SSH_USER]:-}"
+PASSWORD="${CFG[OPI_SSH_PASSWORD]:-}"
+[[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "OPI_SSH_USER missing or not a valid user name"
+[ "$USER_NAME" != root ] || die "OPI_SSH_USER can't be root (root stays locked)"
+[ "${#PASSWORD}" -ge 8 ] || die "OPI_SSH_PASSWORD missing or shorter than 8 characters"
+[[ "$PASSWORD" != *:* ]] || die "OPI_SSH_PASSWORD can't contain ':'"
+
+# --- host name, time zone ---
+if [ -n "${CFG[OPI_HOSTNAME]:-}" ]; then
+  name="${CFG[OPI_HOSTNAME]}"
+  [[ "$name" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || die "OPI_HOSTNAME is not a valid host name"
+  echo "$name" > /etc/hostname
+  hostname "$name"
+  # Rewritten in place (no rename), so it also works when /etc/hosts is a bind mount
+  hosts="$(grep -v '^127\.0\.1\.1[[:space:]]' /etc/hosts || true)"
+  printf '%s\n127.0.1.1\t%s\n' "$hosts" "$name" > /etc/hosts
+  log "host name: ${name}"
+fi
+
+tz="${CFG[OPI_TIMEZONE]:-UTC}"
+if [[ "$tz" != *..* ]] && [ -f "/usr/share/zoneinfo/${tz}" ]; then
+  ln -sf "/usr/share/zoneinfo/${tz}" /etc/localtime
+  echo "$tz" > /etc/timezone
+  log "time zone: ${tz}"
+else
+  log "unknown time zone ${tz}, keeping $(cat /etc/timezone 2>/dev/null || echo UTC)"
+fi
+
+# --- user ---
+if id "$USER_NAME" >/dev/null 2>&1; then
+  log "user ${USER_NAME} exists, updating it"
+else
+  useradd --create-home --shell /bin/bash "$USER_NAME"
+  log "user ${USER_NAME} created"
+fi
+# sudo with a password; deliberately not in the docker group (that is passwordless root)
+usermod -aG sudo,adm,systemd-journal "$USER_NAME"
+printf '%s:%s\n' "$USER_NAME" "$PASSWORD" | chpasswd
+log "password set"
+
+home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+if [ -n "${CFG[OPI_SSH_AUTHORIZED_KEYS]:-}" ]; then
+  install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "${home}/.ssh"
+  printf '%s\n' "${CFG[OPI_SSH_AUTHORIZED_KEYS]//\\n/$'\n'}" | sed '/^[[:space:]]*$/d' > "${home}/.ssh/authorized_keys"
+  chown "$USER_NAME:$USER_NAME" "${home}/.ssh/authorized_keys"
+  chmod 600 "${home}/.ssh/authorized_keys"
+  log "authorized keys: $(wc -l < "${home}/.ssh/authorized_keys")"
+fi
+
+passwd -l root >/dev/null
+rm -f /root/.not_logged_in_yet
+
+# armbian-firstrun (only started, not finished, before this unit) regenerates the host keys
+for _ in $(seq 90); do
+  [ "$(systemctl show -p SubState --value armbian-firstrun.service 2>/dev/null)" != running ] \
+    && [ -s /etc/ssh/ssh_host_ed25519_key ] && break
+  sleep 2
+done
+printf 'AllowUsers %s\n' "$USER_NAME" > /etc/ssh/sshd_config.d/10-opi-users.conf
+chmod 644 /etc/ssh/sshd_config.d/10-opi-users.conf
+sshd -t || die "sshd rejects its config"
+systemctl reload-or-restart ssh
+log "ssh: only ${USER_NAME} may log in"
+
+# --- Wi-Fi ---
+yaml_quote() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+if [ -n "${CFG[WIFI_SSID]:-}" ]; then
+  {
+    echo "# Written by opi-provision"
+    echo "network:"
+    echo "  version: 2"
+    echo "  renderer: networkd"
+    echo "  wifis:"
+    echo "    all-wlan-interfaces:"
+    echo "      match:"
+    echo "        name: \"wl*\""
+    echo "      dhcp4: yes"
+    echo "      dhcp6: yes"
+    if [ -n "${CFG[WIFI_COUNTRY]:-}" ]; then
+      echo "      regulatory-domain: $(yaml_quote "${CFG[WIFI_COUNTRY]}")"
+    fi
+    echo "      access-points:"
+    if [ -n "${CFG[WIFI_PASSWORD]:-}" ]; then
+      echo "        $(yaml_quote "${CFG[WIFI_SSID]}"):"
+      echo "          password: $(yaml_quote "${CFG[WIFI_PASSWORD]}")"
+    else
+      echo "        $(yaml_quote "${CFG[WIFI_SSID]}"): {}"
+    fi
+  } > /etc/netplan/20-opi-wifi.yaml
+  chmod 600 /etc/netplan/20-opi-wifi.yaml
+  if netplan generate && netplan apply; then
+    log "wi-fi configured"
+  else
+    log "WARNING: netplan rejected the Wi-Fi settings; see /etc/netplan/20-opi-wifi.yaml"
+  fi
+fi
+
+# The login exists now: the secrets on the SD card are no longer needed
+shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"
+mkdir -p "$STATE_DIR"
+date -u +%FT%TZ > "${STATE_DIR}/provisioned"
+log "base provisioning done, ${ENV_FILE} removed"
+
+# --- Tailscale (optional) ---
+if [ -z "${CFG[TAILSCALE_OAUTH_CLIENT_SECRET]:-}" ]; then
+  log "no TAILSCALE_OAUTH_CLIENT_SECRET, skipping Tailscale"
+  exit 0
+fi
+[ -f "$TS_SCRIPT" ] || die "missing ${TS_SCRIPT}"
+
+log "waiting for internet access"
+for _ in $(seq 60); do
+  # Any HTTP answer (401 here) means DNS, routing and TLS work
+  curl -sS -m 10 -o /dev/null https://registry-1.docker.io/v2/ 2>/dev/null && break
+  sleep 10
+done
+
+ts_env=(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+        "TAILSCALE_OAUTH_CLIENT_SECRET=${CFG[TAILSCALE_OAUTH_CLIENT_SECRET]}")
+for key in "${!CFG[@]}"; do
+  [[ "$key" == OPI_TS_* ]] && ts_env+=("${key}=${CFG[$key]}")
+done
+log "running opi-init-tailscale-docker.sh"
+if env -i "${ts_env[@]}" bash "$TS_SCRIPT"; then
+  date -u +%FT%TZ > "${STATE_DIR}/tailscale"
+  log "tailscale done"
+else
+  rc=$?
+  log "ERROR: opi-init-tailscale-docker.sh failed (exit ${rc}). SSH in over the LAN and run"
+  log "${TS_SCRIPT} again with the same variables, or write a new ${ENV_FILE} and reboot."
+  exit "$rc"
+fi

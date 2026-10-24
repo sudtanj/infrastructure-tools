@@ -34,8 +34,8 @@ This repository contains IaC (Terraform), orchestration scripts, and GitHub Acti
 │   ├── shopee-search.yaml            # Manual: 10 cheapest Shopee listings from Star/Mall sellers, into the private repo
 │   ├── commute-traffic.yaml          # Weekdays 08:00/11:00 home to work, 17:00/18:00 work to home: Google Maps traffic (first run also predicts the second), Waze reports, odd-even, CCTV, weather, to Telegram
 │   ├── apps-private-build.yaml       # Build a private repo's apps/ for Android, iOS, Windows, macOS, Linux; publish as its release
-│   └── builder-tools-*.yml           # Docker image publish, PR check, dependabot merge and Mi 3 firmware build for builder-tools/
-├── builder-tools/                    # Docker images (Docker Hub) + Padavan firmware builder, migrated from sudtanj/builder-tools
+│   └── builder-tools-*.yml           # Docker image publish, PR check, dependabot merge, Mi 3 firmware and Orange Pi image builds for builder-tools/
+├── builder-tools/                    # Docker images (Docker Hub) + Padavan firmware and Orange Pi Zero 3 Armbian image builders, migrated from sudtanj/builder-tools
 ├── bash-scripts/
 │   ├── deploy-botkeep.sh             # Upload a folder to Botkeep via the Developer API
 │   ├── init-paseo-codex.sh           # Deploy & maintain Codex CLI agent container

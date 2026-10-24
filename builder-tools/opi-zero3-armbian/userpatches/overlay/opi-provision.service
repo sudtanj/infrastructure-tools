@@ -1,0 +1,16 @@
+[Unit]
+Description=Provision the device from /boot/opi-provision.env
+Documentation=https://github.com/sudtanj/infrastructure-tools/tree/main/builder-tools/opi-zero3-armbian
+ConditionPathExists=/boot/opi-provision.env
+# After firstrun, which regenerates the SSH host keys
+After=armbian-firstrun.service network-online.target docker.service ssh.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/opi-provision
+TimeoutStartSec=25min
+
+[Install]
+WantedBy=multi-user.target

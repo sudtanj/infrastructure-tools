@@ -95,9 +95,10 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 ## Non-Docker projects
 
 Folders **without** a `Dockerfile` are ignored by the Docker publish workflow
-(it also has a `paths-ignore` for the mi3 folder) and are handled by their own
+(it also has a `paths-ignore` for these folders) and are handled by their own
 workflows.
 
 | Folder | Workflow | What it is |
 |---|---|---|
 | [`mi3-padavan-firmware-builder/`](mi3-padavan-firmware-builder/) | [`mi3-padavan-firmware-builder.yml`](../.github/workflows/builder-tools-mi3-padavan-firmware-builder.yml) | Builds Xiaomi Mi 3 [Padavan](https://gitlab.com/hadzhioglu/padavan-ng) firmware. Checks the upstream `stable_master` branch every 6 hours, commits the new hash to `variables` and builds when it changed (also on manual run, pushes to the folder, and `mi3-padavan-firmware-builder-v*` tags). Firmware is an artifact kept 7 days - see its [README](mi3-padavan-firmware-builder/README.md) |
+| [`opi-zero3-armbian/`](opi-zero3-armbian/) | [`opi-zero3-armbian.yml`](../.github/workflows/builder-tools-opi-zero3-armbian.yml) | Minimal, locked-down [Armbian](https://github.com/armbian/build) (Debian trixie) SD card image for the Orange Pi Zero 3 that only runs Docker: no default login, key/LAN-only sshd, nftables host firewall, first-boot provisioning (user, Wi-Fi, Tailscale) from a file on the card. Tested in CI (unit, firewall-in-netns, image inspection, QEMU Zero 3 simulation incl. apt upgrades + reboot); fixes on the pinned Armbian release branch are picked up weekly and promoted only after the tests pass (new releases on request). Image is an artifact kept 14 days - see its [README](opi-zero3-armbian/README.md) |
