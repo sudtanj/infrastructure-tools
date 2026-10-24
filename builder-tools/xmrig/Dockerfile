@@ -7,7 +7,7 @@ ARG VERSION=latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential cmake automake libtool autoconf curl ca-certificates \
+    && apt-get install -y --no-install-recommends build-essential cmake automake libtool autoconf curl wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     if [ "$VERSION" = "latest" ]; then \
