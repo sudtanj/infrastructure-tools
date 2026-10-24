@@ -163,7 +163,13 @@ jobs:
           fi
           mkdir -p /tmp/state ~/.android/avd
           cd /tmp/state
-          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          # Downloads of several GB sometimes break off (HTTP/2 stream errors).
+          for attempt in 1 2 3; do
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*" --clobber && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            echo "::warning::State download failed (try ${attempt}); retrying."
+            sleep 15
+          done
           sha256sum -c --quiet "state-${id}.sha256"
           cat state-"${id}".part-* \
             | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
