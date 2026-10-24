@@ -1,4 +1,4 @@
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 # "latest" resolves the newest xmrig release at build time, so the weekly
 # no-cache rebuild always picks up new upstream versions. Pin with
@@ -27,7 +27,7 @@ RUN set -eu; \
     make -j "$(nproc)"; \
     cp xmrig /usr/local/bin/xmrig
 
-FROM ubuntu:24.04 AS main
+FROM ubuntu:26.04 AS main
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends uuid-runtime && rm -rf /var/lib/apt/lists/*
