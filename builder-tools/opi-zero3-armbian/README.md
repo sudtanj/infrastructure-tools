@@ -74,9 +74,10 @@ runs on a native arm64 runner:
 
 The customization lives in [`userpatches/customize-image.sh`](userpatches/customize-image.sh)
 (runs in the image chroot) and the files in [`userpatches/overlay/`](userpatches/overlay/).
-Armbian changes the image after that script (it installs armbian-config and copies in
-uncompressed apt lists), so the [`opi-image` extension](userpatches/extensions/opi-image.sh)
-undoes both later in the build. The workflow copies `bash-scripts/opi-init-tailscale-docker.sh` into the overlay at build time.
+Armbian changes the image after that script (it installs armbian-config, which brings Python
+back, and copies in uncompressed apt lists), so the [`opi-image` extension](userpatches/extensions/opi-image.sh)
+undoes both later in the build: it purges every package that was not installed when the script
+finished. The workflow copies `bash-scripts/opi-init-tailscale-docker.sh` into the overlay at build time.
 
 ## Tests
 

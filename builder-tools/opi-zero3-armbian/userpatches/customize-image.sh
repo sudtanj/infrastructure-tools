@@ -122,4 +122,8 @@ rmdir /etc/systemd/system/getty@.service.d /etc/systemd/system/serial-getty@.ser
 # Fails the build when an upstream Armbian/Debian/Docker change undid part of the lockdown
 echo "[customize] self-check"
 /usr/local/sbin/opi-selfcheck --image
+# Armbian installs packages after this script (armbian-config, which pulls Python back in); the
+# opi-image extension purges everything that is not on this list
+dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' | awk '$1 == "ii" { print $2 }' | LC_ALL=C sort \
+  > /var/lib/opi-image-packages
 echo "[customize] done"
