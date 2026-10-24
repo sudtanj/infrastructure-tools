@@ -60,6 +60,9 @@ install -D -m 644 "${OVERLAY}/docker-daemon.json" /etc/docker/daemon.json
 # Only new files and drop-ins: no package-owned file is edited, so apt/unattended upgrades never
 # stop on a conffile prompt or overwrite the lockdown (opi-selfcheck asserts this)
 install -D -m 644 "${OVERLAY}/sshd-hardening.conf" /etc/ssh/sshd_config.d/00-opi-hardening.conf
+# Armbian edits sshd_config (PermitRootLogin yes). Our drop-in wins anyway, but the package's own
+# file lets openssh-server upgrades replace it without asking
+cp /usr/share/openssh/sshd_config /etc/ssh/sshd_config
 install -D -m 644 "${OVERLAY}/nftables.conf" /etc/opi/nftables.conf
 install -D -m 644 "${OVERLAY}/opi-firewall.service" /etc/systemd/system/opi-firewall.service
 install -D -m 644 "${OVERLAY}/sysctl-hardening.conf" /etc/sysctl.d/90-opi-hardening.conf

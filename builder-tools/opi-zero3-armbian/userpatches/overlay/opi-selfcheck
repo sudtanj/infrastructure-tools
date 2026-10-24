@@ -40,7 +40,12 @@ expect_sshd() {
   got="$(sshd_value "$addr" "$key")"
   [ "$got" = "$want" ] && ok "sshd ${key}=${want} from ${addr}" || fail "sshd ${key}=${want} from ${addr} (got '${got}')"
 }
-if sshd -t "${SSHD_ARGS[@]}" 2>/dev/null; then ok "sshd config valid"; else fail "sshd config valid"; fi
+if sshd_err="$(sshd -t "${SSHD_ARGS[@]}" 2>&1)"; then
+  ok "sshd config valid"
+else
+  fail "sshd config valid"
+  printf '#   %s\n' "$sshd_err"
+fi
 expect_sshd 203.0.113.9 permitrootlogin no
 expect_sshd 203.0.113.9 passwordauthentication no
 expect_sshd 2001:db8::9 passwordauthentication no
@@ -56,7 +61,15 @@ expect_sshd 203.0.113.9 maxauthtries 3
 changed="$(dpkg --verify nftables docker-ce containerd.io unattended-upgrades openssh-server 2>/dev/null \
            | awk '$2 == "c" { print $3 }' | tr '\n' ' ')"
 [ -z "$changed" ] && ok "no package conffile modified" || fail "no package conffile modified (${changed})"
-if grep -qs 'opi' /etc/ssh/sshd_config; then fail "sshd_config is the package's own"; else ok "sshd_config is the package's own"; fi
+# sshd_config is generated from this template (ucf); unchanged, upgrades update it silently.
+# armbian-firstrun comments out AcceptEnv on first boot, so a running board only checks for ours.
+if [ "$MODE" = image ]; then
+  check "sshd_config is the package's own" cmp -s /usr/share/openssh/sshd_config /etc/ssh/sshd_config
+elif grep -qs 'opi' /etc/ssh/sshd_config; then
+  fail "sshd_config is the package's own"
+else
+  ok "sshd_config is the package's own"
+fi
 
 # --- files, units, Docker and apt config ---
 for f in /etc/opi/nftables.conf /etc/ssh/sshd_config.d/00-opi-hardening.conf /etc/sysctl.d/90-opi-hardening.conf \
