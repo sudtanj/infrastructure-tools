@@ -1,0 +1,243 @@
+name: "GCP Billing Report"
+
+# Every morning, sums up the Google Cloud bill for the current invoice month from the
+# Cloud Billing export in BigQuery and sends it to Telegram: total, credits, net amount,
+# a month-end estimate, cost per service, the top SKUs (resources) and the last 7 days.
+#
+# One-time setup:
+#   1. Billing > Billing export > BigQuery export: turn on "Standard usage cost" and point it
+#      at a dataset in GCP_PROJECT_ID. The table (gcp_billing_export_v1_...) appears after a
+#      few hours; data usually starts from the day the export is enabled.
+#   2. Grant the service account used by gcp-bash-script-runner.yaml:
+#        roles/bigquery.jobUser    on GCP_PROJECT_ID
+#        roles/bigquery.dataViewer on the billing export dataset
+#
+# Repo secrets (this repo and its logs are public; the bill itself only goes to Telegram):
+#   GCP_BILLING_EXPORT_TABLE   optional: project.dataset.gcp_billing_export_v1_XXXXXX_XXXXXX_XXXXXX
+#                              When unset, the datasets of GCP_PROJECT_ID are searched for it.
+#   GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT  (shared with the GCP workflows)
+#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID                                     (shared with the other alerts)
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 08:00 WIB
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Invoice month YYYYMM (empty = current month)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: gcp-billing-report
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+  GCP_BILLING_EXPORT_TABLE: ${{ secrets.GCP_BILLING_EXPORT_TABLE }}
+
+jobs:
+  report:
+    name: "Billing summary to Telegram"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify required config
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in GCP_PROJECT_ID GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT \
+                   TELEGRAM_TOKEN TELEGRAM_CHAT_ID; do
+            [ -z "${!v:-}" ] && missing+=("$v") || true
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "::add-mask::${GCP_PROJECT_ID}"
+          echo "::add-mask::${GCP_SERVICE_ACCOUNT}"
+          echo "::add-mask::${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+          [ -z "${GCP_BILLING_EXPORT_TABLE:-}" ] || echo "::add-mask::${GCP_BILLING_EXPORT_TABLE}"
+          echo "[+] required secrets are set"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          create_credentials_file: true
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Find the billing export table
+        id: table
+        run: |
+          set -euo pipefail
+          gcloud config set core/verbosity error --quiet >/dev/null 2>&1
+          # Without ~/.bigqueryrc the first bq call prints a welcome banner into its JSON output
+          touch ~/.bigqueryrc
+          # bq errors name projects and datasets; the IDs are masked, long numbers are cut here
+          bqe() { sed -E 's/[0-9]{6,}/<n>/g' "$1" | head -c 1500; echo; }
+
+          TABLE="$(printf '%s' "${GCP_BILLING_EXPORT_TABLE:-}" | tr -d '[:space:]' | tr ':' '.')"
+          if [ -z "$TABLE" ]; then
+            echo "[*] GCP_BILLING_EXPORT_TABLE not set, searching the project's datasets"
+            if ! bq --headless --format=json ls --max_results=1000 "${GCP_PROJECT_ID}:" >"${RUNNER_TEMP}/ds.json" 2>"${RUNNER_TEMP}/ds.err"; then
+              echo "::error::Listing BigQuery datasets failed:"; bqe "${RUNNER_TEMP}/ds.err"; bqe "${RUNNER_TEMP}/ds.json"; exit 1
+            fi
+            for ds in $(jq -r '.[]?.datasetReference.datasetId' "${RUNNER_TEMP}/ds.json"); do
+              bq --headless --format=json ls --max_results=1000 "${GCP_PROJECT_ID}:${ds}" >"${RUNNER_TEMP}/t.json" 2>/dev/null || continue
+              t="$(jq -r '[.[]?.tableReference.tableId | select(startswith("gcp_billing_export_v1_"))][0] // empty' "${RUNNER_TEMP}/t.json")"
+              if [ -n "$t" ]; then TABLE="${GCP_PROJECT_ID}.${ds}.${t}"; break; fi
+            done
+            if [ -z "$TABLE" ]; then
+              echo "::error::No gcp_billing_export_v1_* table found in the project. Turn on Billing > Billing export > BigQuery export (Standard usage cost), wait a few hours, or set GCP_BILLING_EXPORT_TABLE."
+              exit 1
+            fi
+            echo "::add-mask::${TABLE}"
+            echo "[+] found the billing export table"
+          fi
+          if ! [[ "$TABLE" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$ ]]; then
+            echo "::error::GCP_BILLING_EXPORT_TABLE must look like project.dataset.table"
+            exit 1
+          fi
+          echo "name=${TABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build summary
+        env:
+          TABLE: ${{ steps.table.outputs.name }}
+          MONTH_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.month || '' }}
+        run: |
+          set -euo pipefail
+          bqe() { sed -E 's/[0-9]{6,}/<n>/g' "$1" | head -c 1500; echo; }
+
+          # Invoice months follow US Pacific time, as on the GCP invoice
+          MONTH="${MONTH_INPUT:-$(TZ=America/Los_Angeles date +%Y%m)}"
+          if ! [[ "$MONTH" =~ ^20[0-9]{2}(0[1-9]|1[0-2])$ ]]; then
+            echo "::error::month must be YYYYMM"; exit 1
+          fi
+          PREV="$(date -d "${MONTH:0:4}-${MONTH:4:2}-01 -1 month" +%Y%m)"
+          LABEL="$(date -d "${MONTH:0:4}-${MONTH:4:2}-01" '+%B %Y')"
+          if [ "$MONTH" = "$(TZ=America/Los_Angeles date +%Y%m)" ]; then
+            LABEL="${LABEL} (to $(TZ=America/Los_Angeles date '+%d %b'), Pacific time)"
+          fi
+
+          # Credits (free tier, promotions, discounts) are negative: net = cost + credits.
+          # Everything is aggregated and formatted here, so only one small row comes back.
+          cat > "${RUNNER_TEMP}/billing.sql" <<'SQL'
+          CREATE TEMP FUNCTION fmt(v FLOAT64, cur STRING) AS (
+            CONCAT(
+              IF(cur IN ('IDR', 'JPY', 'KRW', 'VND', 'CLP', 'HUF', 'TWD'),
+                 FORMAT("%'d", CAST(ROUND(IFNULL(v, 0)) AS INT64)),
+                 FORMAT("%'.2f", IF(ABS(IFNULL(v, 0)) < 0.005, 0, IFNULL(v, 0)))),
+              ' ', cur)
+          );
+          WITH r AS (
+            SELECT
+              invoice.month AS month,
+              currency,
+              IFNULL(project.id, '(no project)') AS project,
+              service.description AS service,
+              sku.description AS sku,
+              cost,
+              IFNULL((SELECT SUM(x.amount) FROM UNNEST(credits) AS x), 0) AS credit,
+              DATE(usage_start_time, 'America/Los_Angeles') AS day
+            FROM `__TABLE__`
+            WHERE invoice.month IN (@month, @prev)
+          ),
+          c AS (SELECT IFNULL(ANY_VALUE(currency), '') AS cur FROM r),
+          td AS (SELECT CURRENT_DATE('America/Los_Angeles') AS d),
+          t AS (
+            SELECT IFNULL(SUM(cost), 0) AS cost, IFNULL(SUM(credit), 0) AS credit, COUNT(*) AS n
+            FROM r WHERE month = @month
+          ),
+          p AS (SELECT IFNULL(SUM(cost + credit), 0) AS net FROM r WHERE month = @prev)
+          SELECT
+            t.n AS n_rows,
+            fmt(t.cost, c.cur) AS cost,
+            fmt(t.credit, c.cur) AS credits,
+            fmt(t.cost + t.credit, c.cur) AS net,
+            fmt(p.net, c.cur) AS prev_net,
+            IF(@month = FORMAT_DATE('%Y%m', td.d) AND EXTRACT(DAY FROM td.d) > 1,
+               fmt((t.cost + t.credit) / (EXTRACT(DAY FROM td.d) - 1) * EXTRACT(DAY FROM LAST_DAY(td.d)), c.cur),
+               NULL) AS estimate,
+            ARRAY(
+              SELECT CONCAT('• ', s.service, ': ', fmt(s.cost, c.cur), ' → ', fmt(s.cost + s.credit, c.cur))
+              FROM (SELECT service, SUM(cost) AS cost, SUM(credit) AS credit
+                    FROM r WHERE month = @month GROUP BY service) AS s
+              WHERE ABS(s.cost) >= 0.005 OR ABS(s.credit) >= 0.005
+              ORDER BY s.cost DESC
+            ) AS services,
+            ARRAY(
+              SELECT CONCAT('• ', k.sku, ' [', k.service, ']: ', fmt(k.cost, c.cur), ' → ', fmt(k.cost + k.credit, c.cur))
+              FROM (SELECT service, sku, SUM(cost) AS cost, SUM(credit) AS credit
+                    FROM r WHERE month = @month GROUP BY service, sku) AS k
+              WHERE k.cost >= 0.005
+              ORDER BY k.cost DESC
+              LIMIT 10
+            ) AS skus,
+            ARRAY(
+              SELECT CONCAT('• ', j.project, ': ', fmt(j.net, c.cur))
+              FROM (SELECT project, SUM(cost + credit) AS net
+                    FROM r WHERE month = @month GROUP BY project) AS j
+              ORDER BY j.net DESC
+            ) AS projects,
+            ARRAY(
+              SELECT CONCAT('• ', FORMAT_DATE('%a %d %b', d.day), ': ', fmt(d.net, c.cur))
+              FROM (SELECT day, SUM(cost + credit) AS net
+                    FROM r WHERE month = @month GROUP BY day) AS d
+              WHERE d.day >= DATE_SUB((SELECT MAX(day) FROM r WHERE month = @month), INTERVAL 6 DAY)
+              ORDER BY d.day
+            ) AS days
+          FROM t, p, c, td
+          SQL
+          sed -i "s/__TABLE__/${TABLE}/" "${RUNNER_TEMP}/billing.sql"
+
+          if ! bq --headless --quiet --format=json --project_id="${GCP_PROJECT_ID}" query \
+                 --nouse_legacy_sql --max_rows=10 \
+                 --parameter="month:STRING:${MONTH}" --parameter="prev:STRING:${PREV}" \
+                 <"${RUNNER_TEMP}/billing.sql" >"${RUNNER_TEMP}/billing.json" 2>"${RUNNER_TEMP}/billing.err"; then
+            echo "::error::BigQuery query failed:"; bqe "${RUNNER_TEMP}/billing.err"; bqe "${RUNNER_TEMP}/billing.json"; exit 1
+          fi
+
+          jq -r --arg label "$LABEL" --arg prev "${PREV:0:4}-${PREV:4:2}" '
+            .[0] as $s
+            | ["💰 Google Cloud billing: \($label)", "",
+               "Usage cost: \($s.cost)",
+               "Credits: \($s.credits)",
+               "Net to pay: \($s.net)"]
+              + (if $s.estimate then ["Month-end estimate: ~\($s.estimate)"] else [] end)
+              + ["Last month (\($prev)): \($s.prev_net)"]
+              + (if ($s.n_rows | tonumber) == 0 then ["", "No billing data exported for this month yet."] else [] end)
+              + (($s.services // []) | if length > 0 then ["", "By service (cost → after credits):"] + . else [] end)
+              + (($s.skus // []) | if length > 0 then ["", "Top resources (SKUs) by cost:"] + . else [] end)
+              + (($s.projects // []) | if length > 1 then ["", "Net by project:"] + . else [] end)
+              + (($s.days // []) | if length > 0 then ["", "Net per day (the newest day can still be filling in):"] + . else [] end)
+            | join("\n")
+            | if length > 4000 then .[:3980] + "\n… (truncated)" else . end
+          ' "${RUNNER_TEMP}/billing.json" > "${RUNNER_TEMP}/billing.txt"
+          echo "[+] summary built ($(jq -r '.[0].n_rows' "${RUNNER_TEMP}/billing.json") billing rows this month)"
+
+      - name: Send to Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@${RUNNER_TEMP}/billing.txt" \
+            -d "disable_web_page_preview=true" \
+            || { echo "::error::Telegram sendMessage failed"; exit 1; }
+          echo "[+] Telegram summary sent"
