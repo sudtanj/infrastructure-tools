@@ -319,7 +319,9 @@ jobs:
           # -HardwareDecoder: video is decoded inside Android, not by the
           # emulator on the host; qemu died silently minutes into PineDrama
           # playback twice with host decoding (hwcodec.*dec=2), memory fine.
-          emulator-options: -feature -HardwareDecoder -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
+          # -Vulkan: opening PineDrama's coin tab (a hybrid web page,
+          # SparkActivity) killed qemu within a second of its first frame.
+          emulator-options: -feature -HardwareDecoder,-Vulkan -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb
