@@ -134,3 +134,26 @@ EOF
   refute compgen -G '/var/lib/apt/lists/*Translation*'
   apt-cache policy tar | grep -q Candidate
 }
+
+@test "dpkg: firmware for other hardware is skipped, the board's Wi-Fi and USB dongles' kept" {
+  install -D -m 644 "${SRC}/dpkg-firmware.conf" /etc/dpkg/dpkg.cfg.d/91opi-firmware
+  pkg="${BATS_TEST_TMPDIR}/fw"
+  for f in qcom/sm8550/a.mbn adsp.b41 ath11k/x.bin ath12k/x.bin iwlwifi-8265-36.ucode rkwifi/fw.bin \
+           uwe5622/wcnmodem.bin mediatek/mt7601u.bin rtl_bt/rtl8761bu_fw.bin ath10k/QCA9377/fw.bin \
+           regulatory.db; do
+    install -D /dev/null "${pkg}/lib/firmware/${f}"
+  done
+  mkdir -p "${pkg}/DEBIAN"
+  printf 'Package: opi-fake-firmware\nVersion: 1\nArchitecture: all\nMaintainer: t <t@t>\nDescription: t\n' \
+    > "${pkg}/DEBIAN/control"
+  dpkg-deb --root-owner-group --build "$pkg" "${BATS_TEST_TMPDIR}/fw.deb" >/dev/null
+  dpkg -i "${BATS_TEST_TMPDIR}/fw.deb" >/dev/null
+  rm -f /etc/dpkg/dpkg.cfg.d/91opi-firmware
+  for f in qcom/sm8550/a.mbn adsp.b41 ath11k/x.bin ath12k/x.bin iwlwifi-8265-36.ucode rkwifi/fw.bin; do
+    [ ! -e "/lib/firmware/${f}" ] || { echo "installed: $f" >&2; return 1; }
+  done
+  for f in uwe5622/wcnmodem.bin mediatek/mt7601u.bin rtl_bt/rtl8761bu_fw.bin ath10k/QCA9377/fw.bin regulatory.db; do
+    [ -e "/lib/firmware/${f}" ] || { echo "missing: $f" >&2; return 1; }
+  done
+  dpkg -P opi-fake-firmware >/dev/null
+}

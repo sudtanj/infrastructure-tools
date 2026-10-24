@@ -29,6 +29,9 @@ Debian trixie with the `current` kernel, cut down to a box that only runs Docker
   IP forwarding and rp_filter are left to Docker and `opi-init-tailscale-docker.sh`.
 - **Small:** no docs, man pages or translations (a dpkg filter, so upgrades stay small too;
   licenses are kept), no translated package descriptions, apt lists kept compressed.
+  Firmware for hardware an H618 board can't have (Qualcomm SoCs, PCIe-only Wi-Fi, Rockchip
+  modules: about 400 MB of Armbian's 434 MB firmware package) is filtered the same way. The
+  board's UWE5622 Wi-Fi and USB Wi-Fi/Bluetooth dongle firmware stay.
   Removed from Armbian's minimal set: rsyslog (journald, capped at 24 MB), ALSA, man-db,
   bluez, btrfs-progs, dosfstools, wireguard-tools, figlet/toilet and a few others if present.
   The build fails rather than let a removal take a dependent package with it. Avahi, Bluetooth

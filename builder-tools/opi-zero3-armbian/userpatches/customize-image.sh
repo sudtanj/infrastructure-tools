@@ -24,6 +24,13 @@ find /usr/share/man /usr/share/info /usr/share/groff /usr/share/lintian -mindept
 find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +
 rm -f /var/lib/apt/lists/*Translation-*
 
+echo "[customize] size: no firmware for hardware this board can't have"
+install -D -m 644 "${OVERLAY}/dpkg-firmware.conf" /etc/dpkg/dpkg.cfg.d/91opi-firmware
+fw=/usr/lib/firmware
+rm -rf "${fw}/qcom" "${fw}/ath11k" "${fw}/ath12k" "${fw}/rkwifi" "${fw}"/adsp.* "${fw}"/iwlwifi-*
+# The board's own Wi-Fi must survive the filter
+ls "${fw}"/uwe5622/* >/dev/null
+
 echo "[customize] Docker CE for Debian ${RELEASE}"
 "${APT[@]}" update
 "${APT[@]}" install --no-install-recommends ca-certificates curl gnupg

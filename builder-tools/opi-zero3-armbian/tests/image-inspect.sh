@@ -5,12 +5,12 @@
 # image's own root filesystem. Must run as root on an arm64 host (the chroot runs natively).
 #
 #   sudo tests/image-inspect.sh Armbian-...img.xz|.img
-#   OPI_MAX_ROOTFS_MB   fail when the root filesystem uses more (default 1600)
+#   OPI_MAX_ROOTFS_MB   fail when the root filesystem uses more (default 1200)
 
 set -euo pipefail
 
 IMG_IN="$1"
-MAX_MB="${OPI_MAX_ROOTFS_MB:-1600}"
+MAX_MB="${OPI_MAX_ROOTFS_MB:-1200}"
 WORK="$(mktemp -d)"
 MNT="${WORK}/root"
 FAILED=0
@@ -49,6 +49,7 @@ check "kernel /boot/Image" test -s "${MNT}/boot/Image"
 check "initrd /boot/uInitrd" test -s "${MNT}/boot/uInitrd"
 dtb="$(find "${MNT}/boot/dtb/" -name 'sun50i-h618-orangepi-zero3.dtb' 2>/dev/null | head -n1)"
 [ -n "$dtb" ] && ok "device tree sun50i-h618-orangepi-zero3.dtb" || fail "device tree sun50i-h618-orangepi-zero3.dtb"
+if ls "${MNT}"/usr/lib/firmware/uwe5622/* >/dev/null 2>&1; then ok "Wi-Fi firmware (UWE5622)"; else fail "Wi-Fi firmware (UWE5622)"; fi
 root_uuid="$(blkid -s UUID -o value "${LOOP}p1")"
 if grep -q "^rootdev=UUID=${root_uuid}$" "${MNT}/boot/armbianEnv.txt"; then
   ok "armbianEnv rootdev matches the root partition"
@@ -76,12 +77,13 @@ fi
 used_mb="$(( $(df --output=used -B1 "$MNT" | tail -n1) / 1048576 ))"
 echo "# root filesystem: ${used_mb} MiB used, $(chroot "$MNT" dpkg-query -W -f='.\n' 2>/dev/null | wc -l) packages"
 [[ "$IMG_IN" == *.xz ]] && echo "# download (xz): $(( $(stat -c %s "$IMG_IN") / 1048576 )) MiB"
+# (|| true: head closing the pipe early is not a failure)
 echo "# largest packages (MiB installed):"
 chroot "$MNT" dpkg-query -W -f='${Installed-Size}\t${Package}\n' 2>/dev/null | sort -rn | head -n 25 \
-  | awk '{ printf "#   %7.1f  %s\n", $1 / 1024, $2 }'
+  | awk '{ printf "#   %7.1f  %s\n", $1 / 1024, $2 }' || true
 echo "# largest directories (MiB):"
 du -xm -d 4 "${MNT}/usr" "${MNT}/var" "${MNT}/opt" 2>/dev/null | sort -rn | head -n 25 \
-  | sed "s|${MNT}||; s/^/#   /"
+  | sed "s|${MNT}||; s/^/#   /" || true
 [ "$used_mb" -le "$MAX_MB" ] && ok "root filesystem <= ${MAX_MB} MiB" || fail "root filesystem <= ${MAX_MB} MiB (${used_mb})"
 
 # --- the lockdown, checked by the image's own tools ---

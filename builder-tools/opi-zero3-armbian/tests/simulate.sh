@@ -59,12 +59,18 @@ trap cleanup EXIT
 # --- prepare the disk: the image, grown like a real SD card ---
 IMG="${WORK}/sim.img"
 if [[ "$IMG_IN" == *.xz ]]; then xz -dc "$IMG_IN" > "$IMG"; else cp "$IMG_IN" "$IMG"; fi
-truncate -s +3G "$IMG"
-image_bytes="$(stat -c %s "$IMG")"
+truncate -s +4G "$IMG"
+# The simulation kernel's modules need more room than the image leaves free: partition 1 grows
+# by 1 GiB here; the other 3 GiB stay unallocated for armbian-resize-filesystem on first boot
+read -r p_start p_sectors < <(partx -g -o START,SECTORS -n 1 "$IMG")
+echo "${p_start},$((p_sectors + 2097152))" | sfdisk -q -N 1 --no-reread "$IMG"
 
 LOOP="$(losetup --show -fP "$IMG")"
+e2fsck -fp "${LOOP}p1" >/dev/null || [ $? -le 1 ]
+resize2fs "${LOOP}p1" >/dev/null
 mkdir -p "$MNT"
 mount "${LOOP}p1" "$MNT"
+pre_boot_kb="$(df --output=size -k "$MNT" | tail -n1)"
 ROOT_UUID="$(blkid -s UUID -o value "${LOOP}p1")"
 IMAGE_HOSTKEY="$(cat "${MNT}/etc/ssh/ssh_host_ed25519_key.pub" 2>/dev/null || true)"
 for m in dev dev/pts proc sys; do mount --bind "/${m}" "${MNT}/${m}"; done
@@ -175,8 +181,8 @@ new_hostkey="$(vm cat /etc/ssh/ssh_host_ed25519_key.pub)"
 [ -n "$new_hostkey" ] && [ "$new_hostkey" != "$IMAGE_HOSTKEY" ] && ok "SSH host keys regenerated on first boot" \
   || fail "SSH host keys regenerated on first boot"
 root_kb="$(vm "df --output=size -k / | tail -n1")"
-[ "$((root_kb * 1024))" -gt "$((image_bytes - 3221225472))" ] && ok "root filesystem grown to the card" \
-  || fail "root filesystem grown to the card (${root_kb} KiB)"
+[ "$root_kb" -gt "$((pre_boot_kb + 2097152))" ] && ok "root filesystem grown to the card" \
+  || fail "root filesystem grown to the card (${pre_boot_kb} -> ${root_kb} KiB)"
 
 # A real deployment from this repo, the way the Orange Pi workflow runs it (root via sudo)
 scp -P "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \

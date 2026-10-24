@@ -75,7 +75,7 @@ fi
 # --- files, units, Docker and apt config ---
 for f in /etc/opi/nftables.conf /etc/ssh/sshd_config.d/00-opi-hardening.conf /etc/sysctl.d/90-opi-hardening.conf \
          /etc/modprobe.d/opi-blacklist.conf /etc/docker/daemon.json /usr/local/sbin/opi-provision \
-         /usr/local/lib/opi-image/opi-init-tailscale-docker.sh /etc/dpkg/dpkg.cfg.d/90opi-nodoc \
+         /usr/local/lib/opi-image/opi-init-tailscale-docker.sh /etc/dpkg/dpkg.cfg.d/90opi-nodoc /etc/dpkg/dpkg.cfg.d/91opi-firmware \
          /etc/apt/apt.conf.d/50opi-lists; do
   check "present: ${f}" test -s "$f"
 done
