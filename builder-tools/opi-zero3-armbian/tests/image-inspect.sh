@@ -21,7 +21,7 @@ check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else fail 
 cleanup() {
   for m in dev/pts dev proc sys run; do umount "${MNT}/${m}" 2>/dev/null || true; done
   umount "$MNT" 2>/dev/null || true
-  [ -n "${LOOP:-}" ] && losetup -d "$LOOP" 2>/dev/null
+  if [ -n "${LOOP:-}" ]; then losetup -d "$LOOP" 2>/dev/null || true; fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT

@@ -40,7 +40,7 @@ fail() { echo "not ok - $*"; FAILED=1; }
 unmount_image() {
   for m in dev/pts dev proc sys run; do umount "${MNT}/${m}" 2>/dev/null || true; done
   umount "$MNT" 2>/dev/null || true
-  [ -n "${LOOP:-}" ] && { losetup -d "$LOOP" 2>/dev/null || true; LOOP=; }
+  if [ -n "${LOOP:-}" ]; then losetup -d "$LOOP" 2>/dev/null || true; LOOP=; fi
 }
 stop_vm() {
   [ -s "${WORK}/qemu.pid" ] && kill "$(cat "${WORK}/qemu.pid")" 2>/dev/null || true
@@ -52,7 +52,7 @@ cleanup() {
   if [ "$FAILED" -ne 0 ] || [ -n "${SIM_KEEP_LOGS:-}" ]; then
     for f in "${WORK}"/console-*.log; do [ -f "$f" ] && { echo "::group::$(basename "$f")"; tail -n 300 "$f"; echo "::endgroup::"; }; done
   fi
-  [ -z "${SIM_WORK:-}" ] && rm -rf "$WORK"
+  if [ -z "${SIM_WORK:-}" ]; then rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 
