@@ -82,8 +82,22 @@ emulator_died() {
   exit 1
 }
 
-echo "Emulator ready. Waiting for the stop file (limit ${max} minutes)."
-log_memory
+# Scheduled runs: play PineDrama until its coin timer is gone or
+# AUTOPLAY_MINUTES pass, then end the session so it saves.
+if [ "${AUTOPLAY:-false}" = true ]; then
+  minutes="${AUTOPLAY_MINUTES:-30}"
+  echo "Emulator ready. Playing PineDrama until the coin is gone (limit ${minutes} minutes)."
+  log_memory
+  DEVICE=emulator-5554 MAX_MINUTES="$minutes" \
+    timeout "$((minutes + 15))m" node .github/scripts/pinedrama/pinedrama.ts \
+    || echo "::warning::The PineDrama script ended with an error; saving anyway."
+  pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
+  log_memory
+  max=0
+else
+  echo "Emulator ready. Waiting for the stop file (limit ${max} minutes)."
+  log_memory
+fi
 deadline=$((SECONDS + max * 60))
 next_memory_log=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do

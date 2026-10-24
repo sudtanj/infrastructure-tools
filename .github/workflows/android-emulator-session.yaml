@@ -29,6 +29,13 @@ name: "Android emulator session over Tailscale"
 # this run and shut down cleanly; otherwise the disk is saved without it and
 # the next run cold boots, so app data and logins are never rolled back.
 #
+# PINEDRAMA AUTOPLAY
+#   Daily at 07:00 and 17:00 UTC+7 (GitHub can start a scheduled run late),
+#   or with `autoplay` on, the runner plays PineDrama itself with
+#   .github/scripts/pinedrama/pinedrama.ts until the coin timer at the top
+#   left is gone or `autoplay_minutes` pass, then saves; no stop file needed.
+#   If a session is already running, the scheduled one waits for it.
+#
 # EXIT NODE
 #   With `exit_node` on (the default), the runner's internet traffic, and so
 #   the emulator's, leaves through the tailnet exit node TAILSCALE_EXIT_NODE,
@@ -51,6 +58,10 @@ name: "Android emulator session over Tailscale"
 # ---------------------------------------------------------------------------
 
 on:
+  # 07:00 and 17:00 UTC+7.
+  schedule:
+    - cron: '0 0 * * *'
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       max_minutes:
@@ -65,6 +76,14 @@ on:
         description: 'Send internet traffic through the TAILSCALE_EXIT_NODE exit node'
         type: boolean
         default: true
+      autoplay:
+        description: 'Play PineDrama until the coin is gone, then save (as the schedule does)'
+        type: boolean
+        default: false
+      autoplay_minutes:
+        description: 'With autoplay, stop after this many minutes even if the coin is still there'
+        type: number
+        default: 30
 
 permissions:
   contents: read
@@ -85,6 +104,10 @@ jobs:
       GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
+      # A scheduled run has no inputs; these are its values.
+      USE_EXIT_NODE: ${{ github.event_name == 'schedule' || inputs.exit_node }}
+      AUTOPLAY: ${{ github.event_name == 'schedule' || inputs.autoplay }}
+      AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 30 }}
 
     steps:
       - uses: actions/checkout@v4
@@ -250,12 +273,21 @@ jobs:
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
           echo "Joined the tailnet as android-emulator."
 
+      # Before the exit node goes on, so the install is direct.
+      - uses: actions/setup-node@v4
+        if: ${{ env.AUTOPLAY == 'true' }}
+        with:
+          node-version: 24
+
+      - name: Install the PineDrama script's dependency
+        if: ${{ env.AUTOPLAY == 'true' }}
+        run: npm install --prefix .github/scripts/pinedrama --no-package-lock --no-audit --no-fund
+
       # `script` runs line by line, so the session logic lives in its own file.
       - uses: reactivecircus/android-emulator-runner@v2
         id: emulator
         env:
-          MAX_MINUTES: ${{ inputs.max_minutes }}
-          USE_EXIT_NODE: ${{ inputs.exit_node }}
+          MAX_MINUTES: ${{ inputs.max_minutes || 120 }}
           TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
         with:
           # Android 15, the best-tested Play Store x86_64 image on CI. The
@@ -300,7 +332,7 @@ jobs:
 
       # Before Save state, so the upload goes straight to GitHub.
       - name: Leave the exit node
-        if: ${{ always() && inputs.exit_node }}
+        if: ${{ always() && env.USE_EXIT_NODE == 'true' }}
         run: sudo tailscale set --exit-node= || true
 
       - name: Save state
