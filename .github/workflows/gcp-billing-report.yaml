@@ -102,8 +102,9 @@ jobs:
               if [ -n "$t" ]; then TABLE="${GCP_PROJECT_ID}.${ds}.${t}"; break; fi
             done
             if [ -z "$TABLE" ]; then
-              echo "::error::No gcp_billing_export_v1_* table found in the project. Turn on Billing > Billing export > BigQuery export (Standard usage cost), wait a few hours, or set GCP_BILLING_EXPORT_TABLE."
-              exit 1
+              echo "::warning::No gcp_billing_export_v1_* table found, sending the resource list without amounts. Turn on Billing > Billing export > BigQuery export (Standard usage cost) to get the charges."
+              echo "name=" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
             echo "::add-mask::${TABLE}"
             echo "[+] found the billing export table"
@@ -114,7 +115,51 @@ jobs:
           fi
           echo "name=${TABLE}" >> "$GITHUB_OUTPUT"
 
+      - name: Build resource list (no billing export yet)
+        if: steps.table.outputs.name == ''
+        run: |
+          set -uo pipefail
+          # No API returns charges without the BigQuery export, so list what is billable instead
+          out="${RUNNER_TEMP}/billing.txt"
+          {
+            echo "💰 Google Cloud billing: $(TZ=America/Los_Angeles date '+%B %Y')"
+            echo ""
+            echo "⚠️ Amounts unavailable: the BigQuery billing export is not enabled."
+            echo "Billing > Billing export > BigQuery export > Standard usage cost (Console only)."
+          } > "$out"
+          enabled="$(gcloud billing projects describe "${GCP_PROJECT_ID}" --format='value(billingEnabled)' 2>/dev/null || true)"
+          case "$enabled" in
+            True)  printf '\nBilling on the project: enabled\n' >> "$out" ;;
+            False) printf '\nBilling on the project: disabled\n' >> "$out" ;;
+          esac
+          section() {  # title, then gcloud args producing one line per resource
+            local title="$1"; shift
+            local lines
+            if lines="$(gcloud "$@" 2>/dev/null)"; then
+              echo "" >> "$out"
+              if [ -n "$lines" ]; then
+                echo "${title}:" >> "$out"
+                printf '%s\n' "$lines" | sed 's/^/• /' >> "$out"
+              else
+                echo "${title}: none" >> "$out"
+              fi
+            fi
+          }
+          section "VM instances (name | type | zone | status)" compute instances list \
+            --format='value[separator=" | "](name,machineType.basename(),zone.basename(),status)'
+          section "Disks (name | GB | type | zone)" compute disks list \
+            --format='value[separator=" | "](name,sizeGb,type.basename(),zone.basename())'
+          section "Static IPs" compute addresses list \
+            --format='value[separator=" | "](name,addressType,status)'
+          section "Storage buckets" storage buckets list --format='value(name)'
+          section "Cloud Run services" run services list --format='value[separator=" | "](metadata.name,region)'
+          section "Enabled paid APIs" services list --enabled \
+            --filter='config.name~^(compute|run|storage|sqladmin|container|cloudfunctions|aiplatform|bigquery)\.' \
+            --format='value(config.title)'
+          echo "[+] resource list built"
+
       - name: Build summary
+        if: steps.table.outputs.name != ''
         env:
           TABLE: ${{ steps.table.outputs.name }}
           MONTH_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.month || '' }}
