@@ -121,8 +121,11 @@ EOF
 }
 
 @test "apt: package lists stay compressed, no translations" {
+  # The Debian container image ships the same settings; drop them so only ours is tested
+  rm -f /etc/apt/apt.conf.d/docker-*
   install -D -m 644 "${SRC}/apt-lists.conf" /etc/apt/apt.conf.d/50opi-lists
-  [ "$(apt-config dump Acquire::Languages | grep -o '"[^"]*"')" = '"none"' ]
+  apt-config dump | grep -E '^Acquire::(Languages|GzipIndexes)'
+  apt-config dump | grep -qE '^Acquire::Languages(::)? "none";'
   rm -rf /var/lib/apt/lists/*
   apt-get update -qq
   ls /var/lib/apt/lists/

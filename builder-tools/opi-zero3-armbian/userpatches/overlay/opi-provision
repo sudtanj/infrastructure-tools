@@ -119,6 +119,7 @@ log "ssh: only ${USER_NAME} may log in"
 # --- Wi-Fi ---
 yaml_quote() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
 if [ -n "${CFG[WIFI_SSID]:-}" ]; then
+  install -d -m 755 /etc/netplan
   {
     echo "# Written by opi-provision"
     echo "network:"
