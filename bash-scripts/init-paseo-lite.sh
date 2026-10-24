@@ -77,6 +77,8 @@ CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 # --network=host the daemon binds this host port directly.
 PASEO_PORT="6768"
 PASEO_PASSWORD="${PASEO_PASSWORD:-}"
+# Where the pairing QR/link opens the app (default https://app.paseo.sh), e.g. a GitHub Pages copy.
+PASEO_APP_BASE_URL="${PASEO_APP_BASE_URL:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
 # The daemon itself needs a few MB; the cap is for the agent CLIs it runs.
@@ -309,7 +311,7 @@ dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(do
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$CLAUDE_MAX_OUTPUT_TOKENS" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
-  "$PASEO_PORT" "$PASEO_PASSWORD" "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
   "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
@@ -358,7 +360,7 @@ dbg "volumes ready: ${HOME_VOLUME}, ${WORKSPACE_VOLUME}"
 opt_env=()
 opt_names=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD CODEX_MODEL; do
+         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD PASEO_APP_BASE_URL CODEX_MODEL; do
   if [ -n "${!v:-}" ]; then opt_env+=(-e "$v=${!v}"); opt_names+=("$v"); fi
 done
 dbg "optional env forwarded to container: ${opt_names[*]:-none}"

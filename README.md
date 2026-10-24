@@ -157,6 +157,8 @@ Only secrets that are actually set get forwarded — an absent secret never land
 
 `PASEO_PASSWORD` (optional, recommended) is the password for direct connections to the Paseo daemons: `init-paseo-codex.sh` on `:6767` and `init-paseo-lite.sh` on `:6768`. Set it as a repository secret and rerun the script; a new or changed value recreates the container. Without it, anyone who can reach the port (for example over the tailnet) connects unauthenticated, and paseo-lite's built-in pairing page stays disabled. Relay clients still pair with the QR link, as before. In the Paseo app, add a direct connection to `<vm-tailscale-ip>:6768` and enter the same password.
 
+`PASEO_APP_BASE_URL` (optional, a repository variable or secret) changes where `init-paseo-lite.sh`'s pairing QR/link opens the app, for example `https://sudtanj.github.io/paseo-lite` for the GitHub Pages build of the Paseo web app in `sudtanj/paseo-lite`. Unset keeps `https://app.paseo.sh`. Setting or changing it recreates the container on the next run.
+
 ### GCP Local Deployment
 
 1. Clone the repository:
