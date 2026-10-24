@@ -6,8 +6,13 @@
 set -euo pipefail
 
 cfg="${ANDROID_AVD_HOME:-$HOME/.android/avd}/session.avd/config.ini"
-sed -i -E '/^(hw\.lcd\.(width|height|density)|showDeviceFrame)=/d' "$cfg"
+sed -i -E '/^(hw\.lcd\.(width|height|density)|hw\.ramSize|showDeviceFrame)=/d' "$cfg"
+# The AVD is created once and restored after that, so the RAM size is set here
+# too, not only by `ram-size`. With 4 GB the guest swapped constantly once an
+# ARM app ran under translation. A changed size makes the saved snapshot
+# unusable: that run cold boots once, keeping the disk.
 cat >> "$cfg" <<'EOF'
+hw.ramSize=6144
 hw.lcd.width=720
 hw.lcd.height=1280
 hw.lcd.density=320

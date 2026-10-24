@@ -161,6 +161,22 @@ jobs:
           fi
           chmod 600 ~/.android/adbkey
 
+      # The emulator needs all 4 cores and most of the memory. None of these
+      # are used here, and the timers wake up mid-session (apt, snap and
+      # man-db refreshes) and compete for CPU and disk.
+      - name: Stop unneeded runner services
+        run: |
+          for unit in apt-daily.timer apt-daily-upgrade.timer man-db.timer motd-news.timer \
+            fwupd-refresh.timer unattended-upgrades.service packagekit.service \
+            docker.socket docker.service containerd.service snapd.socket snapd.service \
+            php8.3-fpm.service mysql.service postgresql.service mono-xsp4.service \
+            ModemManager.service udisks2.service multipathd.socket multipathd.service; do
+            if systemctl is-active --quiet "$unit"; then
+              sudo systemctl stop "$unit" && echo "Stopped $unit." || true
+            fi
+          done
+          free -m
+
       - name: Start virtual display and VNC
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
@@ -241,10 +257,11 @@ jobs:
           enable-hw-keyboard: true
           # Without a profile the AVD gets a 320x640 screen, default RAM and 2
           # cores, and a Play Store image never finishes booting. The runner
-          # has 4 vCPUs and 16 GB.
+          # has 4 vCPUs and 16 GB. The config script sets the RAM as well,
+          # since a restored AVD keeps the size it was created with.
           profile: pixel_6
           cores: 4
-          ram-size: 4096M
+          ram-size: 6144M
           heap-size: 512M
           disk-size: 8G
           # No -no-window: the window is drawn on Xvfb for VNC. Snapshots are
@@ -252,7 +269,8 @@ jobs:
           # session, the AVD is saved with it, and the next run resumes in
           # seconds. A snapshot from another emulator version or CPU is
           # rejected and the emulator cold boots instead.
-          emulator-options: -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics
+          # No cameras: the default back camera renders a 3D scene on the CPU.
+          emulator-options: -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb

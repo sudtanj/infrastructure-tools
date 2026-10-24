@@ -16,6 +16,32 @@ adb shell settings put global adb_allowed_connection_time 0
 # with a VNC mouse or a script.
 adb shell cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton
 
+# Fewer processes competing with the apps for memory and CPU: these Google
+# apps run in the background and took about 1 GB of the guest's RAM. Kept in
+# the saved AVD; repeating it is harmless. Not Play services, the Play Store,
+# Chrome, WebView or the keyboard, which apps and VNC typing rely on.
+enabled="$(adb shell pm list packages -e | tr -d '\r')"
+for pkg in com.google.android.googlequicksearchbox com.google.android.as \
+  com.google.android.apps.messaging com.google.android.youtube \
+  com.google.android.apps.youtube.music com.google.android.apps.photos \
+  com.google.android.apps.maps com.google.android.gm com.google.android.apps.docs \
+  com.google.android.calendar com.google.android.apps.wellbeing \
+  com.google.android.apps.safetyhub com.google.android.tts \
+  com.google.android.projection.gearhead com.google.android.apps.restore; do
+  if grep -qx "package:$pkg" <<<"$enabled"; then
+    adb shell pm disable-user --user 0 "$pkg" >/dev/null && echo "Disabled $pkg." || true
+  fi
+done
+# No Doze and no screen-off: either can pause what is running.
+adb shell settings put global stay_on_while_plugged_in 7 || true
+adb shell dumpsys deviceidle disable >/dev/null || true
+
+# If the runner runs out of memory, the kernel kills something other than the
+# emulator or the display it draws on.
+for pid in $(pgrep -f 'qemu-system-x86_64|Xvfb :99'); do
+  echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || true
+done
+
 # Full screen over VNC: the display is the device's size, so move the phone
 # window to fill it and hide the side toolbar and any other emulator windows.
 # Best effort; a failure here only leaves the default layout.
