@@ -133,7 +133,8 @@ boot_vm() {  # name
     -kernel "${WORK}/vmlinuz" -initrd "${WORK}/initrd.img" \
     -append "root=UUID=${ROOT_UUID} rootwait rw console=ttyAMA0 panic=10" \
     -drive "if=virtio,format=raw,file=${IMG}" \
-    -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${PORT}-:22" \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${PORT}-:22" \
+    -device virtio-net-pci,netdev=net0,romfile= \
     -device virtio-rng-pci -display none -serial "file:${WORK}/console-$1.log" \
     -daemonize -pidfile "${WORK}/qemu.pid"
   local start=$SECONDS

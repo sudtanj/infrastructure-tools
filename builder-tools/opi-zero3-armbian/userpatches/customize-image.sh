@@ -22,7 +22,8 @@ find /usr/share/doc -mindepth 1 ! -type d ! -name copyright -delete
 find /usr/share/doc -mindepth 1 -depth -type d -empty -delete
 find /usr/share/man /usr/share/info /usr/share/groff /usr/share/lintian -mindepth 1 -delete 2>/dev/null || true
 find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +
-rm -f /var/lib/apt/lists/*Translation-*
+# Armbian fetched the lists uncompressed; the update below fetches them again, compressed
+rm -rf /var/lib/apt/lists/*
 
 echo "[customize] size: no firmware for hardware this board can't have"
 install -D -m 644 "${OVERLAY}/dpkg-firmware.conf" /etc/dpkg/dpkg.cfg.d/91opi-firmware
