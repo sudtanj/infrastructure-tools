@@ -23,3 +23,6 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /builder-tools/xmrig
+    schedule: { interval: weekly }

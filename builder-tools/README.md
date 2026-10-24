@@ -90,6 +90,7 @@ Dockerfile text is unchanged. Enable repository auto-merge and protect `main`.
 | [`pawns/`](pawns/) | [`sudtanj/pawns`](https://hub.docker.com/r/sudtanj/pawns) | Official Pawns (IPRoyal) client on distroless static, non-root (amd64 + arm64); login from `.env`, Sentry reporter disabled - see its own [README](pawns/README.md) |
 | [`packetstream/`](packetstream/) | [`sudtanj/packetstream`](https://hub.docker.com/r/sudtanj/packetstream) | Official PacketStream client on distroless static, non-root (amd64 + arm64); runs the native binary instead of the launcher's 32-bit ARM build, self-update off - see its own [README](packetstream/README.md) |
 | [`bitping/`](bitping/) | [`sudtanj/bitping`](https://hub.docker.com/r/sudtanj/bitping) | Official Bitping node on distroless static, non-root (amd64 + arm64); no relaunch script, self-update off, state in tmpfs - see its own [README](bitping/README.md) |
+| [`xmrig/`](xmrig/) | [`sudtanj/xmrig`](https://hub.docker.com/r/sudtanj/xmrig) | [XMRig](https://github.com/xmrig/xmrig) built from the latest upstream release at every (weekly, no-cache) rebuild; amd64 + arm64. Fork of [MuRF2/xmrig.docker](https://github.com/MuRF2/xmrig.docker) - see its own [README](xmrig/README.md) |
 
 ## Non-Docker projects
 
