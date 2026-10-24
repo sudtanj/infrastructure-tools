@@ -1,0 +1,121 @@
+name: "Orange Pi Uptime Check"
+
+# Every few hours the runner joins the tailnet as an ephemeral node and checks that the Orange Pi
+# answers. If it does not, a Telegram message is sent and the run fails.
+#
+# The device counts as online if either `tailscale ping` gets an answer (works when
+# OPI_TAILSCALE_IP is a tailnet node) or its SSH port accepts a TCP connection (also works for a
+# LAN IP behind a subnet router). Both are retried for ~2 minutes before it is declared offline.
+#
+# Repo secrets (this repo and its logs are public; none of these values is printed):
+#   OPI_TAILSCALE_IP    the device's Tailscale IP / MagicDNS name, or its LAN IP behind a subnet router
+#   OPI_SSH_PORT        optional, default 22
+#   TELEGRAM_TOKEN      bot token from @BotFather
+#   TELEGRAM_CHAT_ID    your chat ID; press Start in your bot once so it may message you
+#   Tailscale for the runner (same secrets as the other workflows here), one of:
+#     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
+#     TAILSCALE_AUTH_KEY                              fallback auth key
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # every 3 hours (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opi-uptime-check
+  cancel-in-progress: false
+
+env:
+  OPI_TAILSCALE_IP: ${{ secrets.OPI_TAILSCALE_IP }}
+  OPI_SSH_PORT: ${{ secrets.OPI_SSH_PORT }}
+  TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+  TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+jobs:
+  check:
+    name: "Check Orange Pi"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify required config
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in OPI_TAILSCALE_IP TELEGRAM_TOKEN TELEGRAM_CHAT_ID; do
+            [ -z "${!v:-}" ] && missing+=("$v") || true
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            [ -n "${TAILSCALE_TAGS:-}" ] || missing+=("TAILSCALE_TAGS")
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "::add-mask::${OPI_TAILSCALE_IP}"
+          echo "[+] required secrets are set"
+
+      - name: Join the tailnet
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          HOST="gh-opi-uptime-${GITHUB_RUN_ID}"
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            # Ephemeral: the node removes itself from the tailnet once the runner goes away
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            sudo tailscale up --authkey="${secret}?ephemeral=true&preauthorized=true" \
+              --advertise-tags="$TAILSCALE_TAGS" --hostname="$HOST" --accept-routes >/dev/null 2>&1
+          else
+            sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
+              --hostname="$HOST" --accept-routes >/dev/null 2>&1
+          fi
+          echo "[+] joined the tailnet"
+
+      - name: Check device
+        id: probe
+        run: |
+          set +e
+          PORT="${OPI_SSH_PORT:-22}"
+          ONLINE=0
+          # Routes and peer paths can take a few seconds to show up after joining, hence the retries
+          for attempt in $(seq 1 12); do
+            if tailscale ping --c 1 --timeout 5s "$OPI_TAILSCALE_IP" >/dev/null 2>&1; then ONLINE=1; break; fi
+            if timeout 5 bash -c "exec 3<>/dev/tcp/${OPI_TAILSCALE_IP}/${PORT}" 2>/dev/null; then ONLINE=1; break; fi
+            sleep 5
+          done
+          echo "online=${ONLINE}" >> "$GITHUB_OUTPUT"
+          if [ "$ONLINE" = "1" ]; then
+            echo "[+] device online (attempt ${attempt})"
+          else
+            echo "::error::device not reachable over tailscale"
+          fi
+
+      - name: Report to Telegram
+        if: steps.probe.outputs.online == '0'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          TEXT="⚠️ Orange Pi is OFFLINE
+          Not reachable over Tailscale (tailscale ping and TCP port ${OPI_SSH_PORT:-22} both failed for ~2 min).
+          Checked: $(date -u '+%Y-%m-%d %H:%M UTC')
+          Run: ${RUN_URL}"
+          curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            -d "disable_web_page_preview=true" \
+            || { echo "::error::Telegram sendMessage failed"; exit 1; }
+          echo "[+] Telegram alert sent"
+
+      - name: Fail when offline
+        if: steps.probe.outputs.online == '0'
+        run: exit 1
