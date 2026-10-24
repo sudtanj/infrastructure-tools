@@ -48,14 +48,11 @@ log_memory() {
 
 # qemu can die without a word (the OOM killer, a crash in its host video
 # decoder); adb then only says "offline" and the stop file never comes. End
-# the run so the state is still saved, and drop the snapshot: it is the one
-# restored at the start, and loading it would roll the disk back to then.
-# Cold booting from the disk keeps what was done in this run.
+# the run so Save state runs (it drops the stale snapshot).
 emulator_died() {
   echo "::error title=Emulator exited::qemu-system-x86_64 is gone; ending the session."
   sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true
   log_memory
-  rm -rf "${ANDROID_AVD_HOME:-$HOME/.android/avd}/session.avd/snapshots"
   exit 1
 }
 

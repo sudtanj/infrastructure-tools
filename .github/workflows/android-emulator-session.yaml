@@ -21,12 +21,13 @@ name: "Android emulator session over Tailscale"
 # the next run join as a new machine with a new IP. The runner's adb key
 # (`adbkey.enc`) is kept there as well, generated on the first run.
 #
-# STOP IT WITH THE STOP FILE, NOT THE CANCEL BUTTON
+# STOP IT WITH THE STOP FILE
 #   adb -s android-emulator:5555 shell touch /data/local/tmp/stop-session
-# A run saves whether the emulator step succeeds or fails (a boot timeout, a
-# session script error), so setup done over VNC is kept either way. A
-# cancelled run (or one killed by the job timeout) uploads nothing; the next
-# run resumes from the previous save. Hitting `max_minutes` does save.
+# Every run in which the emulator started saves, however it ends: stop file,
+# `max_minutes`, a boot timeout, the emulator crashing, or the Cancel button.
+# The snapshot (quick resume) is kept only if the emulator wrote it during
+# this run and shut down cleanly; otherwise the disk is saved without it and
+# the next run cold boots, so app data and logins are never rolled back.
 #
 # SECRETS
 #   PRIVATE_REPO                   owner/name of the private repo
@@ -260,13 +261,27 @@ jobs:
           script: bash .github/scripts/android-emulator-session.sh
 
       - name: Save state
-        # Also after a failed emulator step: the AVD may hold work done over
-        # VNC. Not when the emulator never ran (an earlier step failed: the
-        # AVD may be half restored), nor on cancel.
-        if: ${{ !cancelled() && (steps.emulator.outcome == 'success' || steps.emulator.outcome == 'failure') }}
+        # Whenever the emulator ran, however its step ended (stop file, failure,
+        # crash, cancel): the AVD may hold work done over VNC. Not when it never
+        # ran (an earlier step failed: the AVD may be half restored).
+        if: ${{ always() && (steps.emulator.outcome == 'success' || steps.emulator.outcome == 'failure' || steps.emulator.outcome == 'cancelled') }}
         run: |
           set -euo pipefail
           id="${{ github.run_id }}"
+          adb="$ANDROID_HOME/platform-tools/adb"
+          snapshots=~/.android/avd/session.avd/snapshots
+          keep_snapshot=true
+          if [ "${{ steps.emulator.outcome }}" = cancelled ]; then
+            if pgrep -f qemu-system-x86_64 >/dev/null; then
+              # Cancelled with the emulator up: shut it down cleanly, which
+              # flushes the disk and writes a fresh snapshot.
+              timeout 60 "$adb" -s emulator-5554 shell sync || true
+              timeout 30 "$adb" -s emulator-5554 emu kill || true
+            else
+              # Stopped by the cancel itself, maybe partway through a write.
+              keep_snapshot=false
+            fi
+          fi
           # `emu kill` returns before the emulator finishes writing its
           # snapshot; packing it half-written would break the next boot.
           for _ in $(seq 1 90); do
@@ -274,9 +289,19 @@ jobs:
             sleep 2
           done
           if pgrep -f qemu-system-x86_64 >/dev/null; then
-            echo "::warning::Emulator still running after 3 minutes; dropping its snapshot."
+            echo "::warning::Emulator still running after 3 minutes; killing it."
             sudo pkill -9 -f qemu-system-x86_64 || true
-            rm -rf ~/.android/avd/session.avd/snapshots
+            keep_snapshot=false
+          fi
+          # A snapshot not rewritten since launch is the one restored at the
+          # start (the emulator crashed): loading it would roll the disk back
+          # and lose this run's work.
+          if [ -z "$(find "$snapshots" -name ram.bin -newer /tmp/emulator-launched 2>/dev/null)" ]; then
+            keep_snapshot=false
+          fi
+          if [ "$keep_snapshot" = false ]; then
+            echo "::warning::Saving the disk without a snapshot; the next run cold boots."
+            rm -rf "$snapshots"
           fi
           mkdir -p /tmp/save
           cd /tmp/save

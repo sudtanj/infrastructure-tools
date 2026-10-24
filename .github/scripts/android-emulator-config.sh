@@ -14,3 +14,6 @@ hw.lcd.density=320
 showDeviceFrame=no
 EOF
 grep -E '^(hw\.lcd\.|hw\.ramSize|hw\.cpu\.ncore)' "$cfg"
+
+# Save state keeps the snapshot only if it was written after this.
+touch /tmp/emulator-launched
