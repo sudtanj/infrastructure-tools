@@ -8,7 +8,12 @@ bats_require_minimum_version 1.5.0
 SRC=/src/userpatches/overlay
 ENV_FILE=/boot/opi-provision.env
 TS=/usr/local/lib/opi-image/opi-init-tailscale-docker.sh
-PW='correct-horse-battery'
+# Credentials are generated per run, so no credential-looking literal is committed
+rand() { head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20; }
+PW="$(rand)"
+PW2="$(rand)"
+WIFI_PW="$(rand)"
+TS_SECRET="$(rand)"
 
 setup_file() {
   install -D -m 755 "${SRC}/opi-provision" /usr/local/sbin/opi-provision
@@ -70,12 +75,12 @@ password_is() {
 }
 
 @test "secrets never reach the log" {
-  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "WIFI_SSID=home" "WIFI_PASSWORD=wifi-secret-123" \
-    "TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-unit-test"
+  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "WIFI_SSID=home" "WIFI_PASSWORD=${WIFI_PW}" \
+    "TAILSCALE_OAUTH_CLIENT_SECRET=${TS_SECRET}"
   [ "$status" -eq 0 ]
   [[ "$output$stderr" != *"$PW"* ]]
-  [[ "$output$stderr" != *wifi-secret-123* ]]
-  [[ "$output$stderr" != *tskey-client-unit-test* ]]
+  [[ "$output$stderr" != *"$WIFI_PW"* ]]
+  [[ "$output$stderr" != *"$TS_SECRET"* ]]
 }
 
 @test "invalid input is rejected and the file is kept for fixing" {
@@ -83,7 +88,7 @@ password_is() {
              "OPI_SSH_USER=root|OPI_SSH_PASSWORD=${PW}" \
              "OPI_SSH_USER=Bad User|OPI_SSH_PASSWORD=${PW}" \
              "OPI_SSH_USER=opi|OPI_SSH_PASSWORD=short" \
-             "OPI_SSH_USER=opi|OPI_SSH_PASSWORD=has:colon-inside" \
+             "OPI_SSH_USER=opi|OPI_SSH_PASSWORD=${PW}:${PW2}" \
              "OPI_SSH_USER=opi|OPI_SSH_PASSWORD=${PW}|OPI_HOSTNAME=bad_host!"; do
     IFS='|' read -ra lines <<< "$bad"
     provision "${lines[@]}"
@@ -136,10 +141,10 @@ EOF
 }
 
 @test "tailscale gets only its own variables" {
-  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "WIFI_PASSWORD=wifi-secret-123" \
-    "TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-unit-test" "OPI_TS_TAGS=tag:opi" "OPI_TS_IP=100.100.10.10"
+  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "WIFI_PASSWORD=${WIFI_PW}" \
+    "TAILSCALE_OAUTH_CLIENT_SECRET=${TS_SECRET}" "OPI_TS_TAGS=tag:opi" "OPI_TS_IP=100.100.10.10"
   [ "$status" -eq 0 ]
-  grep -qx 'TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-unit-test' /tmp/ts-env
+  grep -qx "TAILSCALE_OAUTH_CLIENT_SECRET=${TS_SECRET}" /tmp/ts-env
   grep -qx 'OPI_TS_TAGS=tag:opi' /tmp/ts-env
   grep -qx 'OPI_TS_IP=100.100.10.10' /tmp/ts-env
   refute grep -q 'PASSWORD' /tmp/ts-env
@@ -155,7 +160,7 @@ EOF
 
 @test "tailscale failure: unit fails, but the login exists and the file is gone" {
   echo 3 > /tmp/ts-rc
-  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "TAILSCALE_OAUTH_CLIENT_SECRET=tskey-client-unit-test"
+  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}" "TAILSCALE_OAUTH_CLIENT_SECRET=${TS_SECRET}"
   [ "$status" -eq 3 ]
   password_is opi "$PW"
   [ ! -e "$ENV_FILE" ]
@@ -163,7 +168,7 @@ EOF
 
 @test "running again updates the password" {
   provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW}"
-  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=another-password-42"
+  provision "OPI_SSH_USER=opi" "OPI_SSH_PASSWORD=${PW2}"
   [ "$status" -eq 0 ]
-  password_is opi another-password-42
+  password_is opi "$PW2"
 }
