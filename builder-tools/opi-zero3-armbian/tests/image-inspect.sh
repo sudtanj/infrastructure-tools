@@ -5,12 +5,12 @@
 # image's own root filesystem. Must run as root on an arm64 host (the chroot runs natively).
 #
 #   sudo tests/image-inspect.sh Armbian-...img.xz|.img
-#   OPI_MAX_ROOTFS_MB   fail when the root filesystem uses more (default 1200)
+#   OPI_MAX_ROOTFS_MB   fail when the root filesystem uses more (default 900)
 
 set -euo pipefail
 
 IMG_IN="$1"
-MAX_MB="${OPI_MAX_ROOTFS_MB:-1200}"
+MAX_MB="${OPI_MAX_ROOTFS_MB:-900}"
 WORK="$(mktemp -d)"
 MNT="${WORK}/root"
 FAILED=0

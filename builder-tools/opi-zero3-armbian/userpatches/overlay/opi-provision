@@ -126,9 +126,8 @@ if [ -n "${CFG[WIFI_SSID]:-}" ]; then
     echo "  version: 2"
     echo "  renderer: networkd"
     echo "  wifis:"
-    echo "    all-wlan-interfaces:"
-    echo "      match:"
-    echo "        name: \"wl*\""
+    # The onboard UWE5622. By name: netplan's networkd backend rejects wifis with match rules.
+    echo "    wlan0:"
     echo "      dhcp4: yes"
     echo "      dhcp6: yes"
     if [ -n "${CFG[WIFI_COUNTRY]:-}" ]; then
@@ -143,7 +142,11 @@ if [ -n "${CFG[WIFI_SSID]:-}" ]; then
     fi
   } > /etc/netplan/20-opi-wifi.yaml
   chmod 600 /etc/netplan/20-opi-wifi.yaml
-  if netplan generate && netplan apply; then
+  # What "netplan apply" does, without netplan's Python CLI: validate and write the networkd and
+  # wpa_supplicant units (the generator also runs at every boot), load them, restart networkd and
+  # the Wi-Fi supplicant
+  if /usr/libexec/netplan/generate && systemctl daemon-reload && systemctl restart systemd-networkd \
+     && systemctl restart netplan-wpa-wlan0.service; then
     log "wi-fi configured"
   else
     log "WARNING: netplan rejected the Wi-Fi settings; see /etc/netplan/20-opi-wifi.yaml"

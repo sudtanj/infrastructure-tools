@@ -1,0 +1,12 @@
+[Unit]
+Description=Install Debian security updates
+Documentation=https://github.com/sudtanj/infrastructure-tools/tree/main/builder-tools/opi-zero3-armbian
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opi-security-upgrade
+TimeoutStartSec=2h
+# Stopping the unit mid-upgrade must not kill dpkg and leave packages half-configured
+KillMode=process

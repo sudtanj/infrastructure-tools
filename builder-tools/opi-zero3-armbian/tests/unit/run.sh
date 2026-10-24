@@ -20,7 +20,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # systemd only for its groups (systemd-journal); it is never started
-apt-get install -y -qq --no-install-recommends bats openssh-server nftables unattended-upgrades \
+apt-get install -y -qq --no-install-recommends bats openssh-server nftables \
   python3 python3-yaml tzdata systemd perl >/dev/null
 ssh-keygen -A >/dev/null
 mkdir -p /run/sshd

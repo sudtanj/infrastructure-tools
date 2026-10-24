@@ -13,11 +13,6 @@ setup_file() {
   install -D -m 644 "${SRC}/sshd-hardening.conf" /etc/ssh/sshd_config.d/00-opi-hardening.conf
   # Written by opi-provision after ours; must stay global, not inside our Match block
   printf 'AllowUsers opi\n' > /etc/ssh/sshd_config.d/10-opi-users.conf
-  install -D -m 644 "${SRC}/unattended-upgrades.conf" /etc/apt/apt.conf.d/52opi-unattended-upgrades
-  install -D -m 644 "${SRC}/auto-upgrades.conf" /etc/apt/apt.conf.d/99opi-auto-upgrades
-  # What the package generates on a real system, with the opposite value
-  printf 'APT::Periodic::Update-Package-Lists "0";\nAPT::Periodic::Unattended-Upgrade "0";\n' \
-    > /etc/apt/apt.conf.d/20auto-upgrades
 }
 
 @test "sshd: config valid and the package's sshd_config untouched" {
@@ -86,14 +81,26 @@ EOF
   done < "${SRC}/sysctl-hardening.conf"
 }
 
-@test "unattended-upgrades: only Debian security, enabled over the package default" {
-  origins="$(apt-config dump Unattended-Upgrade::Origins-Pattern)"
-  echo "$origins"
-  [[ "$origins" == *"codename=\${distro_codename}-security,label=Debian-Security"* ]]
-  [[ "$origins" != *'label=Debian"'* ]]
-  [ "$(apt-config dump Unattended-Upgrade::Origins-Pattern | grep -c '::')" -eq 2 ]  # the key + one entry
-  apt-config dump APT::Periodic::Unattended-Upgrade | grep -q '"1"'
-  apt-config dump Unattended-Upgrade::Automatic-Reboot | grep -q '"false"'
+@test "security upgrade: only <release>-security, from its own index; system lists untouched" {
+  install -D -m 755 "${SRC}/opi-security-upgrade" /usr/local/sbin/opi-security-upgrade
+  before="$(ls -l /var/lib/apt/lists)"
+  run /usr/local/sbin/opi-security-upgrade --dry-run
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(ls -l /var/lib/apt/lists)" = "$before" ]
+  . /etc/os-release
+  [ "$(cat /var/lib/opi-security-upgrade/sources.list)" = \
+    "deb [signed-by=$(ls /usr/share/keyrings/debian-archive-keyring.pgp /usr/share/keyrings/debian-archive-keyring.gpg 2>/dev/null | head -n1)] http://deb.debian.org/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware" ]
+  compgen -G "/var/lib/opi-security-upgrade/lists/*_${VERSION_CODENAME}-security_*Packages*"
+  # Whatever it would install comes from the security archive
+  inst="$(grep '^Inst ' <<< "$output" || true)"
+  refute grep -v -e 'Debian-Security' -e '^$' <<< "$inst"
+  # For real: upgrades whatever the container's Debian is missing, without prompts
+  run /usr/local/sbin/opi-security-upgrade
+  echo "$output"
+  [ "$status" -eq 0 ]
+  run /usr/local/sbin/opi-security-upgrade --dry-run
+  grep -q "^0 upgraded" <<< "$output"
 }
 
 @test "unit files have the sections systemd needs" {
@@ -102,6 +109,12 @@ EOF
     grep -q '^ExecStart=/' "${SRC}/${u}"
     grep -q '^WantedBy=' "${SRC}/${u}"
   done
+  # Started by its timer only
+  grep -q '^ExecStart=/usr/local/sbin/opi-security-upgrade$' "${SRC}/opi-security-upgrade.service"
+  refute grep -q '^\[Install\]' "${SRC}/opi-security-upgrade.service"
+  grep -q '^OnCalendar=' "${SRC}/opi-security-upgrade.timer"
+  grep -q '^Persistent=true' "${SRC}/opi-security-upgrade.timer"
+  grep -q '^WantedBy=timers.target' "${SRC}/opi-security-upgrade.timer"
 }
 
 @test "dpkg: no docs, man pages or translations on install/upgrade, licenses kept" {

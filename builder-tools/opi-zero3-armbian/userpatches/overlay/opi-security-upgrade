@@ -1,0 +1,47 @@
+#!/bin/bash
+# /usr/local/sbin/opi-security-upgrade: installs Debian security updates, nothing else.
+# Run daily by opi-security-upgrade.timer; replaces unattended-upgrades (and with it Python).
+#
+#   opi-security-upgrade            update the security index and upgrade
+#   opi-security-upgrade --dry-run  show what would be upgraded
+#
+# apt sees only ${codename}-security, from its own source list and its own index directory, so
+# Docker, Armbian (kernel, U-Boot, firmware) and regular Debian updates are never touched, and the
+# system's own /var/lib/apt/lists stays as it is. "apt-get upgrade" never removes a package or
+# installs a new one; an update that needs something from outside the security archive is held
+# back. Configuration files are never replaced (confold), and the board is never rebooted.
+
+set -euo pipefail
+
+DRY=()
+[ "${1:-}" = "--dry-run" ] && DRY=(-s)
+STATE=/var/lib/opi-security-upgrade
+
+. /etc/os-release
+[ -n "${VERSION_CODENAME:-}" ] || { echo "opi-security-upgrade: no VERSION_CODENAME in /etc/os-release" >&2; exit 1; }
+keyring=""
+for k in /usr/share/keyrings/debian-archive-keyring.pgp /usr/share/keyrings/debian-archive-keyring.gpg; do
+  [ -s "$k" ] && { keyring="$k"; break; }
+done
+[ -n "$keyring" ] || { echo "opi-security-upgrade: Debian archive keyring not found" >&2; exit 1; }
+
+install -d -m 755 "$STATE" "${STATE}/lists" "${STATE}/sources.list.d"
+install -d -m 700 -o _apt -g root "${STATE}/lists/partial"
+echo "deb [signed-by=${keyring}] http://deb.debian.org/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware" \
+  > "${STATE}/sources.list"
+
+APT=(apt-get -q
+     -o "Dir::Etc::SourceList=${STATE}/sources.list"
+     -o "Dir::Etc::SourceParts=${STATE}/sources.list.d"
+     -o "Dir::State::Lists=${STATE}/lists"
+     -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=
+     -o DPkg::Lock::Timeout=600
+     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+export DEBIAN_FRONTEND=noninteractive
+
+# Finish an upgrade a power cut interrupted
+[ "${#DRY[@]}" -eq 0 ] && dpkg --configure -a
+"${APT[@]}" update
+"${APT[@]}" -y "${DRY[@]}" upgrade
+[ "${#DRY[@]}" -eq 0 ] && "${APT[@]}" clean
+exit 0

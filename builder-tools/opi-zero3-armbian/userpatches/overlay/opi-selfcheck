@@ -59,7 +59,7 @@ expect_sshd 203.0.113.9 maxauthtries 3
 [ -n "${tmpkey:-}" ] && rm -f "$tmpkey" "${tmpkey}.pub"
 
 # --- package-owned files stay pristine, so upgrades never stop on a conffile prompt ---
-changed="$(dpkg --verify nftables docker-ce containerd.io unattended-upgrades openssh-server 2>/dev/null \
+changed="$(dpkg --verify nftables docker-ce containerd.io openssh-server 2>/dev/null \
            | awk '$2 == "c" { print $3 }' | tr '\n' ' ')"
 [ -z "$changed" ] && ok "no package conffile modified" || fail "no package conffile modified (${changed})"
 # sshd_config is generated from this template (ucf); unchanged, upgrades update it silently.
@@ -76,25 +76,25 @@ fi
 for f in /etc/opi/nftables.conf /etc/ssh/sshd_config.d/00-opi-hardening.conf /etc/sysctl.d/90-opi-hardening.conf \
          /etc/modprobe.d/opi-blacklist.conf /etc/docker/daemon.json /usr/local/sbin/opi-provision \
          /usr/local/lib/opi-image/opi-init-tailscale-docker.sh /etc/dpkg/dpkg.cfg.d/90opi-nodoc /etc/dpkg/dpkg.cfg.d/91opi-firmware \
-         /etc/apt/apt.conf.d/50opi-lists; do
+         /etc/apt/apt.conf.d/50opi-lists /usr/local/sbin/opi-security-upgrade /usr/libexec/netplan/generate; do
   check "present: ${f}" test -s "$f"
 done
-for u in docker.service opi-firewall.service opi-provision.service ssh.service; do
+for u in docker.service opi-firewall.service opi-provision.service ssh.service opi-security-upgrade.timer; do
   [ "$(systemctl is-enabled "$u" 2>/dev/null)" = enabled ] && ok "enabled: ${u}" || fail "enabled: ${u}"
 done
-for u in bluetooth.service aw859a-bluetooth.service ModemManager.service avahi-daemon.service; do
+for u in bluetooth.service aw859a-bluetooth.service ModemManager.service avahi-daemon.service nftables.service; do
   state="$(systemctl is-enabled "$u" 2>/dev/null)"
   case "$state" in enabled|enabled-runtime) fail "not enabled: ${u}" ;; *) ok "not enabled: ${u}" ;; esac
 done
 check "docker daemon.json valid" dockerd --validate --config-file /etc/docker/daemon.json
-origins="$(apt-config dump Unattended-Upgrade::Origins-Pattern 2>/dev/null | grep -o '"[^"]*"' | tr '\n' ' ')"
-if [ -n "$origins" ] && ! grep -q 'label=Debian"' <<< "$origins" && grep -q 'Debian-Security' <<< "$origins"; then
-  ok "unattended-upgrades: security origin only"
-else
-  fail "unattended-upgrades: security origin only (${origins})"
-fi
-[ "$(apt-config dump APT::Periodic::Unattended-Upgrade 2>/dev/null | grep -o '"[0-9]*"')" = '"1"' ] \
-  && ok "unattended-upgrades enabled" || fail "unattended-upgrades enabled"
+# Interpreters and tools the image replaced or never needs (a later "apt install" could bring them)
+for p in python3 perl unattended-upgrades netplan.io armbian-config; do
+  if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed'; then
+    fail "not installed: ${p}"
+  else
+    ok "not installed: ${p}"
+  fi
+done
 
 if [ "$MODE" = image ]; then
   # --- a pristine image carries no login and no secret ---
@@ -112,10 +112,11 @@ else
     check "active: ${u}" systemctl is-active -q "$u"
   done
   [ "$(systemctl is-failed opi-provision.service 2>/dev/null)" = failed ] && fail "opi-provision did not fail" || ok "opi-provision did not fail"
-  if nft list chain inet opi_host input 2>/dev/null | grep -q 'policy drop'; then
+  if chain="$(nft list chain inet opi_host input 2>&1)" && [[ "$chain" == *"policy drop;"* ]]; then
     ok "firewall: input policy drop"
   else
     fail "firewall: input policy drop"
+    printf '%s\ntables: %s\n' "$chain" "$(nft list tables 2>&1 | tr '\n' ' ')" | sed 's/^/#   /'
   fi
   for kv in kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.unprivileged_bpf_disabled=1 \
             net.ipv4.conf.all.accept_redirects=0 net.ipv6.conf.all.accept_redirects=0 fs.protected_regular=2; do

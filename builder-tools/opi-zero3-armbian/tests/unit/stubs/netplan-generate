@@ -1,0 +1,4 @@
+#!/bin/bash
+# Installed as /usr/libexec/netplan/generate in the test container
+echo "netplan-generate $*" >> /tmp/stub-calls
+exit 0

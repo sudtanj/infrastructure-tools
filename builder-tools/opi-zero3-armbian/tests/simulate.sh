@@ -175,7 +175,7 @@ boot_vm first
 
 echo "# --- first boot ---"
 expect "provisioning file shredded" vm_sudo test ! -e /boot/opi-provision.env
-expect "provisioning recorded" vm test -s /var/lib/opi-provision/provisioned
+expect "provisioning recorded" vm_sudo test -s /var/lib/opi-provision/provisioned
 expect "host name from the file" bash -c "[ \"\$(ssh ${SSH_OPTS[*]} -o BatchMode=yes -i '${WORK}/id_ed25519' ${USER_NAME}@127.0.0.1 hostname)\" = opi-sim ]"
 expect "time zone from the file" bash -c "ssh ${SSH_OPTS[*]} -o BatchMode=yes -i '${WORK}/id_ed25519' ${USER_NAME}@127.0.0.1 'readlink /etc/localtime' | grep -q Asia/Jakarta"
 new_hostkey="$(vm cat /etc/ssh/ssh_host_ed25519_key.pub)"
@@ -198,22 +198,34 @@ checks "first boot"
 
 if [ -z "${SIM_SKIP_UPGRADE:-}" ]; then
   echo "# --- upstream updates ---"
+  # The daily security update, for real (whatever trixie-security has beyond the image)
+  if vm_sudo "systemctl start opi-security-upgrade.service" > "${WORK}/security.log" 2>&1; then
+    ok "security upgrade (opi-security-upgrade.service)"
+  else
+    fail "security upgrade (opi-security-upgrade.service)"; cat "${WORK}/security.log"
+  fi
+  vm_sudo "journalctl -u opi-security-upgrade.service -o cat --no-pager" 2>/dev/null \
+    | grep -E '^(Inst|Setting up|[0-9]+ upgraded)' | head -n 30 | sed 's/^/# /' || true
+  if vm_sudo "journalctl -u opi-security-upgrade.service -o cat --no-pager" 2>/dev/null | grep -qi 'conffile'; then
+    fail "security upgrade not stopped by a conffile"
+  else
+    ok "security upgrade not stopped by a conffile"
+  fi
   # Everything apt offers now (Debian, Armbian, Docker repos), then a reinstall of each package
   # that owns files next to ours, as a stand-in for future upgrades of exactly those packages
   APT_ARGS="-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-  if vm_sudo "env DEBIAN_FRONTEND=noninteractive sh -c 'apt-get update -q && apt-get ${APT_ARGS} dist-upgrade && apt-get ${APT_ARGS} install --reinstall openssh-server openssh-client nftables docker-ce docker-ce-cli containerd.io unattended-upgrades systemd sudo'" \
+  if vm_sudo "env DEBIAN_FRONTEND=noninteractive sh -c 'apt-get update -q && apt-get ${APT_ARGS} dist-upgrade && apt-get ${APT_ARGS} install --reinstall openssh-server openssh-client nftables docker-ce docker-ce-cli containerd.io systemd sudo'" \
        > "${WORK}/upgrade.log" 2>&1; then
     ok "apt upgrade + reinstall without prompts or errors"
   else
     fail "apt upgrade + reinstall without prompts or errors"; tail -n 60 "${WORK}/upgrade.log"
   fi
   grep -E '^(Inst|Setting up|Unpacking) ' "${WORK}/upgrade.log" | head -n 50 | sed 's/^/# /' || true
-  if vm_sudo "unattended-upgrade --dry-run" > "${WORK}/uu.log" 2>&1; then
-    ok "unattended-upgrade dry run"
+  if vm_sudo "opi-security-upgrade --dry-run" > "${WORK}/security-dry.log" 2>&1; then
+    ok "security upgrade dry run after the full upgrade"
   else
-    fail "unattended-upgrade dry run"; tail -n 30 "${WORK}/uu.log"
+    fail "security upgrade dry run after the full upgrade"; tail -n 30 "${WORK}/security-dry.log"
   fi
-  if grep -qi 'conffile' "${WORK}/uu.log"; then fail "unattended-upgrades not held back by a conffile"; else ok "unattended-upgrades not held back by a conffile"; fi
 
   vm_sudo "systemctl reboot" || true
   sleep 20

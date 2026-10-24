@@ -1,3 +1,0 @@
-#!/bin/bash
-echo "netplan $*" >> /tmp/stub-calls
-exit 0

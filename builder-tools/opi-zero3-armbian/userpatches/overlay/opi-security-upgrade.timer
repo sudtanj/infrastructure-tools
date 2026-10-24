@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Debian security updates
+Documentation=https://github.com/sudtanj/infrastructure-tools/tree/main/builder-tools/opi-zero3-armbian
+
+[Timer]
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

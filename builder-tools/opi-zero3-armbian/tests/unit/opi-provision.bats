@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
-# opi-provision, run as root in a disposable Debian container (see run.sh). systemctl, netplan,
-# hostname, curl and the Tailscale script are stubs; useradd, chpasswd, sshd -t and the files
-# under /etc are real.
+# opi-provision, run as root in a disposable Debian container (see run.sh). systemctl, netplan's
+# generator, hostname, curl and the Tailscale script are stubs; useradd, chpasswd, sshd -t and the
+# files under /etc are real.
 
 bats_require_minimum_version 1.5.0
 
@@ -19,6 +19,7 @@ setup_file() {
   install -D -m 755 "${SRC}/opi-provision" /usr/local/sbin/opi-provision
   install -D -m 644 "${SRC}/sshd-hardening.conf" /etc/ssh/sshd_config.d/00-opi-hardening.conf
   install -D -m 755 /src/tests/unit/stubs/ts-script "$TS"
+  install -D -m 755 /src/tests/unit/stubs/netplan-generate /usr/libexec/netplan/generate
   mkdir -p /boot
 }
 
@@ -130,14 +131,15 @@ password_is() {
   [ "$(stat -c '%a' /etc/netplan/20-opi-wifi.yaml)" = 600 ]
   python3 - <<'EOF'
 import yaml
-w = yaml.safe_load(open("/etc/netplan/20-opi-wifi.yaml"))["network"]["wifis"]["all-wlan-interfaces"]
+w = yaml.safe_load(open("/etc/netplan/20-opi-wifi.yaml"))["network"]["wifis"]["wlan0"]
 aps = w["access-points"]
 assert list(aps) == ['my "home" \\net'], aps
 assert aps['my "home" \\net']["password"] == 'p"a\\ss: #word'
 assert w["regulatory-domain"] == "ID"
-assert w["match"]["name"] == "wl*"
+assert "match" not in w  # netplan's networkd backend rejects wifis with match rules
 EOF
-  grep -q 'netplan apply' /tmp/stub-calls
+  grep -qx 'netplan-generate ' /tmp/stub-calls
+  grep -qx 'systemctl restart netplan-wpa-wlan0.service' /tmp/stub-calls
 }
 
 @test "tailscale gets only its own variables" {

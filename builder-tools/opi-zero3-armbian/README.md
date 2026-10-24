@@ -32,17 +32,22 @@ Debian trixie with the `current` kernel, cut down to a box that only runs Docker
   Firmware for hardware an H618 board can't have (Qualcomm SoCs, PCIe-only Wi-Fi, Rockchip
   modules: about 400 MB of Armbian's 434 MB firmware package) is filtered the same way. The
   board's UWE5622 Wi-Fi and USB Wi-Fi/Bluetooth dongle firmware stay.
-  Removed from Armbian's minimal set: rsyslog (journald, capped at 24 MB), ALSA, man-db,
-  bluez, btrfs-progs, dosfstools, wireguard-tools, figlet/toilet and a few others if present.
+  Removed from Armbian's minimal set: Python and Perl (nothing on a Docker host needs them),
+  armbian-config, rsyslog (journald, capped at 24 MB), ALSA, man-db, bluez, btrfs-progs,
+  dosfstools, wireguard-tools, figlet/toilet and a few others if present. Wi-Fi config in
+  `/etc/netplan` still works: netplan's generator is C, only its `netplan` command is Python.
   The build fails rather than let a removal take a dependent package with it. Avahi, Bluetooth
-  (including Armbian's `aw859a-bluetooth`) and ModemManager are masked.
-- **Updates:** unattended-upgrades applies Debian security updates (`trixie-security`) only,
-  never reboots by itself. Docker and Armbian packages (kernel, U-Boot, firmware): `apt upgrade`
-  by hand, or flash a newer image.
+  (including Armbian's `aw859a-bluetooth`) and ModemManager are masked, and so is
+  `nftables.service` (its `/etc/nftables.conf` starts with `flush ruleset`).
+- **Updates:** `opi-security-upgrade.timer` installs Debian security updates (`trixie-security`)
+  daily and nothing else: apt sees only the security archive, from its own source list and index,
+  and `apt-get upgrade` never removes or adds a package (a fix that needs a newer dependency from
+  outside the security archive waits for a manual `apt upgrade`). It never reboots. `sudo
+  opi-security-upgrade --dry-run` shows what it would do. Docker and Armbian packages (kernel,
+  U-Boot, firmware): `apt upgrade` by hand, or flash a newer image.
 - **Upgrade-safe:** the image only adds files and drop-ins (`sshd_config.d/`, `sysctl.d/`,
-  `apt.conf.d/`, its own firewall unit). No package-owned file is edited, so Debian, Armbian and
-  Docker upgrades never stop at a conffile prompt, unattended-upgrades never holds a package
-  back, and an upgrade can't overwrite the lockdown.
+  `apt.conf.d/`, its own units). No package-owned file is edited, so Debian, Armbian and Docker
+  upgrades never stop at a conffile prompt, and an upgrade can't overwrite the lockdown.
 - **`sudo opi-selfcheck`** on the board checks all of the above (accounts, effective sshd config
   per source address, pristine conffiles, services, firewall, sysctl, Docker). The build and the
   tests run the same script.
@@ -69,16 +74,18 @@ runs on a native arm64 runner:
 
 The customization lives in [`userpatches/customize-image.sh`](userpatches/customize-image.sh)
 (runs in the image chroot) and the files in [`userpatches/overlay/`](userpatches/overlay/).
-The workflow copies `bash-scripts/opi-init-tailscale-docker.sh` into the overlay at build time.
+Armbian changes the image after that script (it installs armbian-config and copies in
+uncompressed apt lists), so the [`opi-image` extension](userpatches/extensions/opi-image.sh)
+undoes both later in the build. The workflow copies `bash-scripts/opi-init-tailscale-docker.sh` into the overlay at build time.
 
 ## Tests
 
 | Job | What | Where |
 |---|---|---|
-| `unit` | shellcheck, plus [bats](tests/unit/) tests of `opi-provision`: the file is parsed and never executed; validation; user, sudo and docker group; keys; host name; time zone; Wi-Fi YAML escaping; Tailscale gets only its own variables; no secret in the log; failure handling. The same suite tests the configs against the real openssh, nftables and unattended-upgrades of the image's Debian release: effective sshd settings per source address, `Match` not leaking into later drop-ins, nft reload keeping other tables, apt origins | Debian container, [`tests/unit/run.sh`](tests/unit/run.sh) |
+| `unit` | shellcheck, plus [bats](tests/unit/) tests of `opi-provision`: the file is parsed and never executed; validation; user, sudo and docker group; keys; host name; time zone; Wi-Fi YAML escaping; Tailscale gets only its own variables; no secret in the log; failure handling. The same suite tests the configs against the real openssh, nftables and apt of the image's Debian release: effective sshd settings per source address, `Match` not leaking into later drop-ins, nft reload keeping other tables, `opi-security-upgrade` using only the security archive (a dry run, then a real upgrade of the container) | Debian container, [`tests/unit/run.sh`](tests/unit/run.sh) |
 | `unit` | [Firewall with real packets](tests/firewall-netns.sh), using network namespaces for the board, a LAN/internet client and a tailnet peer. LAN v4/v6 and `tailscale0` get in. Public v4/v6, and CGNAT addresses outside `tailscale0`, are dropped. Replies, ICMP and reloads work | runner, root |
 | `inspect` | [The built image](tests/image-inspect.sh): U-Boot SPL (`eGON.BT0`) at 8 KiB for the H618 boot ROM, boot script, Zero 3 device tree, kernel, initrd and `rootdev` UUID. Also: the board kernel's config has what Docker needs, the root filesystem fits the size budget (with a report of the largest packages and directories), and `opi-selfcheck --image` passes inside the image (no user, no secret, no autologin, ...) | arm64 runner, loop mount + chroot |
-| `simulate` | [Zero 3 simulation](tests/simulate.sh): the image's root filesystem booted with systemd in QEMU on 4× Cortex-A53 / 1 GiB (TCG). Covers first boot with a provisioning file, host key regeneration, filesystem growth, SSH by key and by password (from the LAN), no root login, sudo needing the password, `opi-selfcheck`, Docker with `no-new-privileges`, a real deploy of `bash-scripts/init-dozzle.sh`, and memory left. Then `apt dist-upgrade` from all repos, a reinstall of every package next to our files, an `unattended-upgrade` dry run, a reboot, and all checks again | arm64 runner |
+| `simulate` | [Zero 3 simulation](tests/simulate.sh): the image's root filesystem booted with systemd in QEMU on 4× Cortex-A53 / 1 GiB (TCG). Covers first boot with a provisioning file, host key regeneration, filesystem growth, SSH by key and by password (from the LAN), no root login, sudo needing the password, `opi-selfcheck`, Docker with `no-new-privileges`, a real deploy of `bash-scripts/init-dozzle.sh`, and memory left. Then a real run of `opi-security-upgrade.service`, `apt dist-upgrade` from all repos, a reinstall of every package next to our files, a reboot, and all checks again | arm64 runner |
 
 QEMU can't emulate the H618, and Armbian's board kernel has no virtio or PL011 drivers. So the
 simulation boots Debian's arm64 kernel of the same release (unpacked outside dpkg) with the

@@ -111,7 +111,7 @@ jobs:
           shellcheck -S warning -e SC1090,SC1091 \
             "$DIR"/userpatches/customize-image.sh "$DIR"/userpatches/overlay/opi-provision \
             "$DIR"/userpatches/overlay/opi-selfcheck "$DIR"/tests/*.sh "$DIR"/tests/unit/run.sh \
-            "$DIR"/tests/unit/stubs/*
+            "$DIR"/userpatches/overlay/opi-security-upgrade "$DIR"/userpatches/extensions/opi-image.sh "$DIR"/tests/unit/stubs/*
 
       - name: Unit tests (bats, in Debian of the image's release)
         run: "$DIR/tests/unit/run.sh"
@@ -163,7 +163,7 @@ jobs:
             BOARD="$BOARD" BRANCH="$KERNEL_BRANCH" RELEASE="$RELEASE" \
             BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no \
             CONSOLE_AUTOLOGIN=no OPENSSHD_REGENERATE_HOST_KEYS=true \
-            COMPRESS_OUTPUTIMAGE=sha,xz
+            COMPRESS_OUTPUTIMAGE=sha,xz ENABLE_EXTENSIONS=opi-image
 
       - name: Prepare artifacts
         id: prepare
