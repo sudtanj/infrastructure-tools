@@ -316,7 +316,10 @@ jobs:
           # keeps all app data and logins. Quick-resume snapshots hung the boot
           # when one failed to load ("Missing section footer ... Error -22").
           # No cameras: the default back camera renders a 3D scene on the CPU.
-          emulator-options: -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
+          # -HardwareDecoder: video is decoded inside Android, not by the
+          # emulator on the host; qemu died silently minutes into PineDrama
+          # playback twice with host decoding (hwcodec.*dec=2), memory fine.
+          emulator-options: -feature -HardwareDecoder -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb
