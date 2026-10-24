@@ -129,7 +129,7 @@ EOF
   rm -rf /var/lib/apt/lists/*
   apt-get update -qq
   ls /var/lib/apt/lists/
-  ls /var/lib/apt/lists/*_Packages.gz >/dev/null
+  compgen -G "/var/lib/apt/lists/*_Packages.*" >/dev/null
   refute compgen -G '/var/lib/apt/lists/*_Packages'
   refute compgen -G '/var/lib/apt/lists/*Translation*'
   apt-cache policy tar | grep -q Candidate

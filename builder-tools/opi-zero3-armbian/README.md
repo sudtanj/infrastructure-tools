@@ -28,7 +28,7 @@ Debian trixie with the `current` kernel, cut down to a box that only runs Docker
   routing, protected links/FIFOs. Bluetooth and the dccp/sctp/rds/tipc protocols are blocked.
   IP forwarding and rp_filter are left to Docker and `opi-init-tailscale-docker.sh`.
 - **Small:** no docs, man pages or translations (a dpkg filter, so upgrades stay small too;
-  licenses are kept), no translated package descriptions, apt lists kept gzip-compressed.
+  licenses are kept), no translated package descriptions, apt lists kept compressed.
   Removed from Armbian's minimal set: rsyslog (journald, capped at 24 MB), ALSA, man-db,
   bluez, btrfs-progs, dosfstools, wireguard-tools, figlet/toilet and a few others if present.
   The build fails rather than let a removal take a dependent package with it. Avahi, Bluetooth
