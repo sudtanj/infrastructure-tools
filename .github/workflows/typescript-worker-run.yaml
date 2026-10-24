@@ -6,10 +6,6 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 # then runs the scripts -- so all of their traffic leaves the runner through
 # the VPN instead of straight out of the GitHub datacenter IP.
 #
-# This is the TypeScript twin of python-worker-run.yaml. Same shape, same
-# guards, same secrets; the differences are the folder, the file extension and
-# how a `.ts` file gets executed.
-#
 # HOW THIS WORKS
 #   1. discover - checkout the private repo into ./private, resolve the
 #                 entry points listed in `typescript-worker/entrypoints.txt`,
