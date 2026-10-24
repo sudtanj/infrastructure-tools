@@ -29,7 +29,17 @@ name: "Android emulator session over Tailscale"
 # this run and shut down cleanly; otherwise the disk is saved without it and
 # the next run cold boots, so app data and logins are never rolled back.
 #
+# EXIT NODE
+#   With `exit_node` on (the default), the runner's internet traffic, and so
+#   the emulator's, leaves through the tailnet exit node TAILSCALE_EXIT_NODE,
+#   as in typescript-worker-run: apps see that node's IP, not GitHub's. It is
+#   switched on after the state is downloaded and off before it is uploaded,
+#   so the multi-GB transfers don't go through it. If the egress IP doesn't
+#   change, the run stops before the emulator starts.
+#
 # SECRETS
+#   TAILSCALE_EXIT_NODE            exit node: tag:name, MagicDNS name or 100.x
+#                                  IP (needed only with `exit_node`)
 #   PRIVATE_REPO                   owner/name of the private repo
 #   PRIVATE_REPO_TOKEN             needs Contents: read AND write on it
 #                                  (releases), not just read
@@ -50,6 +60,10 @@ on:
         description: 'Ignore the saved state; the next save replaces it'
         type: boolean
         default: false
+      exit_node:
+        description: 'Send internet traffic through the TAILSCALE_EXIT_NODE exit node'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -235,6 +249,41 @@ jobs:
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
           echo "Joined the tailnet as android-emulator."
 
+      - name: Use the exit node
+        if: ${{ inputs.exit_node }}
+        env:
+          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+        run: |
+          set -euo pipefail
+          target="$(printf '%s' "$TAILSCALE_EXIT_NODE" | tr -d '[:space:]')"
+          if [ -z "$target" ]; then
+            echo "::error title=No exit node::TAILSCALE_EXIT_NODE is not set; run with exit_node off to go without one."
+            exit 1
+          fi
+          # Public log: the node and both egress IPs are masked.
+          echo "::add-mask::${target}"
+          # It reaches a command line, so only the forms Tailscale takes.
+          if [[ ! "$target" =~ ^(tag:)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::TAILSCALE_EXIT_NODE must be 'tag:name', a MagicDNS name, or a Tailscale IPv4 address."
+            exit 1
+          fi
+          before="$(curl -fsS --max-time 10 https://api.ipify.org || true)"
+          [ -z "$before" ] || echo "::add-mask::${before}"
+          sudo tailscale set --exit-node="$target"
+          after=""
+          for _ in $(seq 1 12); do
+            after="$(curl -fsS --max-time 10 https://api.ipify.org || true)"
+            [ -n "$after" ] && [ "$after" != "$before" ] && break
+            sleep 5
+          done
+          [ -z "$after" ] || echo "::add-mask::${after}"
+          if [ -z "$after" ] || [ "$after" = "$before" ]; then
+            echo "::error title=Exit node not in use::The egress IP did not change. Check the node is online and advertises an exit node."
+            sudo tailscale set --exit-node= || true
+            exit 1
+          fi
+          echo "Internet traffic now leaves through the exit node (fingerprint $(printf '%s' "$target" | sha256sum | cut -c1-12))."
+
       # `script` runs line by line, so the session logic lives in its own file.
       - uses: reactivecircus/android-emulator-runner@v2
         id: emulator
@@ -277,6 +326,11 @@ jobs:
           # above is the same size; the session script fills it with the window.
           pre-emulator-launch-script: bash .github/scripts/android-emulator-config.sh
           script: bash .github/scripts/android-emulator-session.sh
+
+      # Before Save state, so the upload goes straight to GitHub.
+      - name: Leave the exit node
+        if: ${{ always() && inputs.exit_node }}
+        run: sudo tailscale set --exit-node= || true
 
       - name: Save state
         # Whenever the emulator ran, however its step ended (stop file, failure,
