@@ -89,8 +89,10 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(ls -l /var/lib/apt/lists)" = "$before" ]
   . /etc/os-release
-  [ "$(cat /var/lib/opi-security-upgrade/sources.list)" = \
-    "deb [signed-by=$(ls /usr/share/keyrings/debian-archive-keyring.pgp /usr/share/keyrings/debian-archive-keyring.gpg 2>/dev/null | head -n1)] http://deb.debian.org/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware" ]
+  cat /var/lib/opi-security-upgrade/sources.list
+  [ "$(wc -l < /var/lib/opi-security-upgrade/sources.list)" -eq 1 ]
+  grep -qxE "deb \[signed-by=/usr/share/keyrings/debian-archive-keyring\.(pgp|gpg)\] http://deb\.debian\.org/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware" \
+    /var/lib/opi-security-upgrade/sources.list
   compgen -G "/var/lib/opi-security-upgrade/lists/*_${VERSION_CODENAME}-security_*Packages*"
   # Whatever it would install comes from the security archive
   inst="$(grep '^Inst ' <<< "$output" || true)"
