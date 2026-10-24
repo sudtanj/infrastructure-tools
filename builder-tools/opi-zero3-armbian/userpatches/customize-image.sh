@@ -41,7 +41,7 @@ echo "[customize] removing packages a Docker host doesn't need"
 purge=()
 # Armbian's minimal list is a general-purpose CLI; kept on purpose: rsync (armbian-ramlog),
 # u-boot-tools/initramfs-tools (kernel upgrades), parted/fdisk (first-boot resize), iw/wpasupplicant
-for p in rsyslog alsa-utils man-db pahole debsums avahi-daemon avahi-autoipd bluez bluez-tools \
+for p in rsyslog alsa-utils man-db pahole debsums avahi-daemon avahi-autoipd bluetooth bluez bluez-tools \
          cups-daemon modemmanager network-manager rpcbind nfs-common samba-common-bin telnet \
          btrfs-progs dosfstools figlet toilet wireguard-tools; do
   dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed' && purge+=("$p")
