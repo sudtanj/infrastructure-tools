@@ -155,6 +155,8 @@ Claude Code auth for the Paseo containers (`init-paseo-codex.sh`, `init-paseo-li
 
 Only secrets that are actually set get forwarded — an absent secret never lands in the container as an empty string. Every run of the script also pulls the latest `sudtanj/paseo-codex` image before touching the running container, so a failed pull leaves the current deployment up.
 
+`PASEO_PASSWORD` (optional, recommended) is the password for direct connections to the Paseo daemons: `init-paseo-codex.sh` on `:6767` and `init-paseo-lite.sh` on `:6768`. Set it as a repository secret and rerun the script; a new or changed value recreates the container. Without it, anyone who can reach the port (for example over the tailnet) connects unauthenticated, and paseo-lite's built-in pairing page stays disabled. Relay clients still pair with the QR link, as before. In the Paseo app, add a direct connection to `<vm-tailscale-ip>:6768` and enter the same password.
+
 ### GCP Local Deployment
 
 1. Clone the repository:
