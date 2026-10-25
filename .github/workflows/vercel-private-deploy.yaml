@@ -198,13 +198,15 @@ jobs:
           for var in APP_KEY CRON_SECRET DATABASE_URL; do
             value="$(printenv "P_$var" || true)"
             if [ -z "$value" ]; then continue; fi
-            # Laravel key format: "base64:" + 32 bytes, or 32 raw characters. Anything else fails every request.
+            # Laravel key format: "base64:" + 32 bytes, or 32 raw characters. Any other value is
+            # hashed into a key, the same one on every deploy (not readable by a PHP install).
             if [ "$var" = APP_KEY ] && [ "${#value}" -ne 32 ]; then
-              if [ "$(printf '%s' "${value#base64:}" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
-                echo "::error::The $var secret must be 'base64:' + 32 random bytes (openssl rand -base64 32) or 32 characters."
-                exit 1
+              if [ "$(printf '%s' "${value#base64:}" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]; then
+                value="base64:${value#base64:}"
+              else
+                echo "::notice::The APP_KEY secret is not a Laravel key; using its SHA-256 as the key."
+                value="base64:$(printf '%s' "$value" | openssl dgst -sha256 -binary | base64)"
               fi
-              value="base64:${value#base64:}" # a bare base64 key gets the prefix the app expects
             fi
             vc env rm "$var" production --yes > /dev/null 2>&1 || true
             add "$var" "$value" --sensitive
