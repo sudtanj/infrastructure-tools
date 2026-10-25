@@ -241,6 +241,7 @@ jobs:
           fi
           # Pooled endpoint: serverless functions open many short connections. The app already disables prepared statements for it.
           url=$(neon "$api/projects/$id/connection_uri?database_name=neondb&role_name=neondb_owner&pooled=true" | jq -r '.uri')
+          case "$url" in postgres://*|postgresql://*) ;; *) echo "::error::Neon returned no connection URI."; exit 1 ;; esac
           add DATABASE_URL "$url"
           printf '%s' "$url" > /tmp/db.url
 
@@ -262,6 +263,8 @@ jobs:
             exit 0
           fi
           echo "::add-mask::$DATABASE_URL"
+          # Only the scheme and length are logged: enough to spot a placeholder or a quoting problem.
+          case "$DATABASE_URL" in postgres://*|postgresql://*) ;; *) echo "::error::DATABASE_URL is not a postgres:// URL (starts with '${DATABASE_URL:0:4}', ${#DATABASE_URL} chars)."; exit 1 ;; esac
           if DATABASE_URL="$DATABASE_URL" deno task migrate > /tmp/migrate.log 2>&1; then
             echo "Migrate: OK"
           else
