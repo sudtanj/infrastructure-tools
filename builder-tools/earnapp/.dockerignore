@@ -1,4 +1,5 @@
-# Only the Dockerfile and the entrypoint source reach the build context.
+# Only the Dockerfile and the build/entrypoint sources reach the build context.
 *
 !Dockerfile
+!build/
 !entry/
