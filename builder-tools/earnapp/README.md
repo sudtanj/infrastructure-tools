@@ -40,8 +40,11 @@ that links the device to your account. Until then it earns nothing.
 - **One device per IP**: EarnApp pays for one device per public IP. Run it
   once per network.
 - **State**: `/etc/earnapp` is a 16 MB tmpfs. The entrypoint writes the ID
-  and status into it on every start; the client's own logs there are
-  encrypted by upstream and rotate at 3 MB.
+  there and registers the device with EarnApp (`earnapp start`, as the
+  official installer does; without it, linking fails with "device not
+  found"), retrying 5 times before exiting so Docker restarts it. It also
+  writes a serial derived from the ID, sent on registration. The client's
+  own logs there are encrypted by upstream and rotate at 3 MB.
 - **Rebuilt runtime**: the Dockerfile unpacks upstream's JavaScript from the
   pinned binary (without running it), bundles it with esbuild and builds a
   Node.js 24 single executable. The build fails unless that executable

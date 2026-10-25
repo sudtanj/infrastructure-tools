@@ -24,7 +24,10 @@ ADD --checksum=sha256:${EARNAPP_SHA256} https://cdn-earnapp.b-cdn.net/static/ear
 # and missing from upstream's package too (loaded lazily or inside try);
 # mocha (the CLI's self-test) is swapped for a stub. The CLI copy of rc4.js
 # also goes next to peer_node's cipher, which asks for it but upstream left
-# it out. Whitespace-only minification: one CLI file decrypts itself with a
+# it out. The serial sent when registering the device is read from
+# /etc/earnapp/serial (written by the entrypoint) instead of the devicetree,
+# which Docker hides; its other source, `ip link`, needs a shell the image
+# doesn't have. Whitespace-only minification: one CLI file decrypts itself with a
 # key taken from its own source text, so identifiers stay as they are.
 FROM --platform=$BUILDPLATFORM node:24.22.1-trixie-slim AS bundle
 RUN npm install --global --no-audit --no-fund esbuild@0.28.2 postject@1.0.0-alpha.6
@@ -34,6 +37,8 @@ WORKDIR /build
 RUN node pkg-extract.js /tmp/earnapp-pkg /src \
  && rm /tmp/earnapp-pkg \
  && { [ -e /src/svc/peer_node/rc4.js ] || cp /src/svc/earnapp_cli/earnapp/rc4.js /src/svc/peer_node/rc4.js; } \
+ && sed -i "s#'/sys/firmware/devicetree/base/serial-number'#'/etc/earnapp/serial'#" /src/svc/earnapp_cli/earnapp/util.js \
+ && grep -q "'/etc/earnapp/serial'" /src/svc/earnapp_cli/earnapp/util.js \
  && esbuild /src/svc/earnapp_cli/earnapp/index.js --bundle --platform=node \
       --target=node24 --format=cjs --minify-whitespace --legal-comments=none \
       --alias:mocha=./no-mocha.js \
@@ -66,8 +71,9 @@ COPY --from=inject /out/earnapp /usr/bin/earnapp
 RUN out="$(timeout 120 /usr/bin/earnapp --version)" \
  && echo "$out" && [ "$out" = "earnapp ${EARNAPP_VERSION}" ]
 
-# The entrypoint (entry/main.go): the image has no shell, and the client needs
-# its device ID and status written to /etc/earnapp before it starts.
+# The entrypoint (entry/main.go): the image has no shell. It writes the device
+# ID to /etc/earnapp, registers the device with `earnapp start`, then runs
+# `earnapp run`.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS entry
 ARG TARGETARCH
 COPY entry/ /src/

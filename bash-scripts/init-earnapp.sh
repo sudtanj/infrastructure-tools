@@ -183,6 +183,18 @@ done
 IMAGE_ID="$("${DOCKER[@]}" image inspect -f '{{.Id}}' "$IMAGE")"
 ok "image ready"
 
+# Container log tail with the ID, any other long hex ID and IPs masked: this repo's logs are
+# public.
+show_logs() {
+  local line
+  "${DOCKER[@]}" logs --tail "$1" "$CONTAINER_NAME" 2>&1 \
+    | grep -av '^[[:space:]]*$' \
+    | sed -E 's/sdk-node-[0-9A-Fa-f]+/<id>/g; s/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<id>/g; s/[0-9A-Fa-f]{24,}/<id>/g; s/([0-9]{1,3}\.){3}[0-9]{1,3}/<ip>/g; s/[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4})*::[0-9A-Fa-f:]*|([0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}/<ipv6>/g' \
+    | while IFS= read -r line; do
+        printf '%s %s\n' "$2" "${line//"$UUID"/<id>}"
+      done || true
+}
+
 # ---------------------------------------------------------------------------
 # 4. Skip the restart when nothing changed
 # ---------------------------------------------------------------------------
@@ -223,23 +235,28 @@ else
     --log-driver json-file "${LOG_OPTS[@]}" \
     "$IMAGE" >/dev/null \
     || fail "failed to start ${CONTAINER_NAME}"
+
+  # The entrypoint registers the device with EarnApp before starting the client (without it the
+  # link page says "device not found"); it retries for about 3 minutes, then exits.
+  step "waiting for the device to register with EarnApp"
+  REGISTERED=0
+  for _ in $(seq 1 40); do
+    if "${DOCKER[@]}" logs "$CONTAINER_NAME" 2>&1 | grep -q '^earnapp-entry: device registered'; then
+      REGISTERED=1; break
+    fi
+    [ "$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)" = "running" ] || break
+    sleep 5
+  done
+  if [ "$REGISTERED" != "1" ]; then
+    show_logs 15 '[!]  ' >&2
+    fail "the device did not register with EarnApp (see the log above)"
+  fi
+  ok "device registered"
 fi
 
 # ---------------------------------------------------------------------------
 # 6. Verify: still running and not restart-looping after a short settle
 # ---------------------------------------------------------------------------
-# Container log tail with the ID, any other long hex ID and IPs masked: this repo's logs are
-# public.
-show_logs() {
-  local line
-  "${DOCKER[@]}" logs --tail "$1" "$CONTAINER_NAME" 2>&1 \
-    | grep -av '^[[:space:]]*$' \
-    | sed -E 's/sdk-node-[0-9A-Fa-f]+/<id>/g; s/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<id>/g; s/[0-9A-Fa-f]{24,}/<id>/g; s/([0-9]{1,3}\.){3}[0-9]{1,3}/<ip>/g; s/[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4})*::[0-9A-Fa-f:]*|([0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}/<ipv6>/g' \
-    | while IFS= read -r line; do
-        printf '%s %s\n' "$2" "${line//"$UUID"/<id>}"
-      done || true
-}
-
 step "checking ${CONTAINER_NAME} stays up"
 # RestartCount is cumulative over the container's lifetime, so only restarts during this
 # settle window count as a failure; earlier ones are just reported.
