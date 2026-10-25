@@ -322,6 +322,9 @@ jobs:
           # keeps all app data and logins. Quick-resume snapshots hung the boot
           # when one failed to load ("Missing section footer ... Error -22").
           # No cameras: the default back camera renders a 3D scene on the CPU.
+          # -dns-server: public resolvers, reached through the exit node. The
+          # default relays to the runner's resolver, which goes through
+          # Tailscale's MagicDNS and timed out in Android every so often.
           # -HardwareDecoder: video is decoded inside Android, not by the
           # emulator on the host; qemu died silently minutes into PineDrama
           # playback twice with host decoding (hwcodec.*dec=2), memory fine.
@@ -329,7 +332,7 @@ jobs:
           # Vulkan. With ES 3, opening PineDrama's coin tab (SparkActivity, a
           # Lynx AnimaX animation) segfaulted qemu's RenderThread within a
           # second, every time, with every -gpu mode and emulator 36 and 37.
-          emulator-options: -feature -HardwareDecoder,-Vulkan,-GLESDynamicVersion -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
+          emulator-options: -feature -HardwareDecoder,-Vulkan,-GLESDynamicVersion -no-snapshot -dns-server 1.1.1.1,8.8.8.8 -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Pinned emulator 36.2.12 (Oct 2025): a new emulator is picked up only
