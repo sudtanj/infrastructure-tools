@@ -41,7 +41,7 @@ name: "Deploy Vercel Projects (private repo)"
 #
 #   secret <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or <PREFIX>_CRON_KEY),
 #          <PREFIX>_DATABASE_URL  optional, per project (PREFIX = folder name upper-cased);
-#                                copied to Vercel on every deploy, e.g. MIZHU_APP_KEY.
+#                                copied to Vercel on every deploy, e.g. PAYMENTER_APP_KEY.
 #
 #   Runtime env lives per project in Vercel. Missing APP_KEY / CRON_SECRET are
 #   generated (as sensitive) for projects whose code reads them; existing values
