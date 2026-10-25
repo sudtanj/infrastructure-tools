@@ -72,6 +72,20 @@ log_memory() {
   free -m | awk -v rss="${rss:-?}" '/^Mem:/ { printf "memory: host used %d MiB, available %d MiB; emulator RSS %s MiB\n", $3, $7, rss }'
 }
 
+# qemu has died with no crash dump, no OOM kill and no output. Record, in the
+# kernel's own trace buffer, every fatal signal and every process exit with its
+# code, so the next death says who ended it and how. Best effort.
+tracing=/sys/kernel/tracing
+[ -d "$tracing/events" ] || tracing=/sys/kernel/debug/tracing
+sudo sh -c "
+  echo 1 > $tracing/options/record-tgid
+  echo 'sig == 1 || sig == 2 || sig == 4 || sig == 6 || sig == 7 || sig == 8 || sig == 9 || sig == 11 || sig == 15' \
+    > $tracing/events/signal/signal_generate/filter
+  echo 1 > $tracing/events/signal/signal_generate/enable
+  echo 1 > $tracing/events/syscalls/sys_enter_exit_group/enable
+  echo 1 > $tracing/tracing_on
+" 2>/dev/null || echo "::warning::Could not enable kernel tracing."
+
 # qemu can die without a word (the OOM killer, a crash in its host video
 # decoder); adb then only says "offline" and the stop file never comes. End
 # the run so Save state runs.
@@ -80,6 +94,8 @@ emulator_died() {
   sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true
   log_memory
   pgrep -a Xvfb >/dev/null || echo "Xvfb is gone too."
+  echo "Kernel trace of qemu's end (signals sent to it, or its exit code):"
+  sudo cat "$tracing/trace" 2>/dev/null | grep -iE 'qemu|emulator' | tail -20 || true
   # The emulator's crash handler writes a minidump; none means qemu was
   # killed or exited by itself.
   local dumps
