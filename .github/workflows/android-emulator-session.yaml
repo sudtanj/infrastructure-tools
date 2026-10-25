@@ -326,7 +326,7 @@ jobs:
           # emulator on the host; qemu died silently minutes into PineDrama
           # playback twice with host decoding (hwcodec.*dec=2), memory fine.
           # -Vulkan: fewer host renderer paths; see emulator-build below.
-          emulator-options: -feature -HardwareDecoder,-Vulkan -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
+          emulator-options: -feature -HardwareDecoder,-Vulkan,-GLESDynamicVersion -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
           # Pinned emulator 36.2.12 (Oct 2025), not the latest: 37.2.12 segfaulted
