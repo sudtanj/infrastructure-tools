@@ -400,7 +400,16 @@ jobs:
           trap 'rm -f "$LOG" "$PAYLOAD" "${PAYLOAD}.attach"' EXIT
 
           # EarnApp's device ID: the EARNAPP_UUID secret, else derived from the Tailscale OAuth
-          # secret, so it stays the same across runs without one more secret to manage.
+          # secret, so it stays the same across runs without one more secret to manage. A secret
+          # that isn't an ID (sdk-node- + 32 hex) is ignored.
+          if [ "${SCRIPT_PATH##*/}" = "init-earnapp.sh" ]; then
+            EARNAPP_UUID="$(printf '%s' "${EARNAPP_UUID:-}" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+            if [ -n "$EARNAPP_UUID" ] && ! [[ "$EARNAPP_UUID" =~ ^sdk-node-[0-9a-f]{32}$ ]]; then
+              echo "::warning::EARNAPP_UUID is set but is not an EarnApp device ID (sdk-node- + 32 hex digits); ignoring it"
+              EARNAPP_UUID=""
+            fi
+            export EARNAPP_UUID
+          fi
           if [ "${SCRIPT_PATH##*/}" = "init-earnapp.sh" ] && [ -z "${EARNAPP_UUID:-}" ]; then
             if [ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
               echo "::error::set EARNAPP_UUID, or TAILSCALE_OAUTH_CLIENT_SECRET to derive it from"
