@@ -42,6 +42,7 @@ name: "Deploy Vercel Projects (private repo)"
 #   secret <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or <PREFIX>_CRON_KEY),
 #          <PREFIX>_DATABASE_URL  optional, per project (PREFIX = folder name upper-cased);
 #                                copied to Vercel on every deploy, e.g. PAYMENTER_APP_KEY.
+#                                A one-line vercel/<name>/.secrets-prefix file overrides PREFIX.
 #
 #   Runtime env lives per project in Vercel. Missing APP_KEY / CRON_SECRET are
 #   generated (as sensitive) for projects whose code reads them; existing values
@@ -123,7 +124,11 @@ jobs:
               continue
             fi
             echo "$name: ${sha:0:12} to deploy"
-            rows+=("{\"name\":\"$name\",\"sha\":\"$sha\",\"prefix\":\"$(printf %s "$name" | tr "[:lower:].-" "[:upper:]__")\"}")
+            prefix=$(printf %s "$name" | tr "[:lower:].-" "[:upper:]__")
+            # Optional override in vercel/<name>/.secrets-prefix, e.g. to keep a project's secrets after renaming its folder.
+            p=$(gh api -H 'Accept: application/vnd.github.raw' "repos/${REPO}/contents/vercel/${name}/.secrets-prefix?ref=${REF}" 2>/dev/null | tr -d '[:space:]') || p=''
+            if printf %s "$p" | grep -Eq '^[A-Z][A-Z0-9_]*$'; then prefix=$p; fi
+            rows+=("{\"name\":\"$name\",\"sha\":\"$sha\",\"prefix\":\"$prefix\"}")
           done
           echo "projects=[$(IFS=,; echo "${rows[*]:-}")]" >> "$GITHUB_OUTPUT"
 
@@ -176,7 +181,7 @@ jobs:
           echo "Linked to '$NAME'."
 
       # GitHub secrets <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or _CRON_KEY) and <PREFIX>_DATABASE_URL
-      # (PREFIX = folder name upper-cased, '-' and '.' as '_') are the source of truth and replace
+      # (PREFIX = folder name upper-cased, '-' and '.' as '_', or .secrets-prefix) are the source of truth and replace
       # the Vercel value on every deploy. Anything still missing is then filled in, never replaced:
       # a new APP_KEY would make stored secrets unreadable.
       - name: Provision env (project secrets, Neon database, APP_KEY, CRON_SECRET)
