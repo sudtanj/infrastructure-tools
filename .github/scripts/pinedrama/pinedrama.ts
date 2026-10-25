@@ -55,9 +55,12 @@ async function shell(d: AndroidDevice, cmd: string): Promise<string> {
 }
 
 async function appUid(d: AndroidDevice): Promise<string> {
-  const m = (await shell(d, `pm list packages -U ${PKG}`)).match(new RegExp(`package:${PKG.replace(/\./g, "\\.")} uid:(\\d+)`));
-  if (!m) throw new Error(`${PKG} is not installed`);
-  return m[1];
+  // "package:com.ss.android.ttmd.video uid:10209"
+  const prefix = `package:${PKG} uid:`;
+  const line = (await shell(d, `pm list packages -U ${PKG}`)).split("\n").find((l) => l.startsWith(prefix));
+  const uid = line?.slice(prefix.length).trim();
+  if (!uid || !/^\d+$/.test(uid)) throw new Error(`${PKG} is not installed`);
+  return uid;
 }
 
 // Current players from `dumpsys audio`, e.g.
