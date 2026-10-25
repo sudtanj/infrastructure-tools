@@ -24,10 +24,10 @@ name: "Deploy GitHub runner on Instabox"
 #                                      Administration: Read and write on it
 #   GH_RUNNER_REPO + GH_RUNNER_APP_ID + GH_RUNNER_APP_PRIVATE_KEY (or GH_RUNNER_PAT) take
 #   precedence when set; see builder-tools/github-runner/README.md
-#   INSTABOX_RUNNER_REPOS (optional)   several repos for this machine, comma-separated
-#                                      (OWNER/REPO,OWNER/REPO); takes precedence over the
-#                                      above and only affects Instabox. One supervisor per
-#                                      repo; the credential needs Administration: RW on all.
+#   PRIVATE_MIRROR_REPO (optional)     a second repo served from this machine (OWNER/REPO or
+#                                      its https://github.com link), Instabox only. One
+#                                      supervisor per repo; the credential needs
+#                                      Administration: RW on both.
 #                                      Their jobs can run at the same time, each with the
 #                                      per-job caps below, so keep the caps' sum near the
 #                                      machine's size.
@@ -94,7 +94,7 @@ jobs:
       - name: Verify required secrets
         env:
           MODE: ${{ inputs.mode }}
-          HAS_REPO: ${{ secrets.INSTABOX_RUNNER_REPOS != '' || secrets.GH_RUNNER_REPO != '' || secrets.PRIVATE_REPO != '' }}
+          HAS_REPO: ${{ secrets.GH_RUNNER_REPO != '' || secrets.PRIVATE_REPO != '' }}
           HAS_APP: ${{ secrets.GH_RUNNER_APP_ID != '' && secrets.GH_RUNNER_APP_PRIVATE_KEY != '' }}
           HAS_PAT: ${{ secrets.GH_RUNNER_PAT != '' || secrets.PRIVATE_REPO_TOKEN != '' }}
         run: |
@@ -192,7 +192,8 @@ jobs:
         env:
           SCRIPT_PATH: bash-scripts/upsert-github-runner.sh
           # Dedicated GH_RUNNER_* secrets when set, else the private repo secrets other workflows use.
-          GH_RUNNER_REPO: ${{ secrets.INSTABOX_RUNNER_REPOS || secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          # Plus PRIVATE_MIRROR_REPO when set; the script skips the empty entry otherwise.
+          GH_RUNNER_REPO: ${{ format('{0},{1}', secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO, secrets.PRIVATE_MIRROR_REPO) }}
           GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
           GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
           GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
