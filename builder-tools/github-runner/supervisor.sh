@@ -53,6 +53,16 @@ ok()   { printf '[+] %s %s\n' "$(ts)" "$*"; }
 warn() { printf '[!] %s %s\n' "$(ts)" "$*" >&2; }
 fail() { printf '[x] %s %s\n' "$(ts)" "$*" >&2; exit 1; }
 
+# GH_RUNNER_LOG_FILE: log to this file (meant for a tmpfs, with Docker's --log-driver none)
+# instead of stdout, so no log reaches the disk. Kept to ~2 MiB: one 1 MiB file + one old.
+LOG_FILE="${GH_RUNNER_LOG_FILE:-}"
+if [ -n "$LOG_FILE" ] && [ "${1:-run}" = run ]; then
+  exec > >(set +e; while IFS= read -r l; do
+      printf '%s\n' "$l" >> "$LOG_FILE"
+      [ "$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 1048576 ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
+    done) 2>&1
+fi
+
 HDR=$(mktemp)   # auth headers live in files on tmpfs, not on curl's command line
 trap 'rm -f "$HDR"' EXIT
 
@@ -173,7 +183,8 @@ run_one() {
     # Checkout, job temp files, step secrets and /tmp live in RAM only.
     --tmpfs "/home/runner/_work:rw,nosuid,nodev,exec,size=${WORK_SIZE},uid=${RUNNER_UID},gid=${RUNNER_UID},mode=0755"
     --tmpfs "/tmp:rw,nosuid,nodev,exec,size=${TMP_SIZE},mode=1777"
-    --log-driver json-file --log-opt max-size=5m --log-opt max-file=2
+    # The runner's own output is not needed here (job logs live on GitHub): no log file on disk.
+    --log-driver none
     --env-file "$envf")
   if [ "$NO_SUDO" = "1" ]; then args+=(--cap-drop ALL --security-opt no-new-privileges:true); fi
   for d in $DNS; do args+=(--dns "$d"); done

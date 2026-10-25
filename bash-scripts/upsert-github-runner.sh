@@ -12,7 +12,8 @@
 #   GH_RUNNER_PAT                                  fine-grained PAT, Administration: RW on the repo
 # Optional: GH_RUNNER_NAME (runner name prefix), GH_RUNNER_LABELS, GH_RUNNER_CPUS,
 #   GH_RUNNER_MEMORY, GH_RUNNER_MEMORY_SWAP, GH_RUNNER_WORK_SIZE, GH_RUNNER_TMP_SIZE,
-#   GH_RUNNER_NO_SUDO, GH_RUNNER_NETWORK, GH_RUNNER_IMAGE, GH_RUNNER_DNS.
+#   GH_RUNNER_NO_SUDO, GH_RUNNER_NETWORK, GH_RUNNER_IMAGE, GH_RUNNER_DNS,
+#   GH_RUNNER_HOST_RAM_ONLY=1 (swap off + system journal in RAM; only for a runner-only host).
 
 set -euo pipefail
 
@@ -69,6 +70,32 @@ if [ -d /run/systemd/system ] && ! systemctl is-enabled -q docker 2>/dev/null; t
   if "${SU[@]}" systemctl enable docker >/dev/null 2>&1; then ok "docker enabled at boot"; else warn "could not enable docker at boot"; fi
 fi
 
+# Opt-in for hosts that only run the runner (Instabox): job RAM can't swap anyway (cgroup
+# memory-swap = memory); this also keeps the rest of the host's memory and its system journal
+# off the disk. Not for the GCP e2-micro, which needs its swapfile.
+if [ "${GH_RUNNER_HOST_RAM_ONLY:-0}" = 1 ]; then
+  step "keeping memory and logs off the disk (no swap, journal in RAM)"
+  if [ -n "$(swapon --noheadings 2>/dev/null)" ]; then
+    if "${SU[@]}" swapoff -a; then ok "swap off"; else warn "could not turn swap off"; fi
+  else
+    ok "no swap"
+  fi
+  # Stays off after a reboot.
+  if [ -f /etc/fstab ] && grep -qE '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
+    "${SU[@]}" sed -i -E 's/^([^#].*[[:space:]]swap[[:space:]].*)$/# \1/' /etc/fstab && ok "swap removed from /etc/fstab"
+  fi
+  if [ -d /run/systemd/system ]; then
+    if printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' \
+        | "${SU[@]}" sh -c 'install -d /etc/systemd/journald.conf.d && cat > /etc/systemd/journald.conf.d/gh-runner-ram.conf' \
+      && "${SU[@]}" systemctl restart systemd-journald >/dev/null 2>&1; then
+      "${SU[@]}" rm -rf /var/log/journal   # what was written before this setting
+      ok "system journal kept in RAM only"
+    else
+      warn "could not move the system journal to RAM"
+    fi
+  fi
+fi
+
 step "storing credentials in ${SECRETS_DIR} (root only)"
 # Through stdin, never argv. Only the supervisor container mounts this directory;
 # job containers never see it.
@@ -122,21 +149,24 @@ done
 # A job container that is running now is left alone: the new supervisor waits for it.
 
 step "starting ${SUPERVISOR_NAME}"
-dk run -d --name "$SUPERVISOR_NAME" --restart unless-stopped \
-  --log-driver json-file --log-opt max-size=2m --log-opt max-file=2 \
+# No Docker log file on disk: the supervisor keeps its log in its own RAM /tmp
+# (GH_RUNNER_LOG_FILE, ~2 MiB rotated), and job containers log nowhere.
+dk run -d --name "$SUPERVISOR_NAME" --restart unless-stopped --log-driver none \
+  -e GH_RUNNER_LOG_FILE=/tmp/supervisor.log \
   "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" run >/dev/null || fail "failed to start ${SUPERVISOR_NAME}"
+svlog() { dk exec "$SUPERVISOR_NAME" cat /tmp/supervisor.log 2>/dev/null || true; }
 
 step "waiting for the first runner to come online"
 for _ in $(seq 1 45); do
   sleep 2
   STATE=$(dk inspect -f '{{.State.Status}}' "$SUPERVISOR_NAME" 2>/dev/null || echo missing)
   [ "$STATE" = running ] || break
-  dk logs "$SUPERVISOR_NAME" 2>&1 | grep -qE 'online, waiting for a job|already running' && break
+  svlog | grep -qE 'online, waiting for a job|already running' && break
 done
-dk logs --tail 20 "$SUPERVISOR_NAME" 2>&1 | grep -E '^\[[*+!x]\] ' || true
-[ "$STATE" = running ] || fail "${SUPERVISOR_NAME} is ${STATE}"
-if dk logs "$SUPERVISOR_NAME" 2>&1 | grep -qE 'online, waiting for a job|already running'; then
+svlog | tail -n 20 | grep -E '^\[[*+!x]\] ' || true
+[ "$STATE" = running ] || fail "${SUPERVISOR_NAME} is ${STATE} (its log was in RAM; run it with: docker run --rm ... ${SUPERVISOR_IMAGE} check)"
+if svlog | grep -qE 'online, waiting for a job|already running'; then
   ok "github runner supervisor is up; jobs with runs-on: [${LABELS}] will run here"
 else
-  warn "supervisor is running but no runner is online yet (pulling the runner image?); check: docker logs ${SUPERVISOR_NAME}"
+  warn "supervisor is running but no runner is online yet (pulling the runner image?); check: docker exec ${SUPERVISOR_NAME} cat /tmp/supervisor.log"
 fi
