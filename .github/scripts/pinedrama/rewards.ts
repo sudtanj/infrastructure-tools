@@ -177,7 +177,12 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       await shell(d, "input swipe 360 400 360 1100 300");
       await sleep(1_000);
     }
-    await sleep(2_000);
+    // Just after the app starts, the page shows before its buttons do.
+    for (let i = 0; i < 6; i++) {
+      await sleep(5_000);
+      const s = await screenshot(device);
+      if (redButtons(s).length || (await words(s)).some((w) => ACCEPT.test(w.text))) break;
+    }
 
     let presses = 0, scrolls = 0, accepts = 0;
     const tried = new Set<string>();
