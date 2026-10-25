@@ -651,15 +651,14 @@ jobs:
           trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
           {
             for v in $(compgen -e | grep '^GH_RUNNER_'); do
-              [ -n "${!v}" ] && printf 'export %s=%q
-' "$v" "${!v}"
+              [ -n "${!v}" ] && printf 'export %s=%q\n' "$v" "${!v}"
             done
             cat "$SCRIPT_PATH"
           } > "$PAYLOAD"
           ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' < "$PAYLOAD" > "$LOG" 2>&1
           RC=$?
           set -e
-          grep -aE '^[[*>+!x]] ' "$LOG" | perl "$SAN" || true
+          grep -aE '^\[[*>+!x]\] ' "$LOG" | perl "$SAN" || true
           if [ "$RC" -ne 0 ]; then
             echo "::error::upsert-github-runner.sh failed (exit ${RC})"
             echo "---- diagnostic tail (sanitized) ----"
