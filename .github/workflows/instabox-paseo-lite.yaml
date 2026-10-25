@@ -155,7 +155,8 @@ jobs:
             if err=$(instabox rm "$m" 2>&1 >/dev/null); then
               echo "[+] ${m}: deleted"
             else
-              echo "::error::${m}: could not delete: ${err}"
+              # Instabox errors can include the account email.
+              echo "::error::${m}: could not delete: $(printf '%s' "$err" | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+/<email>/g')"
               failed=1
             fi
           done <<< "$targets"
