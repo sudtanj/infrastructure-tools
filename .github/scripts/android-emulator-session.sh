@@ -79,6 +79,17 @@ emulator_died() {
   echo "::error title=Emulator exited::qemu-system-x86_64 is gone; ending the session."
   sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true
   log_memory
+  pgrep -a Xvfb >/dev/null || echo "Xvfb is gone too."
+  # The emulator's crash handler writes a minidump; none means qemu was
+  # killed or exited by itself.
+  local dumps
+  dumps="$(find /tmp/android-runner ~/.android -name '*.dmp' -newer /tmp/emulator-launched 2>/dev/null || true)"
+  if [ -n "$dumps" ]; then
+    # shellcheck disable=SC2086
+    python3 .github/scripts/minidump-summary.py $dumps || true
+  else
+    echo "No crash dump was written."
+  fi
   exit 1
 }
 
