@@ -1,0 +1,328 @@
+name: "Deploy ProxyRack on Instabox"
+
+# Runs bash-scripts/init-proxyrack.sh on the Instabox machine that hosts the GitHub runner
+# (instabox-github-runner.yaml; the free plan allows one machine). The ProxyRack client
+# (sudtanj/proxyrack, x86-64 only) runs behind its own Tailscale node, which sends everything
+# through the exit node: ProxyRack sees the exit node's IP, never Instabox's, and the client is
+# cut off if the tunnel drops. Proxy customers can't reach the exit node's LAN or the tailnet.
+# See the script's header for the details.
+#
+# Every 5 hours: wake the machine, (re)deploy if anything is missing or changed (a healthy
+# pair is left alone), add the device to the ProxyRack dashboard, then keep the machine awake
+# for the rest of the 5 hours. The free plan pauses an idle machine after 30 minutes and a
+# running container doesn't count as activity, so without that ProxyRack would only run for
+# 30 minutes per deploy. GitHub may start scheduled runs late, so there can be short gaps.
+# keep_awake=false (manual runs) deploys and stops there.
+#
+# SECRETS
+#   INSTABOX_API_KEY                  machine control and SSH (already used by the runner)
+#   PROXYRACK_UUID                    device ID, 32-64 letters/digits, generated once:
+#                                     head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+#   PROXYRACK_API_KEY (optional)      ProxyRack dashboard API key; adds the device to the
+#                                     dashboard by itself (else add the ID by hand once)
+#   TAILSCALE_EXIT_NODE               tag:name, a MagicDNS name or a Tailscale IPv4
+#   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS (preferred), or TAILSCALE_AUTH_KEY
+#                                     the same secrets typescript-worker-run.yaml uses; the
+#                                     tag needs internet access through the exit node in the ACL
+# REPO VARIABLES (optional)
+#   INSTABOX_RUNNER_MACHINE           machine name (default gh-runner)
+#   PROXYRACK_CPU_LIMIT / PROXYRACK_MEMORY_LIMIT   default 0.5 / 128m
+
+on:
+  schedule:
+    - cron: "11 */5 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy: deploy or update. remove: stop and delete the ProxyRack containers"
+        required: false
+        default: "deploy"
+        type: choice
+        options:
+          - deploy
+          - remove
+      keep_awake:
+        description: "After deploying, keep the machine awake for the rest of the 5 hours"
+        required: false
+        default: false
+        type: boolean
+      machine_name:
+        description: "Instabox machine name (blank: repo variable INSTABOX_RUNNER_MACHINE, else gh-runner)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
+  INSTABOX_API_URL: https://api.instabox.sh
+  MACHINE_NAME: ${{ inputs.machine_name || vars.INSTABOX_RUNNER_MACHINE || 'gh-runner' }}
+  ACTION: ${{ inputs.action || 'deploy' }}
+  KEEP_AWAKE: ${{ github.event_name == 'schedule' || inputs.keep_awake == true }}
+
+jobs:
+  proxyrack:
+    name: "${{ (inputs.action || 'deploy') == 'remove' && 'Remove' || 'Deploy' }} ProxyRack"
+    # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    # A run that starts while the previous one still keeps the machine awake waits for it.
+    concurrency:
+      group: instabox-proxyrack
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        if: env.ACTION == 'deploy'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify required secrets
+        env:
+          PROXYRACK_UUID: ${{ secrets.PROXYRACK_UUID }}
+          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+          HAS_OAUTH: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET != '' && secrets.TAILSCALE_TAGS != '' }}
+          HAS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY != '' }}
+        run: |
+          missing=""
+          [ -n "${INSTABOX_API_KEY:-}" ] || missing="$missing INSTABOX_API_KEY"
+          if [ "$ACTION" = deploy ]; then
+            [ -n "$PROXYRACK_UUID" ] || missing="$missing PROXYRACK_UUID"
+            [ -n "$TAILSCALE_EXIT_NODE" ] || missing="$missing TAILSCALE_EXIT_NODE"
+            [ "$HAS_OAUTH" = true ] || [ "$HAS_AUTHKEY" = true ] \
+              || missing="$missing TAILSCALE_OAUTH_CLIENT_SECRET+TAILSCALE_TAGS(or TAILSCALE_AUTH_KEY)"
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:${missing} (see the comment at the top of this workflow)"
+            exit 1
+          fi
+          echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          echo "[+] secrets set | machine: ${MACHINE_NAME} | action: ${ACTION} | keep awake: ${KEEP_AWAKE}"
+
+      - name: Prepare log sanitizer
+        run: |
+          # Everything from the machine and the Instabox CLI (whose errors can include the
+          # account email) passes through it.
+          cat > "${RUNNER_TEMP}/sanitize.pl" <<'PERL'
+          use strict;
+          use warnings;
+          my $h = '[0-9A-Fa-f]{1,4}';
+          while (my $l = <>) {
+            $l =~ s/\b(?:\d{1,3}\.){3}\d{1,3}\b/<ip>/g;
+            $l =~ s/(?<![\w:.])(?:(?:$h:){7}$h|(?:$h:){1,7}:(?:$h(?::$h){0,6})?|::(?:$h(?::$h){0,6})?)(?![\w:])/<ipv6>/g;
+            $l =~ s{(://)[^/\s@]+@}{$1<creds>@}g;
+            $l =~ s/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/<email>/g;
+            $l =~ s/\bibk_\w+/ibk_<redacted>/g;
+            $l =~ s/\btskey-[\w-]+/tskey-<redacted>/g;
+            $l =~ s/\btag:[\w-]+/tag:<redacted>/g;
+            $l =~ s/\bproxyrack-[0-9a-f]{6}\b/proxyrack-<node>/g;
+            $l =~ s/\b[0-9A-Fa-f]{24,}\b/<id>/g;
+            $l =~ s/\bBearer\s+\S+/Bearer <redacted>/gi;
+            $l =~ s/((?:authkey|auth_key|token|password|passwd|secret|api[_-]?key)\s*[=:]\s*)(?!(?:set|unset)\b)\S+/$1<redacted>/gi;
+            print $l;
+          }
+          PERL
+          perl -c "${RUNNER_TEMP}/sanitize.pl"
+
+      - name: Install instabox CLI
+        run: |
+          set -euo pipefail
+          # The installer verifies the binary against SHA256SUMS and installs nothing on a mismatch.
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
+          "$INSTABOX_INSTALL_DIR/instabox" --version
+
+      - name: Wake the machine
+        run: |
+          set -euo pipefail
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          # Never created here: the machine belongs to instabox-github-runner.yaml.
+          info=$(instabox get "$MACHINE_NAME" --json 2>/dev/null) \
+            || { echo "::error::machine ${MACHINE_NAME} does not exist; deploy it with instabox-github-runner.yaml first"; exit 1; }
+          state=$(jq -r '.state // "unknown"' <<< "$info")
+          echo "[*] machine state: ${state}"
+          case "$state" in
+            running) ;;
+            suspended|stopped|error) instabox start "$MACHINE_NAME" 2>&1 | perl "$SAN" ;;
+            *) echo "[*] machine is busy (${state}); waiting for it below" ;;
+          esac
+          # A command also wakes a machine paused for being idle, and resets its idle timer.
+          instabox exec "$MACHINE_NAME" --timeout 120 -- true 2>&1 | perl "$SAN"
+          echo "[+] machine is up"
+
+      - name: Remove the ProxyRack containers
+        if: env.ACTION == 'remove'
+        run: |
+          set -euo pipefail
+          instabox exec "$MACHINE_NAME" --timeout 120 -- sudo -n sh -c \
+            'docker rm -f proxyrack proxyrack-ts >/dev/null 2>&1; docker network rm proxyrack-net >/dev/null 2>&1; rm -rf /run/proxyrack; echo "[+] removed"' \
+            2>&1 | perl "${RUNNER_TEMP}/sanitize.pl"
+          echo "[*] the ephemeral Tailscale node drops off the tailnet by itself; the dashboard device stays until you delete it"
+
+      - name: Create a single-use Tailscale auth key
+        if: env.ACTION == 'deploy'
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # The OAuth client never expires; trade it for a single-use, ephemeral, tagged key that
+          # lives 10 minutes. It is only used if the containers have to be (re)created.
+          if [ -n "$TAILSCALE_OAUTH_CLIENT_SECRET" ]; then
+            if ! [[ "$TAILSCALE_TAGS" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*(,tag:[A-Za-z0-9][A-Za-z0-9_-]*)*$ ]]; then
+              echo "::error::TAILSCALE_TAGS must look like 'tag:ci' or 'tag:ci,tag:other'."; exit 1
+            fi
+            token="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]' \
+              | curl -fsS --max-time 20 -d client_id=ignored --data-urlencode client_secret@- \
+                  https://api.tailscale.com/api/v2/oauth/token | jq -r '.access_token // empty')" || token=""
+            if [ -z "$token" ]; then echo "::error::Tailscale rejected the OAuth client secret."; exit 1; fi
+            echo "::add-mask::$token"
+            body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{capabilities: {devices: {create: {
+              reusable: false, ephemeral: true, preauthorized: true, tags: ($t | split(","))}}},
+              expirySeconds: 600, description: "proxyrack"}')"
+            authkey="$(curl -fsS --max-time 20 -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+              -d "$body" https://api.tailscale.com/api/v2/tailnet/-/keys | jq -r '.key // empty')" || authkey=""
+            if [ -z "$authkey" ]; then
+              echo "::error::The OAuth client could not create an auth key. It needs the Auth Keys write scope and the tags in TAILSCALE_TAGS."; exit 1
+            fi
+          else
+            authkey="$TAILSCALE_AUTH_KEY"
+          fi
+          echo "::add-mask::$authkey"
+          printf '%s' "$authkey" > "${RUNNER_TEMP}/ts-authkey"
+          echo "[+] auth key ready"
+
+      - name: Configure SSH
+        if: env.ACTION == 'deploy'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          # Host block with a short-lived certificate signed by Instabox for this key.
+          instabox ssh-config "$MACHINE_NAME" 2> >(perl "${RUNNER_TEMP}/sanitize.pl" >&2) > "${RUNNER_TEMP}/instabox_ssh_config"
+          {
+            cat "${RUNNER_TEMP}/instabox_ssh_config"
+            printf '\nHost *\n  LogLevel ERROR\n  ServerAliveInterval 30\n'
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          alias=$(awk '$1 == "Host" { print $2; exit }' "${RUNNER_TEMP}/instabox_ssh_config")
+          [ -n "$alias" ] || { echo "::error::instabox ssh-config printed no Host block"; exit 1; }
+          echo "SSH_ALIAS=${alias}" >> "$GITHUB_ENV"
+          ssh -T -o BatchMode=yes "$alias" true
+          echo "[+] SSH to the machine works"
+
+      - name: Run init-proxyrack.sh over SSH
+        if: env.ACTION == 'deploy'
+        env:
+          SCRIPT_PATH: bash-scripts/init-proxyrack.sh
+          PROXYRACK_UUID: ${{ secrets.PROXYRACK_UUID }}
+          PROXYRACK_TS_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+          PROXYRACK_CPU_LIMIT: ${{ vars.PROXYRACK_CPU_LIMIT }}
+          PROXYRACK_MEMORY_LIMIT: ${{ vars.PROXYRACK_MEMORY_LIMIT }}
+        run: |
+          set +e
+          SECONDS=0
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          echo "::add-mask::${PROXYRACK_UUID}"
+          echo "::add-mask::${PROXYRACK_TS_EXIT_NODE}"
+          PROXYRACK_TS_AUTHKEY="$(cat "${RUNNER_TEMP}/ts-authkey")"
+          rm -f "${RUNNER_TEMP}/ts-authkey"
+          export PROXYRACK_TS_AUTHKEY
+          umask 077
+          LOG=$(mktemp)
+          PAYLOAD=$(mktemp)
+          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
+          {
+            for v in $(compgen -e | grep '^PROXYRACK_'); do
+              [ -n "${!v}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+            done
+            # Instabox machines are not COS: Docker may need starting first.
+            cat <<'SH'
+          if ! docker info >/dev/null 2>&1 && ! sudo -n docker info >/dev/null 2>&1; then
+            sudo -n systemctl start docker >/dev/null 2>&1 || sudo -n service docker start >/dev/null 2>&1 || true
+            for _ in $(seq 1 20); do { docker info >/dev/null 2>&1 || sudo -n docker info >/dev/null 2>&1; } && break; sleep 1; done
+          fi
+          SH
+            cat "$SCRIPT_PATH"
+          } > "$PAYLOAD"
+          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
+          echo "[*] script: ${SCRIPT_PATH} (sha256 $(sha256sum "$SCRIPT_PATH" | cut -c1-12)) | env forwarded: ${NAMES}"
+
+          # SSH, not `instabox exec`: exec stops a command after 10 minutes and does not stream.
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' < "$PAYLOAD" > "$LOG" 2>&1
+          RC=$?
+          set -e
+          grep -aE '^\[[*>+!x]\] ' "$LOG" | perl "$SAN" || true
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::init-proxyrack.sh failed (exit ${RC}) after ${SECONDS}s"
+            [ "$RC" -eq 255 ] && echo "[!] exit 255 = the SSH connection itself failed (not the script)."
+            echo "---- diagnostic tail (sanitized) ----"
+            perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -40 || true
+            exit "$RC"
+          fi
+          echo "[+] ProxyRack deployed in ${SECONDS}s"
+
+      - name: Add the device to the ProxyRack dashboard
+        if: env.ACTION == 'deploy'
+        env:
+          PROXYRACK_UUID: ${{ secrets.PROXYRACK_UUID }}
+          PROXYRACK_API_KEY: ${{ secrets.PROXYRACK_API_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "$PROXYRACK_API_KEY" ]; then
+            echo "[*] PROXYRACK_API_KEY not set: add the device ID in the dashboard by hand (once)"; exit 0
+          fi
+          # From here, not from the machine: the API key never reaches Instabox. The dashboard only
+          # accepts a device once it has connected, so this retries for a few minutes. Adding a
+          # device that is already there is reported, not failed.
+          body="$(jq -cn --arg id "$PROXYRACK_UUID" '{device_id: $id, device_name: "instabox"}')"
+          for attempt in $(seq 1 10); do
+            resp="$(curl -sS --max-time 20 -X POST https://peer.proxyrack.com/api/device/add \
+              -H "Api-Key: ${PROXYRACK_API_KEY}" -H 'Content-Type: application/json' -H 'Accept: application/json' \
+              -d "$body" 2>/dev/null || true)"
+            status="$(jq -r '.status // empty' <<< "$resp" 2>/dev/null || true)"
+            msg="$(jq -r '(.message // .error // "") | tostring' <<< "$resp" 2>/dev/null | head -c 160 || true)"
+            msg="${msg//"$PROXYRACK_UUID"/<id>}"
+            if [ -n "$status" ] && [ "$status" != error ]; then
+              echo "[+] device added to the dashboard"; exit 0
+            fi
+            if grep -qiE 'already|exists' <<< "$msg"; then
+              echo "[+] device already in the dashboard"; exit 0
+            fi
+            echo "[*] attempt ${attempt}/10: ${status:-no reply} ${msg}" | perl "${RUNNER_TEMP}/sanitize.pl"
+            sleep 30
+          done
+          echo "::warning::Could not add the device to the dashboard; the client runs anyway. Add the device ID by hand."
+
+      - name: Keep the machine awake
+        if: env.ACTION == 'deploy' && env.KEEP_AWAKE == 'true'
+        run: |
+          set -uo pipefail
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          # Until 290 minutes after the job started (the job's limit is 300), so the next
+          # scheduled run takes over. A command every 10 minutes resets the 30-minute idle timer;
+          # every 30 minutes it also checks that both containers still run.
+          deadline=$(( ${JOB_STARTED:-$(date +%s)} + 290 * 60 ))
+          n=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 600
+            n=$((n + 1))
+            if [ $((n % 3)) -eq 0 ]; then
+              states="$(instabox exec "$MACHINE_NAME" --timeout 60 -- sudo -n docker inspect -f '{{.State.Status}}' proxyrack proxyrack-ts 2>&1 | paste -sd' ' -)"
+              echo "[*] $(date -u +%H:%M) containers: ${states}" | perl "$SAN"
+              case "$states" in
+                "running running") ;;
+                *) echo "::error::ProxyRack is not running any more; the next run redeploys it"; exit 1 ;;
+              esac
+            else
+              instabox exec "$MACHINE_NAME" --timeout 60 -- true >/dev/null 2>&1 \
+                || echo "[!] $(date -u +%H:%M) keep-awake command failed; retrying in 10 minutes"
+            fi
+          done
+          echo "[+] kept awake until the next scheduled run"
