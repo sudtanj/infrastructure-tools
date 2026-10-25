@@ -27,6 +27,13 @@ name: "Deploy paseo-lite on Instabox"
 #   destroy: deletes the machine (disk, workspace, agent logins and all) and every other machine
 #     this workflow created (metadata app=paseo-lite). Type the machine name in confirm_destroy.
 #     Not undoable. Your Instabox API keys and snapshots are left alone.
+#
+# github_runner (default on): also runs bash-scripts/upsert-github-runner.sh here, the ephemeral
+#   GitHub runner for the private repo (builder-tools/github-runner). It uses PRIVATE_REPO and
+#   PRIVATE_REPO_TOKEN (needs Administration: RW on that repo too) unless GH_RUNNER_REPO and a
+#   GitHub App / GH_RUNNER_PAT are set. Whenever the machine is online again it reconnects by
+#   itself. Optional repo variables: INSTABOX_RUNNER_LABELS (default self-hosted,linux,x64,instabox),
+#   INSTABOX_RUNNER_CPUS / _MEMORY / _WORK_SIZE (default 2 / 4g / 3g).
 
 on:
   workflow_dispatch:
@@ -61,6 +68,11 @@ on:
           - agent-browser
           - herdr
           - orca
+      github_runner:
+        description: "Also run the ephemeral GitHub runner for the private repo on this machine (bash-scripts/upsert-github-runner.sh)"
+        required: false
+        default: true
+        type: boolean
       debug:
         description: "Show safe debug output (all output is sanitized: no secrets, IPs, emails or hostnames)"
         required: false
@@ -596,3 +608,62 @@ jobs:
             instabox auto-suspend "$MACHINE_NAME" 0 >/dev/null || echo "::warning::could not turn off the idle pause"
             echo "[+] always-on requested (needs manual lifecycle on your Instabox account, or the keep-alive schedule)"
           fi
+
+      # The same supervisor as the GCP VM's upsert-github-runner run: one fresh runner container
+      # per job, work dir in RAM, deleted afterwards. Docker brings it back whenever the machine
+      # is online again (resumed, woken by this workflow's wake mode, or booted fresh) and it
+      # registers a new runner by itself: no token to renew by hand.
+      - name: GitHub runner for the private repo
+        if: inputs.github_runner
+        env:
+          SCRIPT_PATH: bash-scripts/upsert-github-runner.sh
+          # Dedicated GH_RUNNER_* secrets when set, else the private repo secrets other workflows
+          # already use (the token then also needs Administration: Read and write on that repo).
+          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
+          GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
+          GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
+          GH_RUNNER_NO_SUDO: ${{ secrets.GH_RUNNER_NO_SUDO }}
+          GH_RUNNER_NAME: ${{ inputs.machine_name || vars.INSTABOX_MACHINE_NAME || 'paseo-lite' }}
+          GH_RUNNER_LABELS: ${{ vars.INSTABOX_RUNNER_LABELS || 'self-hosted,linux,x64,instabox' }}
+          # Shared with paseo-lite and its browser on 4 vCPU / 8 GB.
+          GH_RUNNER_CPUS: ${{ vars.INSTABOX_RUNNER_CPUS || '2' }}
+          GH_RUNNER_MEMORY: ${{ vars.INSTABOX_RUNNER_MEMORY || '4g' }}
+          GH_RUNNER_WORK_SIZE: ${{ vars.INSTABOX_RUNNER_WORK_SIZE || '3g' }}
+          # Jobs get their own network, so they can't reach the browser's DevTools on the host's
+          # 127.0.0.1 (logged-in sessions) or anything else bound to localhost there.
+          GH_RUNNER_NETWORK: bridge
+        run: |
+          set +e
+          SAN="${RUNNER_TEMP}/sanitize.pl"
+          # The private repo name shows up in the runner logs: mask it in the forms they print.
+          if [ -n "${GH_RUNNER_REPO:-}" ]; then
+            r="${GH_RUNNER_REPO#https://github.com/}"; r="${r%.git}"; r="${r%/}"
+            echo "::add-mask::${r}"; echo "::add-mask::${r#*/}"
+          fi
+          if [ -z "$GH_RUNNER_REPO" ] || { [ -z "$GH_RUNNER_PAT" ] && [ -z "$GH_RUNNER_APP_ID" ]; }; then
+            echo "::warning::GitHub runner skipped: set PRIVATE_REPO + PRIVATE_REPO_TOKEN (or GH_RUNNER_REPO + a GitHub App / GH_RUNNER_PAT)"
+            exit 0
+          fi
+          umask 077
+          LOG=$(mktemp)
+          PAYLOAD=$(mktemp)
+          trap 'rm -f "$LOG" "$PAYLOAD"' EXIT
+          {
+            for v in $(compgen -e | grep '^GH_RUNNER_'); do
+              [ -n "${!v}" ] && printf 'export %s=%q
+' "$v" "${!v}"
+            done
+            cat "$SCRIPT_PATH"
+          } > "$PAYLOAD"
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' < "$PAYLOAD" > "$LOG" 2>&1
+          RC=$?
+          set -e
+          grep -aE '^[[*>+!x]] ' "$LOG" | perl "$SAN" || true
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::upsert-github-runner.sh failed (exit ${RC})"
+            echo "---- diagnostic tail (sanitized) ----"
+            perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -40 || true
+            exit "$RC"
+          fi
+          echo "[+] runner up; in the private repo use runs-on: [self-hosted, instabox]. Logs: instabox ssh ${MACHINE_NAME} -- sudo docker logs gh-runner-supervisor"

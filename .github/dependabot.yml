@@ -6,6 +6,7 @@ updates:
     directories:
       - /builder-tools/bitping
       - /builder-tools/earnfm
+      - /builder-tools/github-runner
       - /builder-tools/honeygain
       - /builder-tools/kongming
       - /builder-tools/oci-freetier-creator

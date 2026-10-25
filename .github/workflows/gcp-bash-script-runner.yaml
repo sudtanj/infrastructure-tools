@@ -228,7 +228,8 @@ jobs:
         if: ${{ matrix.script == 'bash-scripts/upsert-github-runner.sh' }}
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/youssefbrr/self-hosted-runner:latest"
+          # The job image the sudtanj/github-runner supervisor starts for every job.
+          IMAGE="ghcr.io/actions/actions-runner:latest"
           if gcloud compute ssh "${GCP_VM_NAME}" \
               --zone="${GCP_ZONE}" \
               --tunnel-through-iap \
@@ -317,14 +318,19 @@ jobs:
           DOZZLE_SHELL: ${{ secrets.DOZZLE_SHELL }}
           DOZZLE_USER: ${{ secrets.DOZZLE_USER }}
           GH_EMAIL: ${{ secrets.GH_EMAIL }}
+          GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
+          GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
           GH_RUNNER_CONTAINER_NAME: ${{ secrets.GH_RUNNER_CONTAINER_NAME }}
-          GH_RUNNER_DISABLE_AUTO_UPDATE: ${{ secrets.GH_RUNNER_DISABLE_AUTO_UPDATE }}
-          GH_RUNNER_EPHEMERAL: ${{ secrets.GH_RUNNER_EPHEMERAL }}
+          GH_RUNNER_CPUS: ${{ secrets.GH_RUNNER_CPUS }}
           GH_RUNNER_LABELS: ${{ secrets.GH_RUNNER_LABELS }}
+          GH_RUNNER_MEMORY: ${{ secrets.GH_RUNNER_MEMORY }}
+          GH_RUNNER_MEMORY_SWAP: ${{ secrets.GH_RUNNER_MEMORY_SWAP }}
           GH_RUNNER_NAME: ${{ secrets.GH_RUNNER_NAME }}
-          GH_RUNNER_REG_TOKEN: ${{ secrets.GH_RUNNER_REG_TOKEN }}
-          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO }}
-          GH_RUNNER_WORK_DIR: ${{ secrets.GH_RUNNER_WORK_DIR }}
+          GH_RUNNER_NO_SUDO: ${{ secrets.GH_RUNNER_NO_SUDO }}
+          GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
+          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          GH_RUNNER_TMP_SIZE: ${{ secrets.GH_RUNNER_TMP_SIZE }}
+          GH_RUNNER_WORK_SIZE: ${{ secrets.GH_RUNNER_WORK_SIZE }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
           N8N_BACKUP_DIR: ${{ secrets.N8N_BACKUP_DIR }}
@@ -364,6 +370,11 @@ jobs:
           TAILSCALE_PING_PEER: ${{ secrets.TAILSCALE_PING_PEER }}
         run: |
           set +e
+          # The private repo name shows up in the runner logs: mask it in the forms they print.
+          if [ -n "${GH_RUNNER_REPO:-}" ]; then
+            r="${GH_RUNNER_REPO#https://github.com/}"; r="${r%.git}"; r="${r%/}"
+            echo "::add-mask::${r}"; echo "::add-mask::${r#*/}"
+          fi
           SECONDS=0
           SAN="${RUNNER_TEMP}/sanitize.pl"
           DEBUG_LOGS="${DEBUG_LOGS:-true}"
