@@ -12,7 +12,8 @@
 // MAX_MINUTES (stop after this, 0 = never), COIN_ID (stop once this view is
 // gone; default qz8, the coin timer on the left, empty to ignore it),
 // REWARDS (default 1: check in and claim on the rewards page before and
-// after scrolling, see rewards.ts; 0 to skip).
+// after scrolling, see rewards.ts; 0 to skip), REDEEM (default 1: exchange
+// Rp500 to DANA once the balance has it; 0 to skip).
 //
 // PineDrama's window is FLAG_SECURE (screenshots are black) and a playing
 // video keeps uiautomator from going idle, so the screen can't tell us when a

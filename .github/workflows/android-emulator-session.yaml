@@ -32,8 +32,9 @@ name: "Android emulator session over Tailscale"
 #   Daily at 07:00 and 17:00 UTC+7 (GitHub can start a scheduled run late),
 #   or with `autoplay` on, the runner plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
-#   "Klaim" on the rewards page (rewards.ts), plays until the coin timer at the top
-#   left is gone or `autoplay_minutes` pass, then saves; no stop file needed.
+#   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
+#   balance reaches it, plays until the coin timer at the top left is gone or
+#   `autoplay_minutes` pass, then saves; no stop file needed.
 #   If a session is already running, the scheduled one waits for it.
 #
 # EXIT NODE
