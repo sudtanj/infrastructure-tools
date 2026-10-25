@@ -43,6 +43,9 @@ name: "Deploy Vercel Projects (private repo)"
 #          <PREFIX>_DATABASE_URL  optional, per project (PREFIX = folder name upper-cased);
 #                                copied to Vercel on every deploy, e.g. PAYMENTER_APP_KEY.
 #                                A one-line vercel/<name>/.secrets-prefix file overrides PREFIX.
+#   secret <PREFIX>_USER, <PREFIX>_PASSWORD  optional; admin email and password
+#                                passed to `deno task migrate`, which creates that
+#                                user once if missing (never overwrites it).
 #
 #   Runtime env lives per project in Vercel. Missing APP_KEY / CRON_SECRET are
 #   generated (as sensitive) for projects whose code reads them; existing values
@@ -257,6 +260,10 @@ jobs:
       # Output can name the database host or private files, so only pass/fail is shown.
       - name: Migrate database
         working-directory: private/vercel/${{ matrix.project.name }}
+        env:
+          # Read by the project's migrate (when it supports them): the admin to create if missing. Not stored in Vercel.
+          ADMIN_EMAIL: ${{ secrets[format('{0}_USER', matrix.project.prefix)] }}
+          ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
         run: |
           set -euo pipefail
           if ! grep -q '"migrate"' deno.json 2>/dev/null; then echo "No migrate task; skipping."; exit 0; fi
@@ -305,6 +312,9 @@ jobs:
       # Optional per-project check against the production domain. Only its fixed check names are printed.
       - name: Smoke test
         working-directory: private/vercel/${{ matrix.project.name }}
+        env:
+          ADMIN_EMAIL: ${{ secrets[format('{0}_USER', matrix.project.prefix)] }}
+          ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
         run: |
           set -euo pipefail
           if [ ! -x smoke.sh ]; then echo "No smoke.sh; skipping."; exit 0; fi
