@@ -37,9 +37,9 @@ name: "Deploy Vercel Projects (private repo)"
 #                                same name, saved to Vercel as DATABASE_URL.
 #   secret NEON_ORG_ID           optional; needed when the key belongs to an org
 #
-#   secret <PROJECT>_<VAR>       optional, per project; copied to Vercel as <VAR>
-#                                on every deploy, e.g. PAYMENTER_APP_KEY ->
-#                                APP_KEY. <PROJECT>_CRON_KEY becomes CRON_SECRET.
+#   secret <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or <PREFIX>_CRON_KEY),
+#          <PREFIX>_DATABASE_URL  optional, per project (PREFIX = folder name upper-cased);
+#                                copied to Vercel on every deploy, e.g. PAYMENTER_APP_KEY.
 #
 #   Runtime env lives per project in Vercel. Missing APP_KEY / CRON_SECRET are
 #   generated (as sensitive) for projects whose code reads them; existing values
@@ -121,7 +121,7 @@ jobs:
               continue
             fi
             echo "$name: ${sha:0:12} to deploy"
-            rows+=("{\"name\":\"$name\",\"sha\":\"$sha\"}")
+            rows+=("{\"name\":\"$name\",\"sha\":\"$sha\",\"prefix\":\"$(printf %s "$name" | tr "[:lower:].-" "[:upper:]__")\"}")
           done
           echo "projects=[$(IFS=,; echo "${rows[*]:-}")]" >> "$GITHUB_OUTPUT"
 
@@ -173,16 +173,20 @@ jobs:
           if [ -n "$team" ]; then echo "::add-mask::$team"; fi
           echo "Linked to '$NAME'."
 
-      # GitHub secrets named <PROJECT>_<VAR> (project upper-cased, '-' and '.' as '_') are the
-      # source of truth and replace <VAR> in Vercel on every deploy. Anything still missing is
-      # then filled in, never replaced: a new APP_KEY would make stored secrets unreadable.
+      # GitHub secrets <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or _CRON_KEY) and <PREFIX>_DATABASE_URL
+      # (PREFIX = folder name upper-cased, '-' and '.' as '_') are the source of truth and replace
+      # the Vercel value on every deploy. Anything still missing is then filled in, never replaced:
+      # a new APP_KEY would make stored secrets unreadable.
       - name: Provision env (project secrets, Neon database, APP_KEY, CRON_SECRET)
         working-directory: private/vercel/${{ matrix.project.name }}
         env:
           NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
           NEON_ORG_ID: ${{ secrets.NEON_ORG_ID }}
-          # GitHub has no lookup by computed name, so the step gets all secrets; each stays masked.
-          ALL_SECRETS: ${{ toJSON(secrets) }}
+          # Named lookups only: passing every secret (toJSON(secrets)) gets the workflow flagged as malicious.
+          P_APP_KEY: ${{ secrets[format('{0}_APP_KEY', matrix.project.prefix)] }}
+          # Vercel's cron sends only an env var named CRON_SECRET as its bearer token.
+          P_CRON_SECRET: ${{ secrets[format('{0}_CRON_SECRET', matrix.project.prefix)] || secrets[format('{0}_CRON_KEY', matrix.project.prefix)] }}
+          P_DATABASE_URL: ${{ secrets[format('{0}_DATABASE_URL', matrix.project.prefix)] }}
         run: |
           set -euo pipefail
           vc() { npx --yes vercel@latest "$@" --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"}; }
@@ -191,24 +195,21 @@ jobs:
             if printf '%s' "$2" | vc env add "$1" production ${3:-} > /dev/null 2>&1; then echo "Added $1."; else echo "::error::Could not add $1."; exit 1; fi
           }
 
-          prefix="$(printf '%s' "$NAME" | tr '[:lower:].-' '[:upper:]__')_"
-          while IFS= read -r key; do
-            var="${key#"$prefix"}"
-            # Vercel's cron sends only an env var named CRON_SECRET as its bearer token.
-            [ "$var" = CRON_KEY ] && var=CRON_SECRET
-            value=$(jq -r --arg k "$key" '.[$k]' <<<"$ALL_SECRETS")
-            echo "::add-mask::$value"
+          for var in APP_KEY CRON_SECRET DATABASE_URL; do
+            value="$(printenv "P_$var" || true)"
+            if [ -z "$value" ]; then continue; fi
             # Laravel key format: "base64:" + 32 bytes, or 32 raw characters. Anything else fails every request.
-            if [ "$var" = APP_KEY ] && [ "${#value}" -ne 32 ] && [ "$(printf '%s' "${value#base64:}" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
-              echo "::error::$key must be 'base64:' + 32 random bytes (openssl rand -base64 32) or 32 characters."
-              exit 1
+            if [ "$var" = APP_KEY ] && [ "${#value}" -ne 32 ]; then
+              if [ "$(printf '%s' "${value#base64:}" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
+                echo "::error::The $var secret must be 'base64:' + 32 random bytes (openssl rand -base64 32) or 32 characters."
+                exit 1
+              fi
+              value="base64:${value#base64:}" # a bare base64 key gets the prefix the app expects
             fi
-            # A bare base64 key gets the prefix the app expects.
-            [ "$var" = APP_KEY ] && [ "${#value}" -ne 32 ] && value="base64:${value#base64:}"
             vc env rm "$var" production --yes > /dev/null 2>&1 || true
             add "$var" "$value" --sensitive
-            if [ "$var" = DATABASE_URL ]; then printf "%s" "$value" > /tmp/db.url; fi
-          done < <(jq -r --arg p "$prefix" 'keys[] | select(startswith($p))' <<<"$ALL_SECRETS")
+            if [ "$var" = DATABASE_URL ]; then printf '%s' "$value" > /tmp/db.url; fi
+          done
 
           if ! vc env ls production > /tmp/env.txt 2>/dev/null; then
             echo "::warning::Could not list the project's env; skipping provisioning."
