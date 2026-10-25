@@ -325,15 +325,16 @@ jobs:
           # -HardwareDecoder: video is decoded inside Android, not by the
           # emulator on the host; qemu died silently minutes into PineDrama
           # playback twice with host decoding (hwcodec.*dec=2), memory fine.
-          # -Vulkan: fewer host renderer paths; see emulator-build below.
+          # -Vulkan,-GLESDynamicVersion: Android gets OpenGL ES 2 only and no
+          # Vulkan. With ES 3, opening PineDrama's coin tab (SparkActivity, a
+          # Lynx AnimaX animation) segfaulted qemu's RenderThread within a
+          # second, every time, with every -gpu mode and emulator 36 and 37.
           emulator-options: -feature -HardwareDecoder,-Vulkan,-GLESDynamicVersion -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -camera-back none -camera-front none
           # A cold first boot on software graphics can pass the 600s default.
           emulator-boot-timeout: 900
-          # Pinned emulator 36.2.12 (Oct 2025), not the latest: 37.2.12 segfaulted
-          # in its host renderer (qemu RenderThread, inside qemu itself) the
-          # moment PineDrama's coin tab drew its first frame, every time,
-          # with every -gpu mode. Builds: dl.google.com/android/repository/
-          # emulator-linux_x64-<build>.zip.
+          # Pinned emulator 36.2.12 (Oct 2025): a new emulator is picked up only
+          # after testing it, not on whatever run first gets it. Builds:
+          # dl.google.com/android/repository/emulator-linux_x64-<build>.zip.
           emulator-build: 14214601
           # Shrinks the screen to 720x1280 (frames are drawn on the CPU). Xvfb
           # above is the same size; the session script fills it with the window.
