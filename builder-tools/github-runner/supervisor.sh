@@ -155,18 +155,19 @@ wait_job() {
 
 # ---------- one job ----------
 run_one() {
-  local name body resp envf rc
+  local name body resp envf rc rid
   name="${PREFIX}-$(date -u +%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
   body=$(jq -nc --arg n "$name" --argjson g "$GROUP_ID" --arg l "$LABELS" \
     '{name:$n, runner_group_id:$g, work_folder:"_work",
       labels:($l | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}')
   resp=$(gh_api POST "/repos/${REPO}/actions/runners/generate-jitconfig" "$body") || return 1
+  rid=$(jq -r .runner.id <<<"$resp")
 
   # The JIT config is single-use and dies with the runner after one job. It goes in via an
   # env file on this container's tmpfs, deleted as soon as docker has read it.
   envf=$(mktemp)
   printf 'ACTIONS_RUNNER_INPUT_JITCONFIG=%s\n' "$(jq -r .encoded_jit_config <<<"$resp")" > "$envf"
-  local args=(run -d --name "$JOB_NAME" --label "gh-runner.prefix=${PREFIX}"
+  local args=(run -d --name "$JOB_NAME" --label "gh-runner.prefix=${PREFIX}" --label "gh-runner.id=${rid}"
     --init --network "$NETWORK" --cpus "$CPUS" --memory "$MEMORY" --memory-swap "$MEMORY_SWAP"
     --pids-limit "$PIDS"
     # Checkout, job temp files, step secrets and /tmp live in RAM only.
@@ -178,12 +179,12 @@ run_one() {
   for d in $DNS; do args+=(--dns "$d"); done
   if ! docker "${args[@]}" "$IMAGE" /home/runner/run.sh >/dev/null; then
     rm -f "$envf"
-    gh_api DELETE "/repos/${REPO}/actions/runners/$(jq -r .runner.id <<<"$resp")" >/dev/null || true
+    gh_api DELETE "/repos/${REPO}/actions/runners/${rid}" >/dev/null || true
     warn "could not start the runner container"; return 1
   fi
   rm -f "$envf"
   ok "runner ${name} online, waiting for a job (labels: ${LABELS})"
-  wait_job "$(jq -r .runner.id <<<"$resp")"; rc=$JOB_RC
+  wait_job "$rid"; rc=$JOB_RC
   # Removing the container drops its writable layer and its tmpfs mounts (work dir, /tmp).
   docker rm -f "$JOB_NAME" >/dev/null 2>&1 || true
   if [ "$rc" = stale ]; then ok "runner ${name} replaced; container and RAM work dir removed"; return 0; fi
@@ -215,10 +216,18 @@ esac
 
 info "supervising ephemeral runners for ${REPO} (prefix ${PREFIX}, image ${IMAGE})"
 
-# A job container left from before a supervisor restart (e.g. redeploy) keeps running: wait for it.
+# A job container left from before a supervisor restart (e.g. redeploy) keeps running. Watch it
+# like our own (its runner id is on a label), so it is still replaced if it never reconnects.
 if [ "$(docker inspect -f '{{.State.Running}}' "$JOB_NAME" 2>/dev/null)" = "true" ]; then
-  info "a runner container is already running; waiting for it to finish"
-  docker wait "$JOB_NAME" >/dev/null 2>&1 || true
+  rid=$(docker inspect -f '{{index .Config.Labels "gh-runner.id"}}' "$JOB_NAME" 2>/dev/null || true)
+  if [[ "$rid" =~ ^[0-9]+$ ]]; then
+    info "a runner container is already running; watching it"
+    wait_job "$rid"
+    if [ "$JOB_RC" = stale ]; then ok "old runner replaced"; fi
+  else
+    info "a runner container is already running; waiting for it to finish"
+    docker wait "$JOB_NAME" >/dev/null 2>&1 || true
+  fi
 fi
 docker rm -f "$JOB_NAME" >/dev/null 2>&1 || true
 

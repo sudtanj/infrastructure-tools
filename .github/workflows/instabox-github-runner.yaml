@@ -11,9 +11,10 @@ name: "Deploy GitHub runner on Instabox"
 #   - Booted fresh: Docker (enabled at boot by the deploy) restarts the supervisor, which removes
 #     the old offline runner and registers a new one.
 #   - Nothing needs re-authorising: every runner is registered fresh from the stored credential.
-# Instabox pauses the machine after 30 idle minutes. Start it again with mode "wake" (also from
-# the GitHub mobile app), `instabox start <machine>` or the dashboard. Jobs queued meanwhile wait
-# in GitHub's queue (up to 24 h) and run once it's back.
+# Instabox pauses the machine after 30 idle minutes (fixed on the free plan), so the scheduled
+# keep-alive job runs a command on it every 10 minutes. If it was paused anyway, the keep-alive
+# wakes it; so does mode "wake", `instabox start <machine>` or the dashboard. Jobs queued
+# meanwhile wait in GitHub's queue (up to 24 h) and run once it's back.
 #
 # SECRETS (all already used by other workflows)
 #   INSTABOX_API_KEY                   create/start the machine, SSH
@@ -29,6 +30,11 @@ name: "Deploy GitHub runner on Instabox"
 # Then use runs-on: [self-hosted, instabox] in the private repo's workflows.
 
 on:
+  # Keep-alive: the free plan pauses an idle machine after 30 minutes (fixed), and the runner's
+  # own connection to GitHub does not count as activity. A command every 10 minutes keeps it
+  # running, and wakes it if it was paused anyway (scheduled runs can be late at busy times).
+  schedule:
+    - cron: "4-59/10 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -62,10 +68,40 @@ env:
   MACHINE_NAME: ${{ inputs.machine_name || vars.INSTABOX_RUNNER_MACHINE || 'gh-runner' }}
 
 jobs:
+  keepalive:
+    name: "Keep the machine awake"
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Its own group: a pending keep-alive must never replace a pending deploy.
+    concurrency:
+      group: instabox-github-runner-keepalive
+      cancel-in-progress: false
+    steps:
+      - name: Wake the machine and reset its idle timer
+        run: |
+          set -euo pipefail
+          [ -n "${INSTABOX_API_KEY:-}" ] || { echo "::error::INSTABOX_API_KEY is not set"; exit 1; }
+          export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
+          curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
+          IB="$INSTABOX_INSTALL_DIR/instabox"
+          # CLI errors can include the account email: print only the state, never raw output.
+          state=$("$IB" get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.state // "unknown"') || state=missing
+          echo "[*] ${MACHINE_NAME}: ${state}"
+          case "$state" in
+            missing) echo "::warning::machine ${MACHINE_NAME} not found; run this workflow with mode deploy"; exit 0 ;;
+            suspended|stopped|error) "$IB" start "$MACHINE_NAME" >/dev/null 2>&1 || echo "[!] start failed; trying exec" ;;
+          esac
+          if "$IB" exec "$MACHINE_NAME" --timeout 120 -- true >/dev/null 2>&1; then
+            echo "[+] ${MACHINE_NAME} is running; idle timer reset"
+          else
+            echo "::error::could not reach ${MACHINE_NAME}"; exit 1
+          fi
+
   runner:
     name: "${{ inputs.mode == 'wake' && 'Wake' || 'Deploy runner' }}"
     # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
