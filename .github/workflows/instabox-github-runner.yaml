@@ -242,4 +242,4 @@ jobs:
             exit "$RC"
           fi
           echo "[+] runner deployed in ${SECONDS}s; in the private repo use runs-on: [self-hosted, instabox]"
-          echo "[*] logs: instabox ssh ${MACHINE_NAME} -- sudo docker logs gh-runner-supervisor"
+          echo "[*] logs (in RAM): instabox ssh ${MACHINE_NAME} -- sudo docker exec gh-runner-supervisor cat /tmp/supervisor.log"
