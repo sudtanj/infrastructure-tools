@@ -72,7 +72,7 @@ A dedicated fine-grained PAT with **Administration: Read and write** on the repo
 
 ## On Instabox
 
-[`instabox-github-runner.yaml`](../../.github/workflows/instabox-github-runner.yaml) deploys only this supervisor, on its own [Instabox](https://instabox.sh) machine (`gh-runner`, template `agent-browser`, 4 vCPU / 8 GB), with the existing `INSTABOX_API_KEY`, `PRIVATE_REPO` and `PRIVATE_REPO_TOKEN` secrets. Each job gets 3 CPUs, 6 GB and a 4 GB RAM work dir by default, and its own Docker network, so it can't reach anything bound to the host's localhost. Deploy it once. After that, whenever the machine is online again (resumed, started with the workflow's `wake` mode or the dashboard, or booted fresh), the runner reconnects to the private repo with nothing to do on your side:
+[`instabox-github-runner.yaml`](../../.github/workflows/instabox-github-runner.yaml) deploys only this supervisor, on its own [Instabox](https://instabox.sh) machine (`gh-runner`, template `agent-browser`, 4 vCPU / 8 GB), with the existing `INSTABOX_API_KEY`, `PRIVATE_REPO` and `PRIVATE_REPO_TOKEN` secrets. It runs 4 runners by default (`INSTABOX_RUNNER_COUNT=3,1`: 3 for `PRIVATE_REPO`, 1 for `PRIVATE_MIRROR_REPO`), so up to 4 jobs at once. Each job gets 1 vCPU, 1.5 GB and a 1 GB RAM work dir, and its own Docker network, so it can't reach anything bound to the host's localhost. Deploy it once. After that, whenever the machine is online again (resumed, started with the workflow's `wake` mode or the dashboard, or booted fresh), the runner reconnects to the private repo with nothing to do on your side:
 
 - **Resumed from a pause** (memory kept): the idle runner reconnects by itself. If GitHub still shows it offline 3 minutes later, or has deleted it (GitHub removes unused ephemeral runners after a day offline), the supervisor replaces it with a newly registered one.
 - **Booted fresh:** Docker, enabled at boot by the deploy, restarts the supervisor. It deletes the old offline runner and registers a new one.
@@ -92,4 +92,4 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
 docker stop gh-runner-supervisor           # pause (stays stopped across reboots until started)
 ```
 
-One job at a time, sized for the 1 GB e2-micro. Heavy builds (Android, Docker images) belong on GitHub-hosted runners.
+One job at a time per repo by default (`GH_RUNNER_COUNT`, e.g. `3,1`, runs more), sized for the 1 GB e2-micro. Heavy builds (Android, Docker images) belong on GitHub-hosted runners.

@@ -15,6 +15,7 @@
 #   GH_RUNNER_MEMORY, GH_RUNNER_MEMORY_SWAP, GH_RUNNER_WORK_SIZE, GH_RUNNER_TMP_SIZE,
 #   GH_RUNNER_NO_SUDO, GH_RUNNER_NETWORK, GH_RUNNER_IMAGE, GH_RUNNER_DNS,
 #   GH_RUNNER_HOST_RAM_ONLY=1 (swap off + system journal in RAM; only for a runner-only host).
+#   GH_RUNNER_COUNT (runners per repo, e.g. "3,1": that many jobs at once; default 1).
 
 set -euo pipefail
 
@@ -127,30 +128,48 @@ fi
 ok "supervisor image present"
 
 # Settings shared by every supervisor; unset ones fall back to the defaults in supervisor.sh.
-BASE_ENV=(-e "GH_RUNNER_NAME_PREFIX=${PREFIX}" -e "GH_RUNNER_LABELS=${LABELS}")
+BASE_ENV=(-e "GH_RUNNER_LABELS=${LABELS}")
 if [ -n "$APP_ID" ]; then BASE_ENV+=(-e "GH_RUNNER_APP_ID=${APP_ID}"); fi
 for v in CPUS MEMORY MEMORY_SWAP WORK_SIZE TMP_SIZE NO_SUDO NETWORK IMAGE DNS; do
   val="GH_RUNNER_${v}"
   if [ -n "${!val:-}" ]; then BASE_ENV+=(-e "GH_RUNNER_${v}=${!val}"); fi
 done
-# The first repo keeps the original container names, so a single-repo host is unchanged;
-# repo N (N >= 2) gets gh-runner-supervisor-N and its job container gh-runner-job-N.
-# Same name prefix on every repo is fine: each supervisor only sees its own repo's runners.
-sv_name() { if [ "$1" -eq 0 ]; then echo "$SUPERVISOR_NAME"; else echo "${SUPERVISOR_NAME}-$(($1 + 1))"; fi; }
-run_args() {   # $1 = index into REPOS
+# GH_RUNNER_COUNT: runners per repo, in GH_RUNNER_REPO's order ("3,1"); one number applies to
+# every repo, missing entries mean 1. Each runner is a slot with its own supervisor and job
+# container, so that many jobs run at the same time.
+IFS=',' read -ra COUNTS <<< "${GH_RUNNER_COUNT:-1}"
+# Slot names: repo R, runner S. Repo 1 runner 1 keeps the original names and repo R runner 1
+# keeps -R, so a host with one runner per repo is unchanged; more runners get -R-S.
+SLOT_REPO=(); SLOT_SV=(); SLOT_JOB=(); SLOT_PREFIX=()
+for i in "${!REPOS[@]}"; do
+  n="${COUNTS[$i]:-${COUNTS[0]:-1}}"; n="${n//[[:space:]]/}"
+  [[ "$n" =~ ^[1-8]$ ]] || fail "GH_RUNNER_COUNT entries must be 1-8 (got '${n}' for repo $((i + 1)))"
+  for s in $(seq 1 "$n"); do
+    suf=""; [ "$i" -gt 0 ] && suf="-$((i + 1))"
+    [ "$s" -gt 1 ] && suf="-$((i + 1))-${s}"
+    SLOT_REPO+=("$i"); SLOT_SV+=("${SUPERVISOR_NAME}${suf}"); SLOT_JOB+=("gh-runner-job${suf}")
+    # Each supervisor deletes offline runners matching its prefix, so with several runners on
+    # one repo every slot needs its own (a new runner shows offline until it connects).
+    if [ "$n" -gt 1 ]; then SLOT_PREFIX+=("${PREFIX}-${s}"); else SLOT_PREFIX+=("$PREFIX"); fi
+  done
+done
+ok "runners: ${#SLOT_SV[@]} (per repo: $(for i in "${!REPOS[@]}"; do printf '%s ' "${COUNTS[$i]:-${COUNTS[0]:-1}}"; done | sed 's/ $//; s/ /, /g'))"
+
+run_args() {   # $1 = slot index
   RUN_ARGS=(--init --network host --read-only
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m
     --cap-drop ALL --security-opt no-new-privileges:true
     --cpus 0.20 --memory 64m --memory-swap 64m --pids-limit 64
     -v /var/run/docker.sock:/var/run/docker.sock
     -v "${SECRETS_DIR}:/run/secrets/gh-runner:ro"
-    "${BASE_ENV[@]}" -e "GH_RUNNER_REPO=${REPOS[$1]}")
-  if [ "$1" -gt 0 ]; then RUN_ARGS+=(-e "GH_RUNNER_JOB_CONTAINER=gh-runner-job-$(($1 + 1))"); fi
+    "${BASE_ENV[@]}" -e "GH_RUNNER_REPO=${REPOS[${SLOT_REPO[$1]}]}"
+    -e "GH_RUNNER_NAME_PREFIX=${SLOT_PREFIX[$1]}" -e "GH_RUNNER_JOB_CONTAINER=${SLOT_JOB[$1]}")
 }
 
 step "checking GitHub access with these credentials"
 for i in "${!REPOS[@]}"; do
-  run_args "$i"
+  for k in "${!SLOT_SV[@]}"; do [ "${SLOT_REPO[$k]}" = "$i" ] && break; done
+  run_args "$k"
   if ! CHECK=$(dk run --rm "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" check 2>&1); then
     printf '%s\n' "$CHECK" | grep -E '^\[[*+!x]\] ' >&2 || true
     fail "credential check failed for repo $((i + 1)); the running runner(s) (if any) were left untouched"
@@ -159,19 +178,25 @@ for i in "${!REPOS[@]}"; do
 done
 
 step "removing old runner containers"
-# Every supervisor, including ones for repos no longer listed.
-for c in "$LEGACY_CONTAINER" $(dk ps -a --format '{{.Names}}' | grep -E "^${SUPERVISOR_NAME}(-[0-9]+)?\$" || true); do
+# Every supervisor, including ones for slots no longer wanted.
+for c in "$LEGACY_CONTAINER" $(dk ps -a --format '{{.Names}}' | grep -E "^${SUPERVISOR_NAME}(-[0-9]+){0,2}\$" || true); do
   if dk ps -a --format '{{.Names}}' | grep -qx "$c"; then
     dk rm -f "$c" >/dev/null 2>&1 || true
     ok "removed ${c}"
   fi
 done
-# A job container that is running now is left alone: the new supervisor waits for it.
+# A job container that is running now is left alone: its slot's new supervisor watches it.
+# One whose slot is gone has no supervisor any more, so it goes (a job on it would fail).
+for c in $(dk ps -a --format '{{.Names}}' | grep -E '^gh-runner-job(-[0-9]+){0,2}$' || true); do
+  printf '%s\n' "${SLOT_JOB[@]}" | grep -qx "$c" && continue
+  dk rm -f "$c" >/dev/null 2>&1 || true
+  ok "removed ${c} (its slot is no longer configured)"
+done
 
-for i in "${!REPOS[@]}"; do
-  name=$(sv_name "$i")
-  run_args "$i"
-  step "starting ${name} (repo $((i + 1)) of ${#REPOS[@]})"
+for k in "${!SLOT_SV[@]}"; do
+  name="${SLOT_SV[$k]}"
+  run_args "$k"
+  step "starting ${name} (repo $((SLOT_REPO[k] + 1)))"
   # No Docker log file on disk: the supervisor keeps its log in its own RAM /tmp
   # (GH_RUNNER_LOG_FILE, ~2 MiB rotated), and job containers log nowhere.
   dk run -d --name "$name" --restart unless-stopped --log-driver none \
@@ -180,8 +205,8 @@ for i in "${!REPOS[@]}"; do
 done
 svlog() { dk exec "$1" cat /tmp/supervisor.log 2>/dev/null || true; }
 
-for i in "${!REPOS[@]}"; do
-  name=$(sv_name "$i")
+for k in "${!SLOT_SV[@]}"; do
+  name="${SLOT_SV[$k]}"
   step "waiting for ${name}'s first runner to come online"
   for _ in $(seq 1 45); do
     sleep 2
@@ -192,7 +217,7 @@ for i in "${!REPOS[@]}"; do
   svlog "$name" | tail -n 20 | grep -E '^\[[*+!x]\] ' || true
   [ "$STATE" = running ] || fail "${name} is ${STATE} (its log was in RAM; run it with: docker run --rm ... ${SUPERVISOR_IMAGE} check)"
   if svlog "$name" | grep -qE 'online, waiting for a job|already running'; then
-    ok "${name} is up; jobs with runs-on: [${LABELS}] in repo $((i + 1)) will run here"
+    ok "${name} is up; jobs with runs-on: [${LABELS}] in repo $((SLOT_REPO[k] + 1)) will run here"
   else
     warn "${name} is running but no runner is online yet (pulling the runner image?); check: docker exec ${name} cat /tmp/supervisor.log"
   fi

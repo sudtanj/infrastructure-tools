@@ -34,7 +34,9 @@ name: "Deploy GitHub runner on Instabox"
 # REPO VARIABLES (optional)
 #   INSTABOX_RUNNER_MACHINE      machine name (default gh-runner)
 #   INSTABOX_RUNNER_LABELS       default self-hosted,linux,x64,instabox
-#   INSTABOX_RUNNER_CPUS / _MEMORY / _WORK_SIZE   per-job caps, default 3 / 6g / 4g
+#   INSTABOX_RUNNER_COUNT        runners per repo (that many jobs at once), default 3,1:
+#                                3 for PRIVATE_REPO, 1 for PRIVATE_MIRROR_REPO
+#   INSTABOX_RUNNER_CPUS / _MEMORY / _WORK_SIZE   per-job caps, default 1 / 1536m / 1g
 #
 # Then use runs-on: [self-hosted, instabox] in the private repo's workflows.
 
@@ -200,10 +202,12 @@ jobs:
           GH_RUNNER_NO_SUDO: ${{ secrets.GH_RUNNER_NO_SUDO }}
           GH_RUNNER_NAME: ${{ inputs.machine_name || vars.INSTABOX_RUNNER_MACHINE || 'gh-runner' }}
           GH_RUNNER_LABELS: ${{ vars.INSTABOX_RUNNER_LABELS || 'self-hosted,linux,x64,instabox' }}
-          # The machine has 4 vCPU / 8 GB; leave some for the supervisor and the OS.
-          GH_RUNNER_CPUS: ${{ vars.INSTABOX_RUNNER_CPUS || '3' }}
-          GH_RUNNER_MEMORY: ${{ vars.INSTABOX_RUNNER_MEMORY || '6g' }}
-          GH_RUNNER_WORK_SIZE: ${{ vars.INSTABOX_RUNNER_WORK_SIZE || '4g' }}
+          # 4 runners in all on the 4 vCPU / 8 GB machine: 1 vCPU and 1.5 GB each (RAM work dir
+          # included), leaving ~2 GB for the supervisors, Docker and the OS.
+          GH_RUNNER_COUNT: ${{ vars.INSTABOX_RUNNER_COUNT || '3,1' }}
+          GH_RUNNER_CPUS: ${{ vars.INSTABOX_RUNNER_CPUS || '1' }}
+          GH_RUNNER_MEMORY: ${{ vars.INSTABOX_RUNNER_MEMORY || '1536m' }}
+          GH_RUNNER_WORK_SIZE: ${{ vars.INSTABOX_RUNNER_WORK_SIZE || '1g' }}
           # Jobs get their own Docker network, so they can't reach services bound to the host's
           # 127.0.0.1 (the template's browser, for one).
           GH_RUNNER_NETWORK: bridge
