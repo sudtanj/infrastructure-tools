@@ -1,0 +1,170 @@
+name: "Deploy Vercel Project (private repo)"
+
+# ---------------------------------------------------------------------------
+# Deploys one folder of a PRIVATE repository to Vercel, using this PUBLIC
+# repo's free GitHub-hosted runner minutes.
+#
+#   1. poll    - has the folder changed since the last clean deploy?
+#   2. migrate - optional: run the project's `deno task migrate` (idempotent).
+#   3. deploy  - `vercel deploy --prod` uploads the folder; Vercel builds it
+#                with the runtimes declared in its vercel.json.
+#
+# SECURITY MODEL
+#   * This file is public: visible to everyone and forkable.
+#   * Nothing private is echoed: the folder name, project ids and deployment
+#     URL stay in secrets or are masked, and command output is reduced to
+#     pass/fail with URLs and paths stripped.
+#
+# SETUP
+#   secret VERCEL_TOKEN          required; vercel.com/account/tokens
+#   secret VERCEL_ORG_ID         required; team id, or user id for a personal account
+#   secret VERCEL_PROJECT_ID     required; Project Settings > General > Project ID
+#   secret VERCEL_PROJECT_DIR    required; folder in the private repo holding vercel.json
+#   secret VERCEL_MIGRATE_DATABASE_URL  optional; when set, `deno task migrate`
+#                                runs against it before each deploy
+#   secret PRIVATE_REPO_TOKEN    read access to the private repo (shared)
+#   secret PRIVATE_REPO          "owner/name" -- NOT a URL (shared)
+#   secret BUILD_REF             branch to track, defaults to main (shared)
+#
+#   The project's runtime env (DATABASE_URL, APP_KEY, ...) lives in the Vercel
+#   project settings, not here. The project's Root Directory must stay empty:
+#   the CLI uploads VERCEL_PROJECT_DIR as the root.
+#
+#   Until VERCEL_TOKEN is set, scheduled runs stop at the first step without
+#   failing.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Deploy even if the folder has no new commits"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "Deploy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Restore last deployed commit
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/vercel-deploy-state.txt
+          key: vercel-deploy-state
+          restore-keys: |
+            vercel-deploy-state-
+
+      - name: Poll private repo
+        id: poll
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          REF: ${{ secrets.BUILD_REF }}
+          DIR: ${{ secrets.VERCEL_PROJECT_DIR }}
+          HAS_TOKEN: ${{ secrets.VERCEL_TOKEN != '' }}
+          FORCE: ${{ inputs.force || github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "VERCEL_TOKEN is not set; nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN:-}" ] || [ -z "${DIR:-}" ]; then
+            echo "::error::Set secrets PRIVATE_REPO_TOKEN and VERCEL_PROJECT_DIR."
+            exit 1
+          fi
+          if ! printf '%s' "${REPO:-}" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::Set secret PRIVATE_REPO to 'owner/name' (not a URL)."
+            exit 1
+          fi
+          # Newest commit touching the folder, so pushes elsewhere in the repo do not redeploy.
+          if ! SHA=$(gh api "repos/${REPO}/commits?sha=${REF:-main}&path=${DIR}&per_page=1" --jq '.[0].sha // ""' 2>/dev/null) || [ -z "$SHA" ]; then
+            echo "::error::Cannot read the folder history. Check the token, ref and folder."
+            exit 1
+          fi
+          PREV="$(cat /tmp/vercel-deploy-state.txt 2>/dev/null || true)"
+          CHANGED=false
+          [ "$SHA" != "$PREV" ] && CHANGED=true
+          case "$(printf '%s' "${FORCE:-}" | tr '[:upper:]' '[:lower:]')" in true|1|yes|on) CHANGED=true ;; esac
+          echo "Latest: ${SHA:0:12}  last deployed: ${PREV:0:12}  deploying: $CHANGED"
+          { echo "changed=$CHANGED"; echo "sha=$SHA"; echo "ref=${REF:-main}"; } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout private repo
+        if: steps.poll.outputs.changed == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ steps.poll.outputs.sha }}
+          persist-credentials: false
+          path: private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Setup Deno
+        if: steps.poll.outputs.changed == 'true'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # Output can name the database host or private files, so only pass/fail is shown.
+      - name: Migrate database
+        if: steps.poll.outputs.changed == 'true'
+        working-directory: private
+        env:
+          DATABASE_URL: ${{ secrets.VERCEL_MIGRATE_DATABASE_URL }}
+          DIR: ${{ secrets.VERCEL_PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then echo "No migrate database set; skipping."; exit 0; fi
+          cd "$DIR"
+          if deno task migrate > /tmp/migrate.log 2>&1; then
+            echo "Migrate: OK"
+          else
+            echo "::error::Migrate failed (output suppressed to protect private data)"
+            tail -5 /tmp/migrate.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
+            exit 1
+          fi
+
+      - name: Deploy to Vercel
+        if: steps.poll.outputs.changed == 'true'
+        working-directory: private
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          DIR: ${{ secrets.VERCEL_PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          cd "$DIR"
+          if npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN" > /tmp/url.txt 2> /tmp/vercel.log; then
+            echo "::add-mask::$(cat /tmp/url.txt)"
+            echo "Deploy: OK (URL is in the Vercel dashboard)"
+          else
+            echo "::error::Vercel deploy failed (output suppressed to protect private data)"
+            tail -15 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
+            exit 1
+          fi
+
+      - name: Record deployed commit
+        if: steps.poll.outputs.changed == 'true'
+        run: printf '%s' "${{ steps.poll.outputs.sha }}" > /tmp/vercel-deploy-state.txt
+
+      # Run id in the key: cache entries are immutable and this one is rewritten per deploy.
+      - name: Save state for next poll
+        if: steps.poll.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/vercel-deploy-state.txt
+          key: vercel-deploy-state-${{ github.run_id }}
