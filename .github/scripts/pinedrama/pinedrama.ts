@@ -1,7 +1,8 @@
-// Opens PineDrama on the tailnet emulator, keeps a video playing, and swipes
-// to the next one when the current one finishes.
+// Opens PineDrama on the tailnet emulator, checks in and claims what the
+// rewards page offers (rewards.ts), keeps a video playing, and swipes to the
+// next one when the current one finishes; claims again at the end.
 //
-//   node pinedrama.ts                  (Node 23.6+; needs playwright-core and adb)
+//   node pinedrama.ts      (Node 23.6+; needs adb and package.json's modules)
 //
 // Run by android-emulator-session on its schedule, against its own emulator
 // (DEVICE=emulator-5554), or from anywhere on the tailnet with the default.
@@ -9,7 +10,9 @@
 // Env: DEVICE (default 100.113.219.108:5555), MAX_VIDEOS (0 = forever),
 // MAX_WATCH_SECONDS (swipe anyway after this, for videos that loop),
 // MAX_MINUTES (stop after this, 0 = never), COIN_ID (stop once this view is
-// gone; default qz8, the coin timer on the left, empty to ignore it).
+// gone; default qz8, the coin timer on the left, empty to ignore it),
+// REWARDS (default 1: check in and claim on the rewards page before and
+// after scrolling, see rewards.ts; 0 to skip).
 //
 // PineDrama's window is FLAG_SECURE (screenshots are black) and a playing
 // video keeps uiautomator from going idle, so the screen can't tell us when a
@@ -23,6 +26,7 @@ import { execFile, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { _android, type AndroidDevice } from "playwright-core";
+import { claimRewards } from "./rewards.ts";
 
 const PKG = "com.ss.android.ttmd.video";
 const DEVICE = process.env.DEVICE ?? "100.113.219.108:5555";
@@ -30,6 +34,7 @@ const MAX_VIDEOS = Number(process.env.MAX_VIDEOS ?? 0);
 const MAX_WATCH_MS = Number(process.env.MAX_WATCH_SECONDS ?? 240) * 1000;
 const MAX_MINUTES = Number(process.env.MAX_MINUTES ?? 0);
 const COIN_ID = process.env.COIN_ID ?? "qz8";
+const REWARDS = process.env.REWARDS !== "0";
 const COIN_CHECK_MS = 30_000;
 const POLL_MS = 2_000;
 const END_GRACE_MS = 6_000;
@@ -214,9 +219,17 @@ async function main() {
 
   log("device", d.serial(), d.model());
   await shell(d, "input keyevent KEYCODE_WAKEUP");
+  // After a cold boot a "not responding" dialog (often the launcher's) can
+  // cover the screen and take every tap.
+  await shell(d, "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
   const uid = await appUid(d);
   if (MAX_MINUTES > 0) deadline = Date.now() + MAX_MINUTES * 60_000;
   followLogcat();
+
+  if (REWARDS) {
+    if (!(await inForeground(d))) await launch(d);
+    await claimRewards(d, DEVICE);
+  }
 
   for (let n = 1; MAX_VIDEOS === 0 || n <= MAX_VIDEOS; n++) {
     if (!(await inForeground(d))) await launch(d);
@@ -233,6 +246,11 @@ async function main() {
     if (await inForeground(d)) await swipeUp(d);
   }
   log("stopping:", stopReason || "video limit reached");
+  // Watching can unlock more (watch-time milestones).
+  if (REWARDS) {
+    if (!(await inForeground(d))) await launch(d);
+    await claimRewards(d, DEVICE);
+  }
   await stop();
 }
 
