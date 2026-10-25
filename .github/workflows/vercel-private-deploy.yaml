@@ -7,7 +7,7 @@ name: "Deploy Vercel Projects (private repo)"
 # created on its first deploy.
 #
 #   1. poll    - list vercel/*, find folders with a commit not yet deployed.
-#   2. deploy  - per folder: link the project, run `deno task migrate` when
+#   2. deploy  - per folder: link the project, fill in missing env (see SETUP), run `deno task migrate` when
 #                the folder has one (DATABASE_URL comes from the project's own
 #                production env), then `vercel deploy --prod`. Vercel builds
 #                with the runtimes declared in the folder's vercel.json.
@@ -31,9 +31,16 @@ name: "Deploy Vercel Projects (private repo)"
 #   secret PRIVATE_REPO          "owner/name" -- NOT a URL (shared)
 #   secret BUILD_REF             branch to track, defaults to main (shared)
 #
-#   Runtime env (DATABASE_URL, APP_KEY, ...) is set per project in Vercel.
-#   Leave it non-sensitive if migrate should run: sensitive values cannot be
-#   pulled. Until VERCEL_TOKEN is set, runs stop at poll without failing.
+#   secret NEON_API_KEY          optional; console.neon.tech > Account > API keys.
+#                                A project whose code reads DATABASE_URL and has
+#                                none in Vercel gets a Neon database of the
+#                                same name, saved to Vercel as DATABASE_URL.
+#   secret NEON_ORG_ID           optional; needed when the key belongs to an org
+#
+#   Runtime env lives per project in Vercel. Missing APP_KEY / CRON_SECRET are
+#   generated (as sensitive) for projects whose code reads them; existing values
+#   are never replaced. A DATABASE_URL you set yourself must be non-sensitive
+#   for migrate to read it. Until VERCEL_TOKEN is set, runs stop at poll.
 # ---------------------------------------------------------------------------
 
 on:
@@ -157,7 +164,55 @@ jobs:
               exit 1
             fi
           fi
+          # The team slug ("Linked to <team>/<project>") is account detail; mask it for every later step.
+          team=$(grep -oE "Linked to [A-Za-z0-9._-]+/" /tmp/vercel.log | head -1 | sed -E 's#Linked to (.*)/#\1#') || true
+          if [ -n "$team" ]; then echo "::add-mask::$team"; fi
           echo "Linked to '$NAME'."
+
+      # Only fills in what is missing: an existing APP_KEY or DATABASE_URL is never replaced,
+      # since a new APP_KEY would make stored secrets unreadable.
+      - name: Provision env (Neon database, APP_KEY, CRON_SECRET)
+        working-directory: private/vercel/${{ matrix.project.name }}
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_ORG_ID: ${{ secrets.NEON_ORG_ID }}
+        run: |
+          set -euo pipefail
+          vc() { npx --yes vercel@latest "$@" --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"}; }
+          if ! vc env ls production > /tmp/env.txt 2>/dev/null; then
+            echo "::warning::Could not list the project's env; skipping provisioning."
+            exit 0
+          fi
+          has() { grep -Eq "^[[:space:]]*$1[[:space:]]" /tmp/env.txt; }
+          add() { # name value [--sensitive]
+            echo "::add-mask::$2"
+            if printf '%s' "$2" | vc env add "$1" production ${3:-} > /dev/null 2>&1; then echo "Added $1."; else echo "::error::Could not add $1."; exit 1; fi
+          }
+          # Generated only for projects whose code reads them.
+          if grep -rqs --include='*.ts' APP_KEY .; then has APP_KEY || add APP_KEY "base64:$(openssl rand -base64 32)" --sensitive; fi
+          if grep -rqs --include='*.ts' CRON_SECRET .; then has CRON_SECRET || add CRON_SECRET "$(openssl rand -hex 32)" --sensitive; fi
+          if ! grep -rqs --include='*.ts' DATABASE_URL .; then exit 0; fi
+          if has DATABASE_URL; then echo "DATABASE_URL already set."; exit 0; fi
+          if [ -z "${NEON_API_KEY:-}" ]; then
+            echo "::warning::No DATABASE_URL and no NEON_API_KEY; set one of them."
+            exit 0
+          fi
+          neon() { curl -fsS -H "Authorization: Bearer $NEON_API_KEY" -H 'Content-Type: application/json' "$@"; }
+          api=https://console.neon.tech/api/v2
+          # Reuse a Neon project of the same name, left behind by a run that failed after creating it.
+          id=$(neon "$api/projects?search=$NAME${NEON_ORG_ID:+&org_id=$NEON_ORG_ID}" | jq -r --arg n "$NAME" '[.projects[] | select(.name == $n)][0].id // empty') || id=''
+          if [ -z "$id" ]; then
+            body=$(jq -nc --arg n "$NAME" --arg o "${NEON_ORG_ID:-}" '{project: ({name: $n, pg_version: 17} + (if $o == "" then {} else {org_id: $o} end))}')
+            if ! id=$(neon -X POST "$api/projects" -d "$body" | jq -r '.project.id'); then
+              echo "::error::Could not create the Neon project (check NEON_API_KEY, and set NEON_ORG_ID if the key belongs to an organisation)."
+              exit 1
+            fi
+            echo "Created a Neon project."
+          fi
+          # Pooled endpoint: serverless functions open many short connections. The app already disables prepared statements for it.
+          url=$(neon "$api/projects/$id/connection_uri?database_name=neondb&role_name=neondb_owner&pooled=true" | jq -r '.uri')
+          add DATABASE_URL "$url"
+          printf '%s' "$url" > /tmp/db.url
 
       # Output can name the database host or private files, so only pass/fail is shown.
       - name: Migrate database
@@ -165,9 +220,13 @@ jobs:
         run: |
           set -euo pipefail
           if ! grep -q '"migrate"' deno.json 2>/dev/null; then echo "No migrate task; skipping."; exit 0; fi
-          npx --yes vercel@latest env pull /tmp/prod.env --environment=production --yes --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} > /dev/null 2>&1 || true
-          DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' /tmp/prod.env 2>/dev/null | sed -E 's/^"(.*)"$/\1/' | head -1)
-          rm -f /tmp/prod.env
+          # Just provisioned: use it directly. Otherwise pull it from the project.
+          DATABASE_URL=$(cat /tmp/db.url 2>/dev/null || true)
+          if [ -z "$DATABASE_URL" ]; then
+            npx --yes vercel@latest env pull /tmp/prod.env --environment=production --yes --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} > /dev/null 2>&1 || true
+            DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' /tmp/prod.env 2>/dev/null | sed -E 's/^"(.*)"$/\1/' | head -1)
+            rm -f /tmp/prod.env
+          fi
           if [ -z "$DATABASE_URL" ]; then
             echo "::warning::No readable DATABASE_URL in the project's production env (unset or sensitive); skipping migrate."
             exit 0
@@ -196,7 +255,7 @@ jobs:
               npx --yes vercel@latest inspect "$(cat /tmp/url.txt)" --logs --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} >> /tmp/vercel.log 2>&1 || true
             fi
             echo "--- last lines of the deploy and build log (URLs and paths stripped) ---"
-            tail -40 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
+            tail -40 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g; s#( in )[A-Za-z0-9._-]+$#\1<scope>#'
             exit 1
           fi
 
