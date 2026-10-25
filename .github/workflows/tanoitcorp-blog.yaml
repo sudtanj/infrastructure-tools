@@ -184,8 +184,10 @@ jobs:
             exit 0
           fi
           git add cloudflare-projects/tanoitcorp
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -q -m "tanoitcorp: publish new blog posts"
+          # In the repo config, not `-c`: the rebase below re-commits when main has moved.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "tanoitcorp: publish new blog posts"
           # main may have moved during the run; the posts only touch the blog's files.
           git pull -q --rebase
           git push -q
