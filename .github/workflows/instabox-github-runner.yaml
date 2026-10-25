@@ -102,7 +102,7 @@ jobs:
 
       - name: Prepare log sanitizer
         run: |
-          # Same filter as instabox-paseo-lite.yaml: everything from the machine and the
+          # Log filter: everything from the machine and the
           # Instabox CLI (whose errors can include the account email) passes through it.
           cat > "${RUNNER_TEMP}/sanitize.pl" <<'PERL'
           use strict;
