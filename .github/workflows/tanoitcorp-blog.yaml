@@ -2,8 +2,8 @@ name: "Tanoit Corp blog: write and publish new tech posts"
 
 # ---------------------------------------------------------------------------
 # Every two days, adds new tech news posts to the Tanoit Corp site
-# (cloudflare-projects/tanoitcorp in the PRIVATE repo) and commits them there;
-# that push deploys the site through the private repo's deploy-tanoitcorp.yml.
+# (cloudflare-projects/tanoitcorp in the PRIVATE repo), commits them there, and
+# deploys the site to Cloudflare Pages right after a successful push.
 #
 # HOW THIS WORKS
 #   1. The runner joins the tailnet, through TAILSCALE_EXIT_NODE when set, as
