@@ -85,6 +85,7 @@ sudo sh -c "
   echo 1 > $tracing/events/syscalls/sys_enter_exit_group/enable
   echo 1 > $tracing/tracing_on
 " 2>/dev/null || echo "::warning::Could not enable kernel tracing."
+qemu_pid="$(pgrep -f qemu-system-x86_64 | head -1)" || true
 
 # qemu can die without a word (the OOM killer, a crash in its host video
 # decoder); adb then only says "offline" and the stop file never comes. End
@@ -94,8 +95,10 @@ emulator_died() {
   sudo dmesg -T | grep -iE 'out of memory|oom-kill|killed process|segfault|qemu' | tail -20 || true
   log_memory
   pgrep -a Xvfb >/dev/null || echo "Xvfb is gone too."
-  echo "Kernel trace of qemu's end (signals sent to it, or its exit code):"
-  sudo cat "$tracing/trace" 2>/dev/null | grep -iE 'qemu|emulator' | tail -20 || true
+  echo "Kernel trace of qemu's end (pid ${qemu_pid:-?}; $(sudo grep -vc "^#" "$tracing/trace" 2>/dev/null || echo 0) events recorded):"
+  sudo cat "$tracing/trace" 2>/dev/null \
+    | grep -E "signal_generate|\\( *${qemu_pid:-x}\\)" | tail -30 || true
+  ls -R /tmp/android-runner 2>/dev/null | tail -20 || true
   # The emulator's crash handler writes a minidump; none means qemu was
   # killed or exited by itself.
   local dumps
