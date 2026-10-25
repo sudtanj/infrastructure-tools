@@ -1,0 +1,4 @@
+# Platforms published to Docker Hub for this image (read by
+# .github/workflows/builder-tools-docker-publish.yml). amd64 only: ProxyRack
+# publishes the client for x86-64 Linux only.
+linux/amd64

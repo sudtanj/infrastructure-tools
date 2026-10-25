@@ -28,24 +28,24 @@ docker run -d -i --name proxyrack --restart unless-stopped \
   sudtanj/proxyrack:latest --id "$UUID"
 ```
 
-Then add the device ID in the dashboard (Devices -> Add device), or let
-`.github/workflows/instabox-proxyrack.yaml` do it with `PROXYRACK_API_KEY`.
+Then add the device ID in the dashboard (Devices -> Add device).
 
 `-i` is required: the client exits as soon as its stdin closes.
 
 ## Deployment used here
 
-`bash-scripts/init-proxyrack.sh`, run by `.github/workflows/instabox-proxyrack.yaml`
-on the Instabox machine, puts the client behind its own Tailscale node that
-routes everything through the exit node, with a firewall that cuts the
-client off if the tunnel drops and keeps it away from private networks and
-the tailnet. See the script's header.
+Not this image: the private repo runs the same pinned client from
+[`proxyrack-bundle`](../proxyrack-bundle) on the Instabox self-hosted runner,
+whose job containers have no Docker or TUN device. That bundle sends all of
+the client's traffic through the Tailscale exit node, with a filter that
+keeps it away from private networks and the tailnet.
 
 ## Notes
 
 - **Updating.** Fetch `https://app-updates.sock.sh/peerclient/go/version.txt`
   and the `client` file next to it, check the binary, then bump
-  `PROXYRACK_SHA256` and `--version` in the Dockerfile. Until then the build
+  `PROXYRACK_SHA256` and `--version` in the Dockerfile (and the same two in
+  `../proxyrack-bundle`). Until then the build
   keeps the pinned version, and fails if upstream replaces the file at the
   same URL.
 - **Arguments** are the ones the official launcher passes (`--homeIp`,

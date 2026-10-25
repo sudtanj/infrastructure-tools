@@ -13,6 +13,7 @@ updates:
       - /builder-tools/oracle-cloud-free-tier-claimer
       - /builder-tools/packetstream
       - /builder-tools/proxyrack
+      - /builder-tools/proxyrack-bundle
       - /builder-tools/paseo-codex
       - /builder-tools/paseo-lite
       - /builder-tools/pawns
