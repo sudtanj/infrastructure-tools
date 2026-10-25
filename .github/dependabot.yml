@@ -5,6 +5,7 @@ updates:
   - package-ecosystem: docker
     directories:
       - /builder-tools/bitping
+      - /builder-tools/earnapp
       - /builder-tools/earnfm
       - /builder-tools/github-runner
       - /builder-tools/honeygain

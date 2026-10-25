@@ -1,0 +1,47 @@
+# EarnApp on distroless, pulled from Docker Hub (linux/amd64 + linux/arm64).
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f docker-compose.hub.yml up -d
+
+services:
+  earnapp:
+    image: sudtanj/earnapp:latest
+    pull_policy: always
+    restart: unless-stopped
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. The client also queries 8.8.8.8 directly (hard-coded);
+    # init-earnapp.sh redirects that to AdGuard and blocks the LAN, compose
+    # cannot.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.15.16 # AdGuard Family Protection IPv4
+
+    environment:
+      EARNAPP_UUID: ${EARNAPP_UUID:?set EARNAPP_UUID in .env}
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure. The image caps the Node heap at
+    # 96 MiB (NODE_OPTIONS).
+    cpus: 0.25
+    cpu_shares: 256
+    mem_limit: 160m
+    memswap_limit: 160m
+    oom_score_adj: 500
+    pids_limit: 64
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m
+      - /etc/earnapp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
