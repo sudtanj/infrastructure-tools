@@ -11,7 +11,9 @@
 #     their own account before you do: link it right after the first deploy.
 #
 # Env:
-#   EARNAPP_UUID          device ID, sdk-node- + 32 lowercase hex digits (required). Make one with
+#   EARNAPP_UUID          device ID, sdk-node- + 32 lowercase hex digits (required). The Orange Pi
+#                         workflow derives one from TAILSCALE_OAUTH_CLIENT_SECRET when the secret
+#                         is unset and sends the link to Telegram. By hand:
 #                           echo "sdk-node-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 #                         and open https://earnapp.com/r/<ID> once, logged in, to link it. Keep it:
 #                         a new ID is a new device.

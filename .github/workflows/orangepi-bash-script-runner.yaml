@@ -15,6 +15,9 @@ name: "Run Bash Scripts on Orange Pi"
 #   Tailscale for the runner (same secrets as the other workflows here), one of:
 #     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS  OAuth client; joins as an ephemeral node
 #     TAILSCALE_AUTH_KEY                              fallback auth key
+#   EARNAPP_UUID is optional: init-earnapp derives a stable one from TAILSCALE_OAUTH_CLIENT_SECRET
+#   (a new OAuth secret = a new device) and sends the link-device URL to TELEGRAM_TOKEN/TELEGRAM_CHAT_ID,
+#   never to the log.
 #   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
 #   opi-init-tailscale-docker.sh alone also gets every OPI_TS_ secret (OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS,
 #   OPI_TS_HOSTNAME, OPI_TS_TAILSCALED_EXTRA_ARGS, ...) and
@@ -287,6 +290,8 @@ jobs:
           EARNAPP_IMAGE: ${{ secrets.EARNAPP_IMAGE }}
           EARNAPP_MEMORY_LIMIT: ${{ secrets.EARNAPP_MEMORY_LIMIT }}
           EARNAPP_UUID: ${{ secrets.EARNAPP_UUID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DOZZLE_AUTH_PROVIDER: ${{ secrets.DOZZLE_AUTH_PROVIDER }}
           DOZZLE_AUTH_TTL: ${{ secrets.DOZZLE_AUTH_TTL }}
           DOZZLE_AUTO_UPDATE: ${{ secrets.DOZZLE_AUTO_UPDATE }}
@@ -393,6 +398,19 @@ jobs:
           LOG=$(mktemp)
           PAYLOAD=$(mktemp)
           trap 'rm -f "$LOG" "$PAYLOAD" "${PAYLOAD}.attach"' EXIT
+
+          # EarnApp's device ID: the EARNAPP_UUID secret, else derived from the Tailscale OAuth
+          # secret, so it stays the same across runs without one more secret to manage.
+          if [ "${SCRIPT_PATH##*/}" = "init-earnapp.sh" ] && [ -z "${EARNAPP_UUID:-}" ]; then
+            if [ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+              echo "::error::set EARNAPP_UUID, or TAILSCALE_OAUTH_CLIENT_SECRET to derive it from"
+              exit 1
+            fi
+            EARNAPP_UUID="sdk-node-$(printf 'earnapp-opi:%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | sha256sum | cut -c1-32)"
+            echo "::add-mask::${EARNAPP_UUID}"
+            export EARNAPP_UUID
+            echo "[*] EARNAPP_UUID not set: using the ID derived from the Tailscale OAuth secret"
+          fi
 
           # `export KEY='value'` for every set env var starting with $1. An unset secret
           # arrives as an empty string, which is skipped.
@@ -545,6 +563,21 @@ jobs:
 
           if [ "$RC" -eq 0 ]; then
             echo "[*] script completed successfully in ${DUR}s"
+            # The link-device URL holds the ID, so it goes to Telegram, never to this public log
+            if [ "${SCRIPT_PATH##*/}" = "init-earnapp.sh" ]; then
+              if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+                TEXT="EarnApp is running on the Orange Pi. If this device isn't linked yet, open this once while logged in to EarnApp: https://earnapp.com/r/${EARNAPP_UUID}"
+                if curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXT}" \
+                    -d "disable_web_page_preview=true" 2>/dev/null; then
+                  echo "[+] EarnApp link-device URL sent to Telegram"
+                else
+                  echo "::warning::could not send the EarnApp link-device URL to Telegram"
+                fi
+              else
+                echo "::warning::TELEGRAM_TOKEN/TELEGRAM_CHAT_ID not set: no way to send the EarnApp link-device URL privately"
+              fi
+            fi
             echo "::group::Script output (sanitized)"
             show || true
             echo "::endgroup::"
