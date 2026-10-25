@@ -7,6 +7,8 @@ name: "Deploy Vercel Projects (private repo)"
 # created on its first deploy.
 #
 #   1. poll    - list vercel/*, find folders with a commit not yet deployed.
+#   1b. test   - per folder: `deno task test` when deno.json has one; only the
+#                summary line is logged, a failure stops the deploy.
 #   2. deploy  - per folder: link the project, fill in missing env (see SETUP), run `deno task migrate` when
 #                the folder has one (DATABASE_URL comes from the project's own
 #                production env), then `vercel deploy --prod`. Vercel builds
@@ -163,6 +165,18 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+
+      # The folder's own `deno task test`, when it has one; a failure stops the deploy. Only the summary line is logged.
+      - name: Test
+        working-directory: private/vercel/${{ matrix.project.name }}
+        run: |
+          set -euo pipefail
+          if ! grep -q '"test"' deno.json 2>/dev/null; then echo "No test task; skipping."; exit 0; fi
+          if NO_COLOR=1 deno task test > /tmp/test.log 2>&1; then status=0; else status=1; fi
+          grep -E '^(ok|FAILED) \| [0-9]+ passed' /tmp/test.log | tail -1 || true
+          rm -f /tmp/test.log
+          if [ "$status" -ne 0 ]; then echo "::error::Tests failed (output suppressed to protect private data)"; exit 1; fi
+          echo "Tests: OK"
 
       - name: Link Vercel project
         working-directory: private/vercel/${{ matrix.project.name }}
