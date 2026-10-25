@@ -190,7 +190,13 @@ jobs:
             echo "Deploy: OK (URL is in the Vercel dashboard)"
           else
             echo "::error::Vercel deploy failed (output suppressed to protect private data)"
-            tail -15 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
+            # The CLI prints the deployment URL before building, so a build failure still leaves it here.
+            if [ -s /tmp/url.txt ]; then
+              echo "::add-mask::$(cat /tmp/url.txt)"
+              npx --yes vercel@latest inspect "$(cat /tmp/url.txt)" --logs --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} >> /tmp/vercel.log 2>&1 || true
+            fi
+            echo "--- last lines of the deploy and build log (URLs and paths stripped) ---"
+            tail -40 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
             exit 1
           fi
 
