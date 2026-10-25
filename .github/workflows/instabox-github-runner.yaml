@@ -24,6 +24,13 @@ name: "Deploy GitHub runner on Instabox"
 #                                      Administration: Read and write on it
 #   GH_RUNNER_REPO + GH_RUNNER_APP_ID + GH_RUNNER_APP_PRIVATE_KEY (or GH_RUNNER_PAT) take
 #   precedence when set; see builder-tools/github-runner/README.md
+#   INSTABOX_RUNNER_REPOS (optional)   several repos for this machine, comma-separated
+#                                      (OWNER/REPO,OWNER/REPO); takes precedence over the
+#                                      above and only affects Instabox. One supervisor per
+#                                      repo; the credential needs Administration: RW on all.
+#                                      Their jobs can run at the same time, each with the
+#                                      per-job caps below, so keep the caps' sum near the
+#                                      machine's size.
 # REPO VARIABLES (optional)
 #   INSTABOX_RUNNER_MACHINE      machine name (default gh-runner)
 #   INSTABOX_RUNNER_LABELS       default self-hosted,linux,x64,instabox
@@ -87,7 +94,7 @@ jobs:
       - name: Verify required secrets
         env:
           MODE: ${{ inputs.mode }}
-          HAS_REPO: ${{ secrets.GH_RUNNER_REPO != '' || secrets.PRIVATE_REPO != '' }}
+          HAS_REPO: ${{ secrets.INSTABOX_RUNNER_REPOS != '' || secrets.GH_RUNNER_REPO != '' || secrets.PRIVATE_REPO != '' }}
           HAS_APP: ${{ secrets.GH_RUNNER_APP_ID != '' && secrets.GH_RUNNER_APP_PRIVATE_KEY != '' }}
           HAS_PAT: ${{ secrets.GH_RUNNER_PAT != '' || secrets.PRIVATE_REPO_TOKEN != '' }}
         run: |
@@ -185,7 +192,7 @@ jobs:
         env:
           SCRIPT_PATH: bash-scripts/upsert-github-runner.sh
           # Dedicated GH_RUNNER_* secrets when set, else the private repo secrets other workflows use.
-          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          GH_RUNNER_REPO: ${{ secrets.INSTABOX_RUNNER_REPOS || secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
           GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
           GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
           GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
@@ -206,9 +213,13 @@ jobs:
           set +e
           SECONDS=0
           SAN="${RUNNER_TEMP}/sanitize.pl"
-          # The private repo name shows up in the runner logs: mask it in the forms they print.
-          r="${GH_RUNNER_REPO#https://github.com/}"; r="${r%.git}"; r="${r%/}"
-          echo "::add-mask::${r}"; echo "::add-mask::${r#*/}"
+          # The private repo names show up in the runner logs: mask them in the forms they print.
+          IFS=',' read -ra repos <<< "$GH_RUNNER_REPO"
+          for r in "${repos[@]}"; do
+            r="${r//[[:space:]]/}"; r="${r#https://github.com/}"; r="${r%.git}"; r="${r%/}"
+            [ -n "$r" ] || continue
+            echo "::add-mask::${r}"; echo "::add-mask::${r#*/}"
+          done
           umask 077
           LOG=$(mktemp)
           PAYLOAD=$(mktemp)
@@ -241,5 +252,5 @@ jobs:
             perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -40 || true
             exit "$RC"
           fi
-          echo "[+] runner deployed in ${SECONDS}s; in the private repo use runs-on: [self-hosted, instabox]"
-          echo "[*] logs (in RAM): instabox ssh ${MACHINE_NAME} -- sudo docker exec gh-runner-supervisor cat /tmp/supervisor.log"
+          echo "[+] runner deployed in ${SECONDS}s; in each served repo use runs-on: [self-hosted, instabox]"
+          echo "[*] logs (in RAM): instabox ssh ${MACHINE_NAME} -- sudo docker exec gh-runner-supervisor[-N] cat /tmp/supervisor.log"

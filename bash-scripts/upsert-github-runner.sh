@@ -7,7 +7,8 @@
 # config, work dir in RAM, deleted after the job. Credentials are a GitHub App key (or a
 # fine-grained PAT), so stopping and starting the VM never needs a new token.
 #
-# Required: GH_RUNNER_REPO (https://github.com/OWNER/REPO or OWNER/REPO) and either
+# Required: GH_RUNNER_REPO (https://github.com/OWNER/REPO or OWNER/REPO; several repos
+#   comma-separated, one supervisor each, the first keeping the original names) and either
 #   GH_RUNNER_APP_ID + GH_RUNNER_APP_PRIVATE_KEY   GitHub App, permission Administration: RW
 #   GH_RUNNER_PAT                                  fine-grained PAT, Administration: RW on the repo
 # Optional: GH_RUNNER_NAME (runner name prefix), GH_RUNNER_LABELS, GH_RUNNER_CPUS,
@@ -42,11 +43,19 @@ dk() { "${DK[@]}" "$@"; }
 status "upsert github runner start"
 
 step "checking required env"
-REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"; REPO="${REPO%/}"
-case "$REPO" in
-  */*) ok "repo set" ;;
-  *) fail "GH_RUNNER_REPO must be https://github.com/OWNER/REPO or OWNER/REPO" ;;
-esac
+# GH_RUNNER_REPO may list several repos, comma-separated; each gets its own supervisor.
+REPOS=()
+IFS=',' read -ra REPO_LIST <<< "$REPO"
+for r in "${REPO_LIST[@]}"; do
+  r="${r//[[:space:]]/}"; r="${r#https://github.com/}"; r="${r%.git}"; r="${r%/}"
+  [ -n "$r" ] || continue
+  case "$r" in
+    */*) REPOS+=("$r") ;;
+    *) fail "GH_RUNNER_REPO must be https://github.com/OWNER/REPO or OWNER/REPO (several: comma-separated)" ;;
+  esac
+done
+[ "${#REPOS[@]}" -gt 0 ] || fail "GH_RUNNER_REPO must be https://github.com/OWNER/REPO or OWNER/REPO (several: comma-separated)"
+ok "repo set (${#REPOS[@]})"
 if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
   AUTH_MODE=app
 elif [ -n "$PAT" ]; then
@@ -117,30 +126,41 @@ if ! timeout 600 "${DK[@]}" pull -q "$SUPERVISOR_IMAGE" >/dev/null 2>&1; then
 fi
 ok "supervisor image present"
 
-# Settings for the supervisor; unset ones fall back to the defaults in supervisor.sh.
-ENV_ARGS=(-e "GH_RUNNER_REPO=${REPO}" -e "GH_RUNNER_NAME_PREFIX=${PREFIX}" -e "GH_RUNNER_LABELS=${LABELS}")
-if [ -n "$APP_ID" ]; then ENV_ARGS+=(-e "GH_RUNNER_APP_ID=${APP_ID}"); fi
+# Settings shared by every supervisor; unset ones fall back to the defaults in supervisor.sh.
+BASE_ENV=(-e "GH_RUNNER_NAME_PREFIX=${PREFIX}" -e "GH_RUNNER_LABELS=${LABELS}")
+if [ -n "$APP_ID" ]; then BASE_ENV+=(-e "GH_RUNNER_APP_ID=${APP_ID}"); fi
 for v in CPUS MEMORY MEMORY_SWAP WORK_SIZE TMP_SIZE NO_SUDO NETWORK IMAGE DNS; do
   val="GH_RUNNER_${v}"
-  if [ -n "${!val:-}" ]; then ENV_ARGS+=(-e "GH_RUNNER_${v}=${!val}"); fi
+  if [ -n "${!val:-}" ]; then BASE_ENV+=(-e "GH_RUNNER_${v}=${!val}"); fi
 done
-RUN_ARGS=(--init --network host --read-only
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m
-  --cap-drop ALL --security-opt no-new-privileges:true
-  --cpus 0.20 --memory 64m --memory-swap 64m --pids-limit 64
-  -v /var/run/docker.sock:/var/run/docker.sock
-  -v "${SECRETS_DIR}:/run/secrets/gh-runner:ro"
-  "${ENV_ARGS[@]}")
+# The first repo keeps the original container names, so a single-repo host is unchanged;
+# repo N (N >= 2) gets gh-runner-supervisor-N and its job container gh-runner-job-N.
+# Same name prefix on every repo is fine: each supervisor only sees its own repo's runners.
+sv_name() { if [ "$1" -eq 0 ]; then echo "$SUPERVISOR_NAME"; else echo "${SUPERVISOR_NAME}-$(($1 + 1))"; fi; }
+run_args() {   # $1 = index into REPOS
+  RUN_ARGS=(--init --network host --read-only
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m
+    --cap-drop ALL --security-opt no-new-privileges:true
+    --cpus 0.20 --memory 64m --memory-swap 64m --pids-limit 64
+    -v /var/run/docker.sock:/var/run/docker.sock
+    -v "${SECRETS_DIR}:/run/secrets/gh-runner:ro"
+    "${BASE_ENV[@]}" -e "GH_RUNNER_REPO=${REPOS[$1]}")
+  if [ "$1" -gt 0 ]; then RUN_ARGS+=(-e "GH_RUNNER_JOB_CONTAINER=gh-runner-job-$(($1 + 1))"); fi
+}
 
 step "checking GitHub access with these credentials"
-if ! CHECK=$(dk run --rm "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" check 2>&1); then
-  printf '%s\n' "$CHECK" | grep -E '^\[[*+!x]\] ' >&2 || true
-  fail "credential check failed; the running runner (if any) was left untouched"
-fi
-printf '%s\n' "$CHECK" | grep -E '^\[[*+!x]\] ' || true
+for i in "${!REPOS[@]}"; do
+  run_args "$i"
+  if ! CHECK=$(dk run --rm "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" check 2>&1); then
+    printf '%s\n' "$CHECK" | grep -E '^\[[*+!x]\] ' >&2 || true
+    fail "credential check failed for repo $((i + 1)); the running runner(s) (if any) were left untouched"
+  fi
+  printf '%s\n' "$CHECK" | grep -E '^\[[*+!x]\] ' || true
+done
 
 step "removing old runner containers"
-for c in "$LEGACY_CONTAINER" "$SUPERVISOR_NAME"; do
+# Every supervisor, including ones for repos no longer listed.
+for c in "$LEGACY_CONTAINER" $(dk ps -a --format '{{.Names}}' | grep -E "^${SUPERVISOR_NAME}(-[0-9]+)?\$" || true); do
   if dk ps -a --format '{{.Names}}' | grep -qx "$c"; then
     dk rm -f "$c" >/dev/null 2>&1 || true
     ok "removed ${c}"
@@ -148,25 +168,32 @@ for c in "$LEGACY_CONTAINER" "$SUPERVISOR_NAME"; do
 done
 # A job container that is running now is left alone: the new supervisor waits for it.
 
-step "starting ${SUPERVISOR_NAME}"
-# No Docker log file on disk: the supervisor keeps its log in its own RAM /tmp
-# (GH_RUNNER_LOG_FILE, ~2 MiB rotated), and job containers log nowhere.
-dk run -d --name "$SUPERVISOR_NAME" --restart unless-stopped --log-driver none \
-  -e GH_RUNNER_LOG_FILE=/tmp/supervisor.log \
-  "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" run >/dev/null || fail "failed to start ${SUPERVISOR_NAME}"
-svlog() { dk exec "$SUPERVISOR_NAME" cat /tmp/supervisor.log 2>/dev/null || true; }
-
-step "waiting for the first runner to come online"
-for _ in $(seq 1 45); do
-  sleep 2
-  STATE=$(dk inspect -f '{{.State.Status}}' "$SUPERVISOR_NAME" 2>/dev/null || echo missing)
-  [ "$STATE" = running ] || break
-  svlog | grep -qE 'online, waiting for a job|already running' && break
+for i in "${!REPOS[@]}"; do
+  name=$(sv_name "$i")
+  run_args "$i"
+  step "starting ${name} (repo $((i + 1)) of ${#REPOS[@]})"
+  # No Docker log file on disk: the supervisor keeps its log in its own RAM /tmp
+  # (GH_RUNNER_LOG_FILE, ~2 MiB rotated), and job containers log nowhere.
+  dk run -d --name "$name" --restart unless-stopped --log-driver none \
+    -e GH_RUNNER_LOG_FILE=/tmp/supervisor.log \
+    "${RUN_ARGS[@]}" "$SUPERVISOR_IMAGE" run >/dev/null || fail "failed to start ${name}"
 done
-svlog | tail -n 20 | grep -E '^\[[*+!x]\] ' || true
-[ "$STATE" = running ] || fail "${SUPERVISOR_NAME} is ${STATE} (its log was in RAM; run it with: docker run --rm ... ${SUPERVISOR_IMAGE} check)"
-if svlog | grep -qE 'online, waiting for a job|already running'; then
-  ok "github runner supervisor is up; jobs with runs-on: [${LABELS}] will run here"
-else
-  warn "supervisor is running but no runner is online yet (pulling the runner image?); check: docker exec ${SUPERVISOR_NAME} cat /tmp/supervisor.log"
-fi
+svlog() { dk exec "$1" cat /tmp/supervisor.log 2>/dev/null || true; }
+
+for i in "${!REPOS[@]}"; do
+  name=$(sv_name "$i")
+  step "waiting for ${name}'s first runner to come online"
+  for _ in $(seq 1 45); do
+    sleep 2
+    STATE=$(dk inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)
+    [ "$STATE" = running ] || break
+    svlog "$name" | grep -qE 'online, waiting for a job|already running' && break
+  done
+  svlog "$name" | tail -n 20 | grep -E '^\[[*+!x]\] ' || true
+  [ "$STATE" = running ] || fail "${name} is ${STATE} (its log was in RAM; run it with: docker run --rm ... ${SUPERVISOR_IMAGE} check)"
+  if svlog "$name" | grep -qE 'online, waiting for a job|already running'; then
+    ok "${name} is up; jobs with runs-on: [${LABELS}] in repo $((i + 1)) will run here"
+  else
+    warn "${name} is running but no runner is online yet (pulling the runner image?); check: docker exec ${name} cat /tmp/supervisor.log"
+  fi
+done
