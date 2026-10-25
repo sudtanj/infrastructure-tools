@@ -59,9 +59,9 @@ on:
         default: ""
         type: string
       template:
-        description: "Template for a new machine (ignored when it already exists)"
+        description: "Template for a new machine (ignored when it already exists; the free plan allows agent-browser only)"
         required: false
-        default: "universal"
+        default: "agent-browser"
         type: choice
         options:
           - universal
@@ -261,12 +261,13 @@ jobs:
             case "$state" in
               running) ;;
               # start resumes a paused machine, or boots it fresh when its memory cannot be restored
-              suspended|stopped|error) instabox start "$MACHINE_NAME" ;;
+              suspended|stopped|error) instabox start "$MACHINE_NAME" 2>&1 | perl "${RUNNER_TEMP}/sanitize.pl" ;;
               *) echo "[*] machine is busy (${state}); the SSH step wakes or waits for it" ;;
             esac
           else
             echo "[*] creating ${MACHINE_NAME} from template ${TEMPLATE}"
-            instabox create --name "$MACHINE_NAME" --template "$TEMPLATE" --meta app=paseo-lite
+            # CLI errors can include the account email: filtered like the machine output.
+            instabox create --name "$MACHINE_NAME" --template "$TEMPLATE" --meta app=paseo-lite 2>&1 | perl "${RUNNER_TEMP}/sanitize.pl"
           fi
 
       - name: Configure SSH
@@ -275,7 +276,7 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519
           # Host block with a short-lived certificate signed by Instabox for this key.
-          instabox ssh-config "$MACHINE_NAME" > "${RUNNER_TEMP}/instabox_ssh_config"
+          instabox ssh-config "$MACHINE_NAME" 2> >(perl "${RUNNER_TEMP}/sanitize.pl" >&2) > "${RUNNER_TEMP}/instabox_ssh_config"
           {
             cat "${RUNNER_TEMP}/instabox_ssh_config"
             printf '\nHost *\n  LogLevel ERROR\n  ServerAliveInterval 30\n'
