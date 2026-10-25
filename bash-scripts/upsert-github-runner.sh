@@ -1,7 +1,7 @@
 #!/bin/bash
 # bash-scripts/upsert-github-runner.sh
 # Runs ON the host over SSH: the GCP VM (gcp-bash-script-runner.yaml) or an Instabox machine
-# (instabox-paseo-lite.yaml, github_runner input). Idempotent.
+# (instabox-github-runner.yaml). Idempotent.
 # Deploys the sudtanj/github-runner supervisor (builder-tools/github-runner): for every
 # job it starts a fresh ghcr.io/actions/actions-runner container with a single-use JIT
 # config, work dir in RAM, deleted after the job. Credentials are a GitHub App key (or a
