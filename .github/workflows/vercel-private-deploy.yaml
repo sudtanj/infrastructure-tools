@@ -222,15 +222,17 @@ jobs:
           if grep -rqs --include='*.ts' APP_KEY .; then has APP_KEY || add APP_KEY "base64:$(openssl rand -base64 32)" --sensitive; fi
           if grep -rqs --include='*.ts' CRON_SECRET .; then has CRON_SECRET || add CRON_SECRET "$(openssl rand -hex 32)" --sensitive; fi
           if ! grep -rqs --include='*.ts' DATABASE_URL .; then exit 0; fi
-          if has DATABASE_URL; then echo "DATABASE_URL already set."; exit 0; fi
+          if [ -s /tmp/db.url ]; then exit 0; fi
           if [ -z "${NEON_API_KEY:-}" ]; then
-            echo "::warning::No DATABASE_URL and no NEON_API_KEY; set one of them."
+            if has DATABASE_URL; then echo "DATABASE_URL already set."; else echo "::warning::No DATABASE_URL and no NEON_API_KEY; set one of them."; fi
             exit 0
           fi
           neon() { curl -fsS -H "Authorization: Bearer $NEON_API_KEY" -H 'Content-Type: application/json' "$@"; }
           api=https://console.neon.tech/api/v2
-          # Reuse a Neon project of the same name, left behind by a run that failed after creating it.
+          # The Neon project is named after the folder. Looked up on every run because Vercel hides
+          # sensitive values, so this is how migrate gets the URL back.
           id=$(neon "$api/projects?search=$NAME${NEON_ORG_ID:+&org_id=$NEON_ORG_ID}" | jq -r --arg n "$NAME" '[.projects[] | select(.name == $n)][0].id // empty') || id=''
+          if [ -z "$id" ] && has DATABASE_URL; then echo "DATABASE_URL already set (not a Neon project of this name)."; exit 0; fi
           if [ -z "$id" ]; then
             body=$(jq -nc --arg n "$NAME" --arg o "${NEON_ORG_ID:-}" '{project: ({name: $n, pg_version: 17} + (if $o == "" then {} else {org_id: $o} end))}')
             if ! id=$(neon -X POST "$api/projects" -d "$body" | jq -r '.project.id'); then
@@ -242,7 +244,7 @@ jobs:
           # Pooled endpoint: serverless functions open many short connections. The app already disables prepared statements for it.
           url=$(neon "$api/projects/$id/connection_uri?database_name=neondb&role_name=neondb_owner&pooled=true" | jq -r '.uri')
           case "$url" in postgres://*|postgresql://*) ;; *) echo "::error::Neon returned no connection URI."; exit 1 ;; esac
-          add DATABASE_URL "$url"
+          if has DATABASE_URL; then echo "DATABASE_URL already set (Neon)."; else add DATABASE_URL "$url" --sensitive; fi
           printf '%s' "$url" > /tmp/db.url
 
       # Output can name the database host or private files, so only pass/fail is shown.
@@ -256,10 +258,11 @@ jobs:
           if [ -z "$DATABASE_URL" ]; then
             npx --yes vercel@latest env pull /tmp/prod.env --environment=production --yes --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} > /dev/null 2>&1 || true
             DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' /tmp/prod.env 2>/dev/null | sed -E 's/^"(.*)"$/\1/' | head -1)
+            if [ "$DATABASE_URL" = "[SENSITIVE]" ]; then DATABASE_URL=""; fi
             rm -f /tmp/prod.env
           fi
           if [ -z "$DATABASE_URL" ]; then
-            echo "::warning::No readable DATABASE_URL in the project's production env (unset or sensitive); skipping migrate."
+            echo "::warning::No readable DATABASE_URL in the project's production env (unset, or sensitive and not from Neon); skipping migrate."
             exit 0
           fi
           echo "::add-mask::$DATABASE_URL"
