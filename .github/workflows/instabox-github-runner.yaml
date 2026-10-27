@@ -105,7 +105,6 @@ jobs:
             echo "::error::Missing secrets:${missing} (see the comment at the top of this workflow)"
             exit 1
           fi
-          echo "[+] secrets set | machine: ${MACHINE_NAME} | mode: ${MODE}"
 
       - name: Prepare log sanitizer
         run: |
@@ -127,7 +126,11 @@ jobs:
             print $l;
           }
           PERL
-          perl -c "${RUNNER_TEMP}/sanitize.pl"
+          if ! out=$(perl -c "${RUNNER_TEMP}/sanitize.pl" 2>&1); then
+            echo "::error::sanitize.pl does not compile"
+            printf '%s\n' "$out"
+            exit 1
+          fi
 
       - name: Install instabox CLI
         run: |
@@ -136,7 +139,7 @@ jobs:
           export INSTABOX_INSTALL_DIR="$HOME/.local/bin"
           curl -fsSL https://instabox.sh/install.sh | sh >/dev/null
           echo "$INSTABOX_INSTALL_DIR" >> "$GITHUB_PATH"
-          "$INSTABOX_INSTALL_DIR/instabox" --version
+          "$INSTABOX_INSTALL_DIR/instabox" --version >/dev/null
 
       - name: Ensure the machine exists and runs
         env:
@@ -145,25 +148,35 @@ jobs:
         run: |
           set -euo pipefail
           SAN="${RUNNER_TEMP}/sanitize.pl"
+          # Runs an instabox command quietly; on failure prints its sanitized tail.
+          quiet() {
+            local o rc=0
+            o=$(mktemp)
+            "$@" >"$o" 2>&1 || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::$1 $2 failed (exit ${rc})"
+              perl "$SAN" "$o" | tail -n 20
+            fi
+            rm -f "$o"
+            return "$rc"
+          }
           if info=$(instabox get "$MACHINE_NAME" --json 2>/dev/null); then
             state=$(jq -r '.state // "unknown"' <<< "$info")
-            echo "[*] machine exists, state: ${state}"
             case "$state" in
               running) ;;
               # start resumes a paused machine, or boots it fresh when its memory cannot be restored
-              suspended|stopped|error) instabox start "$MACHINE_NAME" 2>&1 | perl "$SAN" ;;
-              *) echo "[*] machine is busy (${state}); waiting for it below" ;;
+              suspended|stopped|error) quiet instabox start "$MACHINE_NAME" ;;
+              # busy: waited for below
+              *) ;;
             esac
           elif [ "$MODE" = deploy ]; then
-            echo "[*] creating ${MACHINE_NAME} from template ${TEMPLATE}"
-            instabox create --name "$MACHINE_NAME" --template "$TEMPLATE" --meta app=gh-runner 2>&1 | perl "$SAN"
+            quiet instabox create --name "$MACHINE_NAME" --template "$TEMPLATE" --meta app=gh-runner
           else
             echo "::error::machine ${MACHINE_NAME} does not exist; run mode deploy first"
             exit 1
           fi
           # A command also wakes a machine paused for being idle, and resets its idle timer.
-          instabox exec "$MACHINE_NAME" --timeout 120 -- true 2>&1 | perl "$SAN"
-          echo "[+] machine is up; the runner reconnects by itself (it pauses again after 30 idle minutes)"
+          quiet instabox exec "$MACHINE_NAME" --timeout 120 -- true
 
       - name: Configure SSH
         if: inputs.mode == 'deploy'
@@ -182,7 +195,6 @@ jobs:
           [ -n "$alias" ] || { echo "::error::instabox ssh-config printed no Host block"; exit 1; }
           echo "SSH_ALIAS=${alias}" >> "$GITHUB_ENV"
           ssh -T -o BatchMode=yes "$alias" true
-          echo "[+] SSH to the machine works"
 
       - name: Run upsert-github-runner.sh over SSH
         if: inputs.mode == 'deploy'
@@ -190,8 +202,6 @@ jobs:
           SCRIPT_PATH: bash-scripts/upsert-github-runner.sh
           # Dedicated GH_RUNNER_* secrets when set, else the private repo secrets other workflows use.
           GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
-          # Only the name of the secret in use, for the log.
-          TOKEN_SOURCE: ${{ secrets.GH_RUNNER_APP_ID != '' && secrets.GH_RUNNER_APP_PRIVATE_KEY != '' && 'GitHub App' || secrets.GH_RUNNER_PAT != '' && 'GH_RUNNER_PAT' || 'PRIVATE_REPO_TOKEN (fallback)' }}
           GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
           GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
           GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
@@ -214,7 +224,6 @@ jobs:
           set +e
           SECONDS=0
           SAN="${RUNNER_TEMP}/sanitize.pl"
-          echo "[*] credential: ${TOKEN_SOURCE}"
           # The private repo names show up in the runner logs: mask them in the forms they print.
           IFS=',' read -ra repos <<< "$GH_RUNNER_REPO"
           for r in "${repos[@]}"; do
@@ -239,20 +248,17 @@ jobs:
           SH
             cat "$SCRIPT_PATH"
           } > "$PAYLOAD"
-          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
-          echo "[*] script: ${SCRIPT_PATH} (sha256 $(sha256sum "$SCRIPT_PATH" | cut -c1-12)) | env forwarded: ${NAMES}"
 
           # SSH, not `instabox exec`: exec stops a command after 10 minutes and does not stream.
           ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' < "$PAYLOAD" > "$LOG" 2>&1
           RC=$?
           set -e
-          grep -aE '^\[[*>+!x]\] ' "$LOG" | perl "$SAN" || true
           if [ "$RC" -ne 0 ]; then
-            echo "::error::upsert-github-runner.sh failed (exit ${RC}) after ${SECONDS}s"
-            [ "$RC" -eq 255 ] && echo "[!] exit 255 = the SSH connection itself failed (not the script)."
-            echo "---- diagnostic tail (sanitized) ----"
-            perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -40 || true
+            if [ "$RC" -eq 255 ]; then
+              echo "::error::upsert-github-runner.sh failed (exit 255: the SSH connection itself failed) after ${SECONDS}s"
+            else
+              echo "::error::upsert-github-runner.sh failed (exit ${RC}) after ${SECONDS}s"
+            fi
+            perl "$SAN" "$LOG" | grep -avE 'BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer ' | tail -n 20 || true
             exit "$RC"
           fi
-          echo "[+] runner deployed in ${SECONDS}s; in each served repo use runs-on: [self-hosted, instabox]"
-          echo "[*] logs (in RAM): instabox ssh ${MACHINE_NAME} -- sudo docker exec gh-runner-supervisor[-N] cat /tmp/supervisor.log"

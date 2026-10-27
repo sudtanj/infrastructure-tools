@@ -3,12 +3,6 @@ on:
   schedule:
     - cron: '*/30 * * * *' # Every 30 minutes
   workflow_dispatch:
-  # Sweep right after these finish, so their logs are public for seconds, not
-  # up to 30 minutes. Names must match each workflow's `name:` exactly.
-  workflow_run:
-    workflows:
-      - 'Commute traffic: home and work, to Telegram'
-    types: [completed]
 
 # Never let two cleanup runs overlap (they would cancel each other)
 concurrency:
@@ -22,30 +16,30 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Delete all workflow runs (any status)
+      - name: Delete workflow runs untouched for over 24 hours
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           CURRENT_RUN: ${{ github.run_id }}
         run: |
+          # Only runs last updated over 24 hours ago are considered, so
+          # anything started or still changing recently is left alone.
           # Never touch a run that is actually executing (queued / in_progress /
           # pending / requested); a later tick deletes it once it finishes.
           # Runs parked on an approval gate (`waiting` for an environment
           # reviewer, `action_required` for a fork PR) may go, but only if
           # none of their jobs is running alongside the gate.
           # Skip this cleanup run itself; it can't be deleted while in progress
+          cutoff=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
           gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
-            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN) | \"\(.id) \(.status)\"" |
+            --jq ".workflow_runs[] | select(.id != $CURRENT_RUN and .updated_at < \"$cutoff\") | \"\(.id) \(.status)\"" |
           while read -r id status; do
             case "$status" in
               completed) ;;
               waiting|action_required)
                 running=$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
                   --jq '.jobs[] | select(.status == "in_progress") | .id' | wc -l)
-                if [ "$running" -gt 0 ]; then
-                  echo "Skipping run $id ($status): $running job(s) still running"
-                  continue
-                fi
+                [ "$running" -eq 0 ] || continue
                 # Must be cancelled before it can be deleted
                 gh api -X POST "repos/$REPO/actions/runs/$id/force-cancel" >/dev/null 2>&1 || true
                 for _ in $(seq 1 12); do
@@ -53,11 +47,8 @@ jobs:
                   sleep 5
                 done
                 ;;
-              *)
-                echo "Skipping active run $id ($status)"
-                continue
-                ;;
+              *) continue ;;
             esac
             gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null \
-              && echo "Deleted run $id ($status)" || echo "Failed to delete run $id ($status)"
+              || echo "::warning::Failed to delete run $id ($status)"
           done

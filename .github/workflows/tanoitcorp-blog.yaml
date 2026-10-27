@@ -91,15 +91,17 @@ jobs:
           fi
           # Not a secret, but a real address in a public log.
           if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
-          echo "Secrets present."
 
       - name: Install Tailscale
         run: |
           set -euo pipefail
           if ! command -v tailscale >/dev/null 2>&1; then
-            curl -fsSL https://tailscale.com/install.sh | sh
+            out=$(mktemp)
+            if ! { curl -fsSL https://tailscale.com/install.sh | sh; } >"$out" 2>&1; then
+              echo "::error::Tailscale install failed"; tail -n 20 "$out"; exit 1
+            fi
           fi
-          tailscale version
+          tailscale version >/dev/null
 
       # Same credential handling as typescript-worker-run.yaml: the OAuth
       # client secret is exchanged for a single-use, ephemeral, 10-minute auth
@@ -158,14 +160,16 @@ jobs:
             authkey="$TAILSCALE_AUTH_KEY"
           fi
 
-          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          out=$(mktemp)
+          if ! sudo tailscale up --authkey="$authkey" "${args[@]}" >"$out" 2>&1; then
+            echo "::error::tailscale up failed"; tail -n 20 "$out"; exit 1
+          fi
           # Never print raw `tailscale status`: it lists every tailnet IP and host name.
           state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
           if [ "$state" != "Running" ]; then
             echo "::error::Tailscale is not connected (BackendState=${state})."
             exit 1
           fi
-          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
 
       - name: Write the posts
         env:
@@ -180,7 +184,6 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain -- cloudflare-projects/tanoitcorp)" ]; then
-            echo "Nothing new to commit."
             exit 0
           fi
           git add cloudflare-projects/tanoitcorp
@@ -191,7 +194,6 @@ jobs:
           # main may have moved during the run; the posts only touch the blog's files.
           git pull -q --rebase
           git push -q
-          echo "Posts pushed."
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       # Deployed here, not by dispatching cloudflare-private-deploy.yaml: a
@@ -206,10 +208,13 @@ jobs:
           PAGES_BRANCH: ${{ secrets.BUILD_REF || 'main' }}
         run: |
           set -euo pipefail
-          npx --yes wrangler@4 pages deploy public --project-name tanoitcorp --branch "$PAGES_BRANCH" \
-            --commit-hash "$(git rev-parse HEAD)" --commit-message "Publish new blog posts" --commit-dirty=true
-          echo "Site deployed."
+          # wrangler's output (upload listing, deployment URL) stays out of the log unless it fails.
+          out=$(mktemp)
+          if ! npx --yes wrangler@4 pages deploy public --project-name tanoitcorp --branch "$PAGES_BRANCH" \
+            --commit-hash "$(git rev-parse HEAD)" --commit-message "Publish new blog posts" --commit-dirty=true >"$out" 2>&1; then
+            echo "::error::wrangler pages deploy failed"; tail -n 20 "$out"; exit 1
+          fi
 
       - name: Leave the tailnet
         if: always()
-        run: sudo tailscale logout 2>&1 | tail -3 || true
+        run: sudo tailscale logout >/dev/null 2>&1 || true

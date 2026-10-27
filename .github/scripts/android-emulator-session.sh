@@ -29,7 +29,7 @@ for pkg in com.google.android.googlequicksearchbox com.google.android.as \
   com.google.android.apps.safetyhub com.google.android.tts \
   com.google.android.projection.gearhead com.google.android.apps.restore; do
   if grep -qx "package:$pkg" <<<"$enabled"; then
-    adb shell pm disable-user --user 0 "$pkg" >/dev/null && echo "Disabled $pkg." || true
+    adb shell pm disable-user --user 0 "$pkg" >/dev/null || true
   fi
 done
 # No Doze and no screen-off: either can pause what is running.
@@ -59,12 +59,11 @@ fill_screen() {
     [ "$id" = "$main" ] || xdotool windowunmap "$id" || true
   done
   xdotool windowmove "$main" 0 0 windowsize "$main" "$w" "$h"
-  xdotool getwindowgeometry "$main"
 }
 fill_screen || echo "::warning::Could not make the emulator window full screen."
 
-# Host memory and the emulator's resident size, for telling an OOM kill from
-# a crash afterwards.
+# Host memory and the emulator's resident size, printed when qemu dies, for
+# telling an OOM kill from a crash.
 log_memory() {
   local pid rss
   pid="$(pgrep -f qemu-system-x86_64 | head -1)" || true
@@ -116,8 +115,6 @@ emulator_died() {
 # timer is gone or AUTOPLAY_MINUTES pass, then end the session so it saves.
 if [ "${AUTOPLAY:-false}" = true ]; then
   minutes="${AUTOPLAY_MINUTES:-30}"
-  echo "Emulator ready. Playing PineDrama until the coin is gone (limit ${minutes} minutes)."
-  log_memory
   # EraSpace's daily rocket launch first: a few minutes at most.
   DEVICE=emulator-5554 timeout 10m node .github/scripts/eraspace/eraspace.ts \
     || echo "::warning::The EraSpace script ended with an error; going on."
@@ -130,23 +127,13 @@ if [ "${AUTOPLAY:-false}" = true ]; then
       || echo "::warning::The PineDrama script ended with an error; saving anyway."
   fi
   pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
-  log_memory
   max=0
-else
-  echo "Emulator ready. Waiting for the stop file (limit ${max} minutes)."
-  log_memory
 fi
 deadline=$((SECONDS + max * 60))
-next_memory_log=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do
   pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
   if adb shell test -e /data/local/tmp/stop-session 2>/dev/null; then
-    echo "Stop file found."
     break
-  fi
-  if [ "$SECONDS" -ge "$next_memory_log" ]; then
-    log_memory
-    next_memory_log=$((SECONDS + 300))
   fi
   sleep 15
 done

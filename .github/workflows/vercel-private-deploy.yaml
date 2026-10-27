@@ -7,8 +7,8 @@ name: "Deploy Vercel Projects (private repo)"
 # created on its first deploy.
 #
 #   1. poll    - list vercel/*, find folders with a commit not yet deployed.
-#   1b. test   - per folder: `deno task test` when deno.json has one; only the
-#                summary (and stripped error lines) is logged, a failure stops the deploy.
+#   1b. test   - per folder: `deno task test` when deno.json has one; silent on
+#                success, a failure logs the summary and stripped error lines and stops the deploy.
 #   2. deploy  - per folder: link the project, fill in missing env (see SETUP), run `deno task migrate` when
 #                the folder has one (DATABASE_URL comes from the project's own
 #                production env), then `vercel deploy --prod`. Vercel builds
@@ -125,10 +125,8 @@ jobs:
             sha=$(gh api "repos/${REPO}/commits?sha=${REF}&path=vercel/${name}&per_page=1" --jq '.[0].sha // ""')
             if [ -z "$sha" ]; then continue; fi
             if [ "$force" != true ] && grep -qx "vercel-deployed-${name}-${sha}" <<<"$deployed"; then
-              echo "$name: ${sha:0:12} already deployed"
               continue
             fi
-            echo "$name: ${sha:0:12} to deploy"
             prefix=$(printf %s "$name" | tr "[:lower:].-" "[:upper:]__")
             # Optional override in vercel/<name>/.secrets-prefix, e.g. to keep a project's secrets after renaming its folder.
             p=$(gh api -H 'Accept: application/vnd.github.raw' "repos/${REPO}/contents/vercel/${name}/.secrets-prefix?ref=${REF}" 2>/dev/null | tr -d '[:space:]') || p=''
@@ -166,21 +164,20 @@ jobs:
         with:
           deno-version: v2.x
 
-      # The folder's own `deno task test`, when it has one; a failure stops the deploy. Logged: the summary line, and on
-      # failure the last error lines with URLs and paths cut to file names (like migrate).
+      # The folder's own `deno task test`, when it has one; a failure stops the deploy. Logged only on failure: the
+      # summary line and the last error lines with URLs and paths cut to file names (like migrate).
       - name: Test
         working-directory: private/vercel/${{ matrix.project.name }}
         run: |
           set -euo pipefail
-          if ! grep -q '"test"' deno.json 2>/dev/null; then echo "No test task; skipping."; exit 0; fi
+          if ! grep -q '"test"' deno.json 2>/dev/null; then exit 0; fi
           if NO_COLOR=1 deno task test > /tmp/test.log 2>&1; then status=0; else status=1; fi
-          grep -E '^(ok|FAILED) \| [0-9]+ passed' /tmp/test.log | tail -1 || true
           if [ "$status" -ne 0 ]; then
             echo "::error::Tests failed (output suppressed to protect private data)"
+            grep -E '^(ok|FAILED) \| [0-9]+ passed' /tmp/test.log | tail -1 || true
             grep -E "ERROR|error:|=> |FAILED" /tmp/test.log | tail -8 | sed -E 's#[a-z]+://[^ ]+/([A-Za-z0-9._-]+)#\1#g; s#[a-z]+://[^ ]+#<url>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
             exit 1
           fi
-          echo "Tests: OK"
 
       - name: Link Vercel project
         working-directory: private/vercel/${{ matrix.project.name }}
@@ -199,7 +196,6 @@ jobs:
           # The team slug ("Linked to <team>/<project>") is account detail; mask it for every later step.
           team=$(grep -oE "Linked to [A-Za-z0-9._-]+/" /tmp/vercel.log | head -1 | sed -E 's#Linked to (.*)/#\1#') || true
           if [ -n "$team" ]; then echo "::add-mask::$team"; fi
-          echo "Linked to '$NAME'."
 
       # GitHub secrets <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or _CRON_KEY) and <PREFIX>_DATABASE_URL
       # (PREFIX = folder name upper-cased, '-' and '.' as '_', or .secrets-prefix) are the source of truth and replace
@@ -220,7 +216,7 @@ jobs:
           vc() { npx --yes vercel@latest "$@" --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"}; }
           add() { # name value [--sensitive]
             echo "::add-mask::$2"
-            if printf '%s' "$2" | vc env add "$1" production ${3:-} > /dev/null 2>&1; then echo "Added $1."; else echo "::error::Could not add $1."; exit 1; fi
+            if printf '%s' "$2" | vc env add "$1" production ${3:-} > /dev/null 2>&1; then :; else echo "::error::Could not add $1."; exit 1; fi
           }
 
           for var in APP_KEY CRON_SECRET DATABASE_URL; do
@@ -232,7 +228,6 @@ jobs:
               if [ "$(printf '%s' "${value#base64:}" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]; then
                 value="base64:${value#base64:}"
               else
-                echo "::notice::The APP_KEY secret is not a Laravel key; using its SHA-256 as the key."
                 value="base64:$(printf '%s' "$value" | openssl dgst -sha256 -binary | base64)"
               fi
             fi
@@ -252,7 +247,7 @@ jobs:
           if ! grep -rqs --include='*.ts' DATABASE_URL .; then exit 0; fi
           if [ -s /tmp/db.url ]; then exit 0; fi
           if [ -z "${NEON_API_KEY:-}" ]; then
-            if has DATABASE_URL; then echo "DATABASE_URL already set."; else echo "::warning::No DATABASE_URL and no NEON_API_KEY; set one of them."; fi
+            if ! has DATABASE_URL; then echo "::warning::No DATABASE_URL and no NEON_API_KEY; set one of them."; fi
             exit 0
           fi
           neon() { curl -fsS -H "Authorization: Bearer $NEON_API_KEY" -H 'Content-Type: application/json' "$@"; }
@@ -260,19 +255,18 @@ jobs:
           # The Neon project is named after the folder. Looked up on every run because Vercel hides
           # sensitive values, so this is how migrate gets the URL back.
           id=$(neon "$api/projects?search=$NAME${NEON_ORG_ID:+&org_id=$NEON_ORG_ID}" | jq -r --arg n "$NAME" '[.projects[] | select(.name == $n)][0].id // empty') || id=''
-          if [ -z "$id" ] && has DATABASE_URL; then echo "DATABASE_URL already set (not a Neon project of this name)."; exit 0; fi
+          if [ -z "$id" ] && has DATABASE_URL; then exit 0; fi
           if [ -z "$id" ]; then
             body=$(jq -nc --arg n "$NAME" --arg o "${NEON_ORG_ID:-}" '{project: ({name: $n, pg_version: 17} + (if $o == "" then {} else {org_id: $o} end))}')
             if ! id=$(neon -X POST "$api/projects" -d "$body" | jq -r '.project.id'); then
               echo "::error::Could not create the Neon project (check NEON_API_KEY, and set NEON_ORG_ID if the key belongs to an organisation)."
               exit 1
             fi
-            echo "Created a Neon project."
           fi
           # Pooled endpoint: serverless functions open many short connections. The app already disables prepared statements for it.
           url=$(neon "$api/projects/$id/connection_uri?database_name=neondb&role_name=neondb_owner&pooled=true" | jq -r '.uri')
           case "$url" in postgres://*|postgresql://*) ;; *) echo "::error::Neon returned no connection URI."; exit 1 ;; esac
-          if has DATABASE_URL; then echo "DATABASE_URL already set (Neon)."; else add DATABASE_URL "$url" --sensitive; fi
+          has DATABASE_URL || add DATABASE_URL "$url" --sensitive
           printf '%s' "$url" > /tmp/db.url
 
       # Output can name the database host or private files, so only pass/fail is shown.
@@ -284,7 +278,7 @@ jobs:
           ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
         run: |
           set -euo pipefail
-          if ! grep -q '"migrate"' deno.json 2>/dev/null; then echo "No migrate task; skipping."; exit 0; fi
+          if ! grep -q '"migrate"' deno.json 2>/dev/null; then exit 0; fi
           # Just provisioned: use it directly. Otherwise pull it from the project.
           DATABASE_URL=$(cat /tmp/db.url 2>/dev/null || true)
           if [ -z "$DATABASE_URL" ]; then
@@ -300,9 +294,7 @@ jobs:
           echo "::add-mask::$DATABASE_URL"
           # Only the scheme and length are logged: enough to spot a placeholder or a quoting problem.
           case "$DATABASE_URL" in postgres://*|postgresql://*) ;; *) echo "::error::DATABASE_URL is not a postgres:// URL (starts with '${DATABASE_URL:0:4}', ${#DATABASE_URL} chars)."; exit 1 ;; esac
-          if DATABASE_URL="$DATABASE_URL" deno task migrate > /tmp/migrate.log 2>&1; then
-            echo "Migrate: OK"
-          else
+          if ! DATABASE_URL="$DATABASE_URL" deno task migrate > /tmp/migrate.log 2>&1; then
             echo "::error::Migrate failed (output suppressed to protect private data)"
             tail -5 /tmp/migrate.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g'
             exit 1
@@ -314,7 +306,7 @@ jobs:
           set -euo pipefail
           if npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} > /tmp/url.txt 2> /tmp/vercel.log; then
             echo "::add-mask::$(cat /tmp/url.txt)"
-            echo "Deploy: OK (URL is in the Vercel dashboard)"
+            echo "Deployed."
           else
             echo "::error::Vercel deploy failed (output suppressed to protect private data)"
             # The CLI prints the deployment URL before building, so a build failure still leaves it here.
@@ -322,7 +314,6 @@ jobs:
               echo "::add-mask::$(cat /tmp/url.txt)"
               npx --yes vercel@latest inspect "$(cat /tmp/url.txt)" --logs --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"} >> /tmp/vercel.log 2>&1 || true
             fi
-            echo "--- last lines of the deploy and build log (URLs and paths stripped) ---"
             tail -40 /tmp/vercel.log | sed -E 's#[a-z]+://[^ ]+#<url>#g; s#[A-Za-z0-9-]+\.vercel\.app#<host>#g; s#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g; s#( in )[A-Za-z0-9._-]+$#\1<scope>#'
             exit 1
           fi
@@ -335,7 +326,7 @@ jobs:
           ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
         run: |
           set -euo pipefail
-          if [ ! -x smoke.sh ]; then echo "No smoke.sh; skipping."; exit 0; fi
+          if [ ! -x smoke.sh ]; then exit 0; fi
           org=$(jq -r .orgId .vercel/project.json); project=$(jq -r .projectId .vercel/project.json)
           # The shortest production alias is <name>.vercel.app (or the custom domain), which Deployment Protection leaves public.
           host=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com/v9/projects/$project?teamId=$org" \

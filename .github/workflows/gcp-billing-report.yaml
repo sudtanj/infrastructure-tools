@@ -69,7 +69,6 @@ jobs:
           echo "::add-mask::${GCP_SERVICE_ACCOUNT}"
           echo "::add-mask::${GCP_WORKLOAD_IDENTITY_PROVIDER}"
           [ -z "${GCP_BILLING_EXPORT_TABLE:-}" ] || echo "::add-mask::${GCP_BILLING_EXPORT_TABLE}"
-          echo "[+] required secrets are set"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -94,7 +93,6 @@ jobs:
 
           TABLE="$(printf '%s' "${GCP_BILLING_EXPORT_TABLE:-}" | tr -d '[:space:]' | tr ':' '.')"
           if [ -z "$TABLE" ]; then
-            echo "[*] GCP_BILLING_EXPORT_TABLE not set, searching the project's datasets"
             if ! bq --headless --format=json ls --max_results=1000 "${GCP_PROJECT_ID}:" >"${RUNNER_TEMP}/ds.json" 2>"${RUNNER_TEMP}/ds.err"; then
               echo "::error::Listing BigQuery datasets failed:"; bqe "${RUNNER_TEMP}/ds.err"; bqe "${RUNNER_TEMP}/ds.json"; exit 1
             fi
@@ -109,7 +107,6 @@ jobs:
               exit 0
             fi
             echo "::add-mask::${TABLE}"
-            echo "[+] found the billing export table"
           fi
           if ! [[ "$TABLE" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$ ]]; then
             echo "::error::GCP_BILLING_EXPORT_TABLE must look like project.dataset.table"
@@ -158,7 +155,6 @@ jobs:
           section "Enabled paid APIs" services list --enabled \
             --filter='config.name~^(compute|run|storage|sqladmin|container|cloudfunctions|aiplatform|bigquery)\.' \
             --format='value(config.title)'
-          echo "[+] resource list built"
 
       - name: Build summary
         if: steps.table.outputs.name != ''
@@ -274,7 +270,6 @@ jobs:
             | join("\n")
             | if length > 4000 then .[:3980] + "\n… (truncated)" else . end
           ' "${RUNNER_TEMP}/billing.json" > "${RUNNER_TEMP}/billing.txt"
-          echo "[+] summary built ($(jq -r '.[0].n_rows' "${RUNNER_TEMP}/billing.json") billing rows this month)"
 
       - name: Send to Telegram
         env:
@@ -287,4 +282,3 @@ jobs:
             --data-urlencode "text@${RUNNER_TEMP}/billing.txt" \
             -d "disable_web_page_preview=true" \
             || { echo "::error::Telegram sendMessage failed"; exit 1; }
-          echo "[+] Telegram summary sent"

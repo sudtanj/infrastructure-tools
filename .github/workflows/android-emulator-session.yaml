@@ -141,7 +141,7 @@ jobs:
 
       - name: Enable KVM
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
@@ -165,10 +165,8 @@ jobs:
           set -euo pipefail
           names="$(cat /tmp/state-assets.txt)"
           id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
-          if [ -z "$id" ]; then
-            echo "No saved state; starting clean."
-            exit 0
-          fi
+          # No saved state: start clean.
+          if [ -z "$id" ]; then exit 0; fi
           mkdir -p /tmp/state ~/.android/avd
           cd /tmp/state
           # Downloads of several GB sometimes break off (HTTP/2 stream errors).
@@ -183,7 +181,6 @@ jobs:
             | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
             | tar -x --zstd -C ~/.android/avd
           rm -rf /tmp/state
-          echo "Saved state restored."
 
       # The emulator hands its host key to Android only on a cold boot. Runs
       # cold boot now (-no-snapshot), but a fixed key keeps adb authorized if
@@ -197,7 +194,6 @@ jobs:
             openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/adbkey.enc \
               | tar -x -C ~/.android
             rm /tmp/adbkey.enc
-            echo "adb key restored."
           else
             "$ANDROID_HOME/platform-tools/adb" keygen ~/.android/adbkey >/dev/null
             tar -C ~/.android -c adbkey adbkey.pub \
@@ -207,7 +203,6 @@ jobs:
             # A saved snapshot trusts an older key; cold boot so Android is
             # handed this one. App data and approved clients are kept.
             rm -rf ~/.android/avd/session.avd/snapshots
-            echo "New adb key generated; cold booting this once."
           fi
           chmod 600 ~/.android/adbkey
 
@@ -222,17 +217,16 @@ jobs:
             php8.3-fpm.service mysql.service postgresql.service mono-xsp4.service \
             ModemManager.service udisks2.service multipathd.socket multipathd.service; do
             if systemctl is-active --quiet "$unit"; then
-              sudo systemctl stop "$unit" && echo "Stopped $unit." || true
+              sudo systemctl stop "$unit" >/dev/null 2>&1 || true
             fi
           done
-          free -m
 
       - name: Start virtual display and VNC
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
+          sudo apt-get update -qq >/dev/null
           # The windowed emulator (unlike -no-window) links PulseAudio and Qt's
           # X11 plugins; without them qemu exits at once and adb times out.
           sudo apt-get install -y -qq xvfb x11vnc xdotool x11-utils \
@@ -244,7 +238,7 @@ jobs:
           mkdir -p ~/.vnc
           x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
           # localhost only; Tailscale serve is the sole way in.
-          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log
+          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log >/dev/null
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Join the tailnet
@@ -264,16 +258,19 @@ jobs:
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
             sudo systemctl start tailscaled
             rm /tmp/tailscaled.state.enc
-            echo "Tailscale identity restored."
-          else
-            echo "No saved Tailscale identity; joining as a new machine."
           fi
 
           # The auth key is only used when the restored identity is missing or
           # was deleted. Not ephemeral, so the machine and its IP outlive the run.
           secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
-          sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
-            --advertise-tags="$TAILSCALE_TAGS" --hostname=android-emulator
+          out="$(mktemp)"
+          if ! sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
+            --advertise-tags="$TAILSCALE_TAGS" --hostname=android-emulator >"$out" 2>&1; then
+            echo "::error::tailscale up failed."
+            tail -n 20 "$out"
+            exit 1
+          fi
+          rm -f "$out"
 
           # Saved straight away, so a cancelled run still keeps the identity.
           sudo cat /var/lib/tailscale/tailscaled.state \
@@ -283,7 +280,6 @@ jobs:
           # Tailnet only: neither port is published on the runner's public interface.
           sudo tailscale serve --bg --tcp 5555 tcp://localhost:5555 >/dev/null
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
-          echo "Joined the tailnet as android-emulator."
 
       # Before the exit node goes on, so the install is direct.
       - uses: actions/setup-node@v4
@@ -293,7 +289,7 @@ jobs:
 
       - name: Install the PineDrama script's dependency
         if: ${{ env.AUTOPLAY == 'true' }}
-        run: npm install --prefix .github/scripts/pinedrama --no-package-lock --no-audit --no-fund
+        run: npm install --prefix .github/scripts/pinedrama --no-package-lock --no-audit --no-fund --loglevel=error
 
       # `script` runs line by line, so the session logic lives in its own file.
       - uses: reactivecircus/android-emulator-runner@v2
@@ -368,16 +364,13 @@ jobs:
         run: |
           set -euo pipefail
           # Failed before launch (e.g. the exit node check): the AVD is as restored.
-          if [ ! -e /tmp/emulator-launched ]; then
-            echo "The emulator never started; nothing to save."
-            exit 0
-          fi
+          if [ ! -e /tmp/emulator-launched ]; then exit 0; fi
           id="${{ github.run_id }}"
           adb="$ANDROID_HOME/platform-tools/adb"
           if [ "${{ steps.emulator.outcome }}" = cancelled ] && pgrep -f qemu-system-x86_64 >/dev/null; then
             # Cancelled with the emulator up: flush the guest's disk, then stop it.
-            timeout 60 "$adb" -s emulator-5554 shell sync || true
-            timeout 30 "$adb" -s emulator-5554 emu kill || true
+            timeout 60 "$adb" -s emulator-5554 shell sync >/dev/null 2>&1 || true
+            timeout 30 "$adb" -s emulator-5554 emu kill >/dev/null 2>&1 || true
           fi
           # The disk images are complete only once qemu has exited.
           for _ in $(seq 1 90); do
@@ -411,7 +404,6 @@ jobs:
             | while read -r name; do
                 gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
               done
-          echo "State saved."
 
       # `down`, not `logout`: logout would expire the saved identity and the
       # next run would come back as a new machine with a new IP.

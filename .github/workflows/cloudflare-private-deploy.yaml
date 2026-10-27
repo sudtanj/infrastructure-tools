@@ -36,9 +36,9 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 #     Anyone who can push to this repo can change what gets deployed and
 #     exfiltrate that token. Keep push access to trusted people only, and
 #     scope the token to the minimum Workers/Pages/R2/KV resources it needs.
-#   * Build output is reduced to pass/fail with paths stripped, so private file
-#     names and source lines do not land in a public log. `wrangler deploy`
-#     output is NOT redacted, because the URL it prints is the point of the run.
+#   * Install, build and deploy output is captured; only a short tail with
+#     paths stripped is shown on failure, so private file names and source
+#     lines do not land in a public log. A successful deploy logs one line.
 #
 # SETUP
 #   secret CLOUDFLARE_API_TOKEN     required
@@ -207,22 +207,12 @@ jobs:
           PREV=""
           [ -f /tmp/cf-deploy-state.txt ] && PREV="$(cat /tmp/cf-deploy-state.txt)"
 
-          echo "Tracked:    $REPO@$REF"
-          echo "Latest:     ${RESP:0:12}"
-          echo "Last deploy: ${PREV:-<none>}"
-
           CHANGED="false"
           if [ "$RESP" != "$PREV" ]; then
             CHANGED="true"
-            echo "New commit detected."
-          else
-            echo "No new commit; nothing to deploy."
           fi
-
-          echo "Force input received: '${FORCE:-<empty>}'"
           if force_on; then
             CHANGED="true"
-            echo "force is ON; deploying regardless of the commit comparison."
           fi
 
           # Deliberately NOT written here. Recording the commit before the
@@ -307,7 +297,6 @@ jobs:
             base="$(cat /tmp/cf-deploy-state.txt)"
           fi
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "No comparable base commit; deploying every worker found."
             base=''
           fi
 
@@ -316,24 +305,12 @@ jobs:
           # diff against the deployed commit, find nothing, and deploy
           # nothing -- the opposite of what force asks for.
           if force_on; then
-            echo "force is ON; ignoring the diff and selecting every worker."
             base=''
           fi
 
           changed=()
           if [ -n "$base" ]; then
             mapfile -t changed < <(git diff --name-only "$base" "$TARGET_SHA")
-          fi
-
-          echo "Comparing ${base:-<nothing>}..${TARGET_SHA:0:12} (${#changed[@]} changed file(s)):"
-          if [ ${#changed[@]} -eq 0 ]; then
-            if [ -n "$base" ]; then
-              echo "  (none; with a baseline this means nothing to deploy)"
-            else
-              echo "  (none, no baseline: selecting every worker)"
-            fi
-          else
-            printf '  %s\n' "${changed[@]}"
           fi
 
           # Two kinds of target, collected into one list. A wrangler config
@@ -398,11 +375,9 @@ jobs:
           for public_dir in ${publics[@]+"${publics[@]}"}; do
             dir="$(dirname "${public_dir#./}")"
             if has_candidate "$dir"; then
-              echo "Skipping ${dir}/public: it is the assets directory of the project in that folder."
               continue
             fi
             candidates+=("$dir"$'\t')
-            echo "Found static site ${dir}/public; treating it as a Pages project."
           done
 
           projects=()
@@ -445,8 +420,8 @@ jobs:
               [ -f "$dir/package-lock.json" ] && lock="$dir/package-lock.json"
             fi
 
-            # Classify, and record HOW it was decided so a wrong type shows up
-            # in this log instead of silently deploying to the wrong product.
+            # Classify, and record HOW it was decided (`source`, shown in the
+            # deploy job's step summary) so a wrong type is easy to spot.
             #
             # A wrangler config is AUTHORITATIVE: if the folder has one and it
             # does not set pages_build_output_dir, it is a Worker, even if a
@@ -481,12 +456,7 @@ jobs:
               # failed the run on "Missing entry-point to Worker script".
               if grep -Eq '(^[[:space:]]*main[[:space:]]*=|^[[:space:]]*\[assets\]|^[[:space:]]*functions[[:space:]]*=|"(main|assets|functions)"[[:space:]]*:)' "$config"; then
                 also_worker=1
-                echo "  '$dir' declares pages_build_output_dir AND a Worker entrypoint; deploying both."
               fi
-            fi
-            if [ "$type" = pages ] && [ "$source" = inferred ]; then
-              echo "  NOTE: '$dir' was inferred to be Pages from its files alone."
-              echo "  Add a wrangler.toml to it with pages_build_output_dir = \"./public\" to declare this explicitly and pick the project name there."
             fi
             projects+=("$dir"$'\t'"$lock"$'\t'"$reason"$'\t'"$type"$'\t'"$source")
             if [ "$also_worker" -eq 1 ]; then
@@ -497,34 +467,15 @@ jobs:
             fi
           done
 
-          echo "Deploying ${#projects[@]} project(s):"
           if [ ${#projects[@]} -eq 0 ]; then
-            echo "  (none)"
             # A forced run that finds nothing is a misconfiguration, not a
             # reason to skip the deploy job quietly: there is no wrangler
             # config in the checkout, which almost always means the wrong repo
             # or the wrong branch.
             if force_on; then
-              echo "::error::force was requested but no Cloudflare Worker or Pages project was found at ${TARGET_SHA:0:12}."
-              echo "Check BUILD_REF points at the branch you meant, and that each folder under $PROJECTS_DIR contains a wrangler.toml, wrangler.json or wrangler.jsonc (Workers) -- or a _headers or _routes.json file (Pages)."
+              echo "::error::force was requested but no Worker or Pages project was found under $PROJECTS_DIR; check BUILD_REF."
               exit 1
             fi
-          else
-            for project in "${projects[@]}"; do
-              # Split on TAB only; a field may legitimately be empty.
-              dir="${project%%$'\t'*}"
-              rest="${project#*$'\t'}"
-              lock="${rest%%$'\t'*}"
-              rest="${rest#*$'\t'}"
-              reason="${rest%%$'\t'*}"
-              rest="${rest#*$'\t'}"
-              type="${rest%%$'\t'*}"
-              source="${rest#*$'\t'}"
-              echo "  - $dir (type: $type via $source, reason: $reason, lockfile: ${lock:-none})"
-            done
-          fi
-          if [ ${#skipped[@]} -gt 0 ]; then
-            echo "Unchanged, skipping: ${skipped[*]}"
           fi
 
           # `dir`, `lock`, `reason` and `type` are all read out of the private
@@ -693,7 +644,6 @@ jobs:
           fi
 
           if [ "$PROJECT_TYPE" != "pages" ]; then
-            echo "Target type: worker (wrangler deploy)."
             exit 0
           fi
 
@@ -707,8 +657,7 @@ jobs:
           fi
           name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
           if [ -z "$name" ]; then
-            echo "::error::Could not derive a Cloudflare Pages project name for '${PROJECT_DIR}'."
-            echo "Set a top-level 'name' in the project's wrangler config, or set secret CLOUDFLARE_PAGES_PREFIX."
+            echo "::error::Could not derive a Pages project name for '${PROJECT_DIR}'; set 'name' in its wrangler config or secret CLOUDFLARE_PAGES_PREFIX."
             exit 1
           fi
 
@@ -739,11 +688,6 @@ jobs:
               exit 1 ;;
           esac
 
-          echo "Target type:  pages"
-          echo "Pages name:   $name"
-          echo "Build output: $out"
-          echo "Branch:       ${BUILD_REF:-main}"
-
           {
             echo "app=$name"
             echo "out=$out"
@@ -771,19 +715,31 @@ jobs:
           restore-keys: |
             wrangler-${{ matrix.project.dir }}-${{ matrix.project.type }}-${{ runner.os }}-${{ runner.arch }}-
 
+      # Output is captured; only a short tail with paths stripped is shown on failure.
       - name: Install dependencies
         working-directory: private/${{ matrix.project.dir }}
         shell: bash
         run: |
           set -euo pipefail
+          run_quiet() {
+            local label="$1"; shift
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              rm -f "$log"; return 0
+            fi
+            echo "::error::$label failed (output suppressed to protect private source)"
+            tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"
+            return 1
+          }
           if [ ! -f package.json ]; then
-            echo "No package.json; skipping install."
+            :
           elif [ -f node_modules/.package-lock.json ] && [ node_modules/.package-lock.json -nt package-lock.json ]; then
-            echo "node_modules restored from cache; skipping install."
+            :
           elif [ -f package-lock.json ]; then
-            npm ci --prefer-offline --no-audit --no-fund
+            run_quiet "npm ci" npm ci --prefer-offline --no-audit --no-fund
           else
-            npm install --prefer-offline --no-audit --no-fund
+            run_quiet "npm install" npm install --prefer-offline --no-audit --no-fund
           fi
 
       # Build output names private files and dependencies. This repo is PUBLIC,
@@ -798,13 +754,10 @@ jobs:
             local label="$1"; shift
             local log; log="$(mktemp)"
             if "$@" >"$log" 2>&1; then
-              echo "$label: OK"
               rm -f "$log"; return 0
             fi
             echo "::error::$label failed (output suppressed to protect private source)"
-            echo "--- last lines of $label (paths stripped to basenames) ---"
             tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
-            echo "--- end ---"
             rm -f "$log"
             return 1
           }
@@ -812,8 +765,6 @@ jobs:
           if [ -f package.json ]; then
             if grep -q '"build"[[:space:]]*:' package.json; then
               run_quiet "build" npm run build
-            else
-              echo "No 'build' script; nothing to do."
             fi
           elif [ -n "${{ steps.pages.outputs.app }}" ]; then
             # A Pages project with no package.json is a plain static site: the
@@ -822,10 +773,9 @@ jobs:
             # bundle, so it errors and would fail the build step for a project
             # that is perfectly fine. The directory check below is the real
             # validation.
-            echo "No package.json; this is a static Pages site, nothing to build."
+            :
           else
-            echo "No package.json; running wrangler dry-run directly."
-            npx wrangler deploy --dry-run
+            run_quiet "wrangler dry-run" npx wrangler deploy --dry-run
           fi
 
           # A Pages deploy uploads a directory of files, so an empty or missing
@@ -841,15 +791,27 @@ jobs:
               echo "::error::Build output directory '$out' is empty."
               exit 1
             fi
-            echo "Pages output ready: $out ($(find "$out" -type f | wc -l) file(s))."
           fi
 
-      # NOT redacted: the URL wrangler prints is the useful output here.
+      # Output is captured: on success one "Deployed." line, on failure a
+      # short tail with paths stripped.
       - name: Deploy
         working-directory: private/${{ matrix.project.dir }}
         shell: bash
         run: |
           set -euo pipefail
+
+          deploy_quiet() {
+            local log; log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "Deployed."
+              rm -f "$log"; return 0
+            fi
+            echo "::error::deploy failed"
+            tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            rm -f "$log"
+            return 1
+          }
 
           if [ -n "${{ steps.pages.outputs.app }}" ]; then
             # Pages: create the project on first use, so a brand new site is
@@ -874,11 +836,11 @@ jobs:
                 } catch (e) { process.exit(2); }
               });
             ' "${{ steps.pages.outputs.app }}"; then
-              echo "Pages project already exists."
+              :
             else
               # The list check is a best effort: if it errored or returned a
               # shape we do not recognise, this runs and the API decides.
-              echo "::warning::Cloudflare Pages project '${{ steps.pages.outputs.app }}' not found (or not listable); attempting to create it with production branch '${{ steps.pages.outputs.branch }}'."
+              echo "::warning::Pages project not found (or not listable); creating it."
               if ! create_out="$(npx wrangler pages project create "${{ steps.pages.outputs.app }}" \
                 --production-branch "${{ steps.pages.outputs.branch }}" 2>&1)"; then
                 # "Already exists" is success, not a failure: it means the
@@ -890,9 +852,10 @@ jobs:
                   # Deliberately NOT echoing wrangler's output here -- it is a
                   # red ERROR block for a run that is about to succeed, and
                   # printing it makes a working deploy look broken.
-                  echo "The Pages project already exists; updating it with this deployment."
+                  :
                 else
-                  printf '%s\n' "$create_out"
+                  echo "::error::Could not create the Pages project"
+                  printf '%s\n' "$create_out" | tail -20
                   exit 1
                 fi
               fi
@@ -901,7 +864,7 @@ jobs:
             # --commit-dirty=true is required, not cosmetic: the build output
             # and node_modules are untracked, so wrangler's own clean-tree
             # check would abort every Pages deploy in CI.
-            npx wrangler pages deploy "${{ steps.pages.outputs.out }}" \
+            deploy_quiet npx wrangler pages deploy "${{ steps.pages.outputs.out }}" \
               --project-name "${{ steps.pages.outputs.app }}" \
               --branch "${{ steps.pages.outputs.branch }}" \
               --commit-hash "${{ needs.poll.outputs.sha }}" \
@@ -910,12 +873,11 @@ jobs:
           fi
 
           if [ ! -f package.json ]; then
-            npx wrangler deploy
+            deploy_quiet npx wrangler deploy
           elif node -e 'process.exit(require("./package.json").scripts?.deploy ? 0 : 1)' 2>/dev/null; then
-            npm run deploy
+            deploy_quiet npm run deploy
           else
-            echo "No deploy script; falling back to wrangler deploy."
-            npx wrangler deploy
+            deploy_quiet npx wrangler deploy
           fi
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -969,13 +931,11 @@ jobs:
           # deploy job for no visible reason. `count` is a bare integer and
           # cannot be dropped, so the mismatch is detectable.
           if [ -n "${DETECT_COUNT:-}" ] && [ "${DETECT_COUNT}" != "0" ] && [ -z "${DETECT_PROJECTS:-}" ]; then
-            echo "::error::GitHub discarded the 'projects' job output: it matched a repository secret, so the deploy job received an empty matrix."
-            echo "Detect found ${DETECT_COUNT} project(s). A folder path here matches a secret value; rename that folder, or move the configuration out of \`secrets\` and into a file inside the repository."
+            echo "::error::GitHub dropped the 'projects' output (${DETECT_COUNT} found): a folder path matches a secret value; rename that folder."
             exit 1
           fi
 
           printf '%s' "$DEPLOYED_SHA" > /tmp/cf-deploy-state.txt
-          echo "Recorded $DEPLOYED_SHA as the last deployed commit."
 
       # The run id is in the key because cache entries are immutable: this
       # state has to be rewritten after every clean deploy.

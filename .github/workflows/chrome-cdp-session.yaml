@@ -162,36 +162,45 @@ jobs:
           set -euo pipefail
           names="$(cat /tmp/state-assets.txt)"
           id="$(printf '%s\n' "$names" | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1)"
-          if [ -z "$id" ]; then
-            echo "No saved profile; starting clean."
-            exit 0
-          fi
+          # No saved set: start clean
+          [ -n "$id" ] || exit 0
           mkdir -p /tmp/state "$PROFILE_DIR"
           cd /tmp/state
-          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*" >/dev/null
           sha256sum -c --quiet "state-${id}.sha256"
           cat state-"${id}".part-* \
             | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
             | tar -x --zstd -C "$PROFILE_DIR"
           rm -rf /tmp/state
-          echo "Saved profile restored."
 
       - name: Install latest Chrome, virtual display and VNC
-        # Every command is bounded, and each phase is named, so a hang fails fast and says where.
+        # Every command is bounded, and a failure names its phase, so a hang fails fast and says where.
         timeout-minutes: 25
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -euo pipefail
+          phase=""
+          trap 'echo "::error::Failed while ${phase}."' ERR
+          # Runs a command with its output in a file; prints a short tail only if it fails,
+          # and keeps its exit code.
+          quiet() {
+            local out rc=0
+            out=$(mktemp)
+            "$@" >"$out" 2>&1 || rc=$?
+            [ "$rc" -eq 0 ] || tail -n 20 "$out"
+            rm -f "$out"
+            return "$rc"
+          }
           # The runner image ships a Chrome that can be weeks old; take today's stable.
-          echo "Downloading Chrome."
+          phase="downloading Chrome"
           curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
           # and dpkg fsyncs each file. Neither matters on a throwaway runner.
           sudo rm -f /var/lib/man-db/auto-update
           echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
-          echo "Updating package lists."
-          sudo timeout -k 15 300 apt-get update -qq
+          phase="updating package lists"
+          quiet sudo timeout -k 15 300 apt-get update -qq
           # Mesa for a real GL renderer, PulseAudio for an audio device, and the
           # fonts an ordinary desktop has (a bare runner has very few).
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
@@ -199,27 +208,26 @@ jobs:
           # each try, and retry after repairing whatever a killed dpkg left behind.
           apt_install() {
             for attempt in 1 2 3; do
-              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
+              quiet sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
                 -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" && return 0
               echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
               sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
             done
             return 1
           }
-          echo "Installing Chrome and the display packages."
+          phase="installing Chrome and the display packages"
           apt_install /tmp/chrome.deb xvfb x11vnc openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
           # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
           # The fonts package downloads from SourceForge and can hang; it is optional.
           # -k: apt-get ignores SIGTERM while dpkg runs, so follow up with SIGKILL.
-          echo "Installing optional fonts."
+          phase="installing optional fonts"
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           timeout 120 fc-cache -f >/dev/null || true
           rm /tmp/chrome.deb
-          google-chrome --version
           # GLX on the display lets Chrome use Mesa instead of SwiftShader.
-          echo "Starting the display and VNC."
+          phase="starting the display and VNC"
           setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
           sleep 2
           # A null sink: pages see a normal speaker output and AudioContext works.
@@ -241,20 +249,21 @@ jobs:
           TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
         run: |
           set -euo pipefail
-          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
+          # The installer's output goes to a file; its tail is printed only if it fails.
+          out=$(mktemp)
+          if ! { curl -fsSL https://tailscale.com/install.sh | sh; } >"$out" 2>&1; then
+            echo "::error::Tailscale install failed."; tail -n 20 "$out"; exit 1
+          fi
 
           # Same machine identity as last run means the same tailnet IP.
           if grep -qx 'tailscaled.state.enc' /tmp/state-assets.txt; then
-            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p tailscaled.state.enc -D /tmp
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p tailscaled.state.enc -D /tmp >/dev/null
             sudo systemctl stop tailscaled
             openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/tailscaled.state.enc \
               | sudo tee /var/lib/tailscale/tailscaled.state >/dev/null
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
             sudo systemctl start tailscaled
             rm /tmp/tailscaled.state.enc
-            echo "Tailscale identity restored."
-          else
-            echo "No saved Tailscale identity; joining as a new machine."
           fi
 
           # The auth key is only used when the restored identity is missing or
@@ -266,11 +275,12 @@ jobs:
           # through; bound each try and retry.
           for attempt in 1 2 3; do
             if sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
-              --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp --accept-routes --timeout=90s; then
+              --advertise-tags="$TAILSCALE_TAGS" --hostname=chrome-cdp --accept-routes --timeout=90s >"$out" 2>&1; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
               echo "::error::Tailscale did not reach Running after 3 tries."
+              tail -n 20 "$out"
               exit 1
             fi
             echo "::warning::tailscale up did not finish (try ${attempt}); retrying."
@@ -280,12 +290,12 @@ jobs:
           # Saved straight away, so a cancelled run still keeps the identity.
           sudo cat /var/lib/tailscale/tailscaled.state \
             | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -out /tmp/tailscaled.state.enc
-          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/tailscaled.state.enc --clobber
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/tailscaled.state.enc --clobber >/dev/null
           rm /tmp/tailscaled.state.enc
           # Tailnet only: neither port is published on the runner's public interface.
           sudo tailscale serve --bg --tcp 9222 tcp://localhost:9222 >/dev/null
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
-          echo "Joined the tailnet as chrome-cdp."
+          rm -f "$out"
 
       - name: Run Chrome until stopped
         id: chrome
@@ -318,8 +328,9 @@ jobs:
             before="$(curl -fsS --max-time 15 https://api.ipify.org || true)"
             [ -n "$before" ] && echo "::add-mask::${before}"
             # LAN access keeps the runner's own localhost/VNC/CDP plumbing working.
-            if ! sudo tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access; then
+            if ! out="$(sudo tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access 2>&1)"; then
               echo "::error title=Exit node::Could not use the exit node; does it advertise 0.0.0.0/0 and do the ACLs allow it?"
+              printf '%s\n' "$out" | tail -n 5
               exit 1
             fi
             sleep 3
@@ -334,7 +345,6 @@ jobs:
               echo "::error title=Exit node::Public IP did not change; traffic is not going through the exit node."
               exit 1
             fi
-            echo "Browser traffic goes through the exit node."
           fi
 
           # Match the clock to wherever the browser appears to be. Not printed:
@@ -394,8 +404,6 @@ jobs:
           }
 
           start_chrome
-          curl -fs http://127.0.0.1:9222/json/version | jq -r '.Browser'
-          echo "Chrome ready. Runs until the browser is closed, or nothing is connected for ${idle_min} minutes."
           # A stop tab from the last session can come back with the restored tabs
           # (closing it right before exit does not always reach the saved session).
           sleep 5
@@ -409,11 +417,12 @@ jobs:
             [ "$(ss -Htn state established '( sport = :5900 or sport = :9222 )' | wc -l)" -gt 0 ]
           }
 
+          # Printed once at the end: why the session stopped.
+          reason=""
           last_active=$SECONDS
-          was_active=false
           while :; do
             if curl -fs http://127.0.0.1:9222/json/list 2>/dev/null | jq -e 'any(.[]; .url | endswith("#stop-session"))' >/dev/null; then
-              echo "Stop tab found."
+              reason="stop tab found"
               # Close it so the restored session does not stop the next run.
               curl -fs http://127.0.0.1:9222/json/list | jq -r '.[] | select(.url | endswith("#stop-session")) | .id' \
                 | while read -r tid; do curl -fs "http://127.0.0.1:9222/json/close/${tid}" >/dev/null || true; done
@@ -427,41 +436,35 @@ jobs:
             if ! kill -0 "$chrome_pid" 2>/dev/null; then
               exit_type="$(jq -r '.profile.exit_type // ""' "$PROFILE_DIR/Default/Preferences" 2>/dev/null || true)"
               if [ "$exit_type" = Crashed ]; then
-                echo "Chrome crashed; restarting."
+                echo "::warning::Chrome crashed; restarting."
                 start_chrome
               else
-                echo "Browser closed."
+                reason="browser closed"
                 break
               fi
             fi
 
             if active; then
-              [ "$was_active" = true ] || echo "Client connected."
-              was_active=true
               last_active=$SECONDS
-            else
-              [ "$was_active" = false ] || echo "No clients connected; stopping after ${idle_min} idle minutes."
-              was_active=false
-              if [ $((SECONDS - last_active)) -ge $((idle_min * 60)) ]; then
-                echo "Nothing connected for ${idle_min} minutes."
-                break
-              fi
+            elif [ $((SECONDS - last_active)) -ge $((idle_min * 60)) ]; then
+              reason="nothing connected for ${idle_min} minutes"
+              break
             fi
 
             # GitHub kills the job at 360 minutes. Stop in time to save, and let
             # a follow-up run take over if someone is still using the browser.
             if [ "$SECONDS" -ge $((cap_min * 60)) ]; then
-              echo "Reached the ${cap_min} minute limit of one run."
+              reason="reached the ${cap_min} minute limit of one run"
               if [ $((SECONDS - last_active)) -lt $((idle_min * 60)) ]; then
                 echo "continue=true" >> "$GITHUB_OUTPUT"
-                echo "Still in use; a new run continues after this one saves."
+                reason="${reason}; still in use, a new run continues after this one saves"
               fi
               break
             fi
             sleep 10
           done
 
-          echo "Session over."
+          echo "Session over: ${reason}."
 
       # Runs on cancel too, so the Cancel button saves like the stop tab does.
       # Chrome was started with setsid, so it outlives the cancelled step.
@@ -480,7 +483,6 @@ jobs:
             done
           fi
           pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
-          echo "Chrome stopped."
           # Upload the profile straight from the runner, not through the home link.
           sudo tailscale set --exit-node= >/dev/null 2>&1 || true
 
@@ -522,8 +524,8 @@ jobs:
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1 || \
             gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Chrome CDP state" \
               --notes "Encrypted Chrome profile saved by infrastructure-tools chrome-cdp-session." >/dev/null
-          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
-          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-* >/dev/null
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256" >/dev/null
           # Old sets go only after the new manifest is up, so a failed upload
           # never loses the last good save. tailscaled.state.enc is kept.
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
@@ -532,7 +534,6 @@ jobs:
             | while read -r name; do
                 gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
               done
-          echo "Profile saved."
 
       # Same inputs, so the next run picks up where this one left off. The
       # concurrency group holds it until this run has finished saving.
@@ -546,12 +547,16 @@ jobs:
           LOCALE: ${{ inputs.locale }}
         run: |
           set -euo pipefail
-          gh workflow run chrome-cdp-session.yaml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+          # gh's own "Created workflow_dispatch event" lines are only printed if it fails.
+          out=$(mktemp)
+          if ! gh workflow run chrome-cdp-session.yaml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
             -f idle_minutes="$IDLE_MINUTES" \
             -f fresh=false \
             -f use_exit_node="$USE_EXIT_NODE" \
             -f timezone="$TIMEZONE" \
-            -f locale="$LOCALE"
+            -f locale="$LOCALE" >"$out" 2>&1; then
+            echo "::error::Could not dispatch the follow-up run."; tail -n 20 "$out"; exit 1
+          fi
           echo "Follow-up run dispatched."
 
       # `down`, not `logout`: logout would expire the saved identity and the

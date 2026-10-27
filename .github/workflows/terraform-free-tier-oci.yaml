@@ -46,7 +46,12 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          terraform init -input=false
+          out=$(mktemp)
+          if ! terraform init -input=false -no-color >"$out" 2>&1; then
+            echo "::error::terraform init failed"
+            tail -n 20 "$out"
+            exit 1
+          fi
 
       - name: Check remote state
         id: guard
@@ -55,10 +60,9 @@ jobs:
           INSTANCE_ADDR="oci_core_instance.free_tier_instance"
           if terraform state list 2>/dev/null | grep -qx "$INSTANCE_ADDR"; then
             echo "already_exists=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Instance already in state. Nothing to do."
+            echo "Instance already exists."
           else
             echo "already_exists=false" >> "$GITHUB_OUTPUT"
-            echo "No instance in state. Proceeding with single apply attempt."
           fi
 
       - name: Terraform Apply (single attempt)
@@ -69,7 +73,6 @@ jobs:
           set -uo pipefail
 
           # ap-singapore-1 has a single availability domain → always index 0
-          echo "Using availability_domain_index=0"
 
           set +e
           terraform apply \
@@ -83,25 +86,23 @@ jobs:
           set -e
 
           if [ "$RC" -eq 0 ]; then
-            echo "✅ Apply complete."
-            grep -E 'Apply complete!|Resources: [0-9]+ added' /tmp/apply.log || true
+            echo "Apply complete."
             exit 0
           fi
 
           if grep -qi "prevent_destroy\|cannot be destroyed" /tmp/apply.log; then
-            echo "🛑 prevent_destroy blocked a destroy."
-            grep -A 20 'Error:' /tmp/apply.log || tail -30 /tmp/apply.log
+            echo "::error::prevent_destroy blocked a destroy"
+            { grep -A 20 'Error:' /tmp/apply.log || tail -20 /tmp/apply.log; } | head -20
             exit 1
           fi
 
           if grep -qiE "out of (host )?capacity|500-InternalError|LimitExceeded|TooManyRequests" /tmp/apply.log; then
-            echo "⚠️  No capacity this run. Next attempt at next schedule."
-            grep -A 3 'Error:' /tmp/apply.log | head -10 || true
+            echo "No capacity this run."
             exit 0
           fi
 
-          echo "❌ Non-retryable error:"
-          grep -A 20 'Error:' /tmp/apply.log || tail -40 /tmp/apply.log
+          echo "::error::terraform apply failed (non-retryable)"
+          { grep -A 20 'Error:' /tmp/apply.log || tail -20 /tmp/apply.log; } | head -20
           exit 1
 
       - name: Summary

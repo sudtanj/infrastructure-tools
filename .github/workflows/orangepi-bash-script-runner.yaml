@@ -90,7 +90,6 @@ jobs:
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
           fi
-          echo "[*] requested: ${REQUESTED:-all} -> ${#files[@]} script(s)"
           if [ "${#files[@]}" -eq 0 ]; then
             echo "scripts=[]" >> "$GITHUB_OUTPUT"
             exit 0
@@ -98,7 +97,6 @@ jobs:
           for f in "${files[@]}"; do
             [ -f "$f" ] || { echo "::error::Missing script: $f"; exit 1; }
           done
-          printf '[*] selected: %s\n' "${files[@]}"
           json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
           echo "scripts=$json" >> "$GITHUB_OUTPUT"
 
@@ -125,17 +123,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run context (safe)
-        env:
-          SCRIPT_PATH: ${{ matrix.script }}
-          DEBUG_LOGS: ${{ inputs.debug }}
-        run: |
-          echo "workflow : ${GITHUB_WORKFLOW}"
-          echo "script   : ${SCRIPT_PATH}"
-          echo "ref      : ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}"
-          echo "run      : #${GITHUB_RUN_NUMBER}, attempt ${GITHUB_RUN_ATTEMPT}"
-          echo "debug    : ${DEBUG_LOGS:-true}"
-
       - name: Verify required config
         run: |
           set -euo pipefail
@@ -146,17 +133,13 @@ jobs:
           # The non-expiring OAuth client secret (which needs tags) wins; the auth key is the fallback
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
             [ -n "${TAILSCALE_TAGS:-}" ] || missing+=("TAILSCALE_TAGS")
-            echo "[*] tailscale credential: OAuth client"
-          elif [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
-            echo "[*] tailscale credential: auth key"
-          else
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
             missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing secrets: ${missing[*]}"
             exit 1
           fi
-          echo "[+] required secrets are set"
 
       - name: Mask sensitive values
         run: |
@@ -200,7 +183,8 @@ jobs:
             print $l;
           }
           PERL
-          perl -c "${RUNNER_TEMP}/sanitize.pl"
+          # perl -c reports "syntax OK" on success: only print its output when the check fails
+          out=$(perl -c "${RUNNER_TEMP}/sanitize.pl" 2>&1) || { echo "::error::sanitize.pl does not compile"; printf '%s\n' "$out" | tail -n 20; exit 1; }
 
       - name: Join the tailnet
         run: |
@@ -216,7 +200,6 @@ jobs:
             sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
               --hostname="$HOST" --accept-routes >/dev/null 2>&1
           fi
-          echo "[+] joined the tailnet"
 
       - name: Configure SSH
         run: |
@@ -236,7 +219,6 @@ jobs:
             PubkeyAuthentication no
           EOF
           chmod 600 ~/.ssh/config
-          echo "[+] ssh configured"
 
       - name: Preflight checks (safe)
         run: |
@@ -251,12 +233,9 @@ jobs:
             if timeout 5 bash -c "exec 3<>/dev/tcp/${OPI_TAILSCALE_IP}/${PORT}" 2>/dev/null; then OK=1; break; fi
             sleep 5
           done
-          if [ "$OK" = "1" ]; then
-            echo "[+] device reachable over tailscale"
-          else
+          if [ "$OK" != "1" ]; then
             ROUTES=$(tailscale status --json 2>/dev/null | jq '[.Peer[]? | select(.PrimaryRoutes != null) | .PrimaryRoutes[]] | length' 2>/dev/null)
-            echo "[*] subnet routes visible to the runner: ${ROUTES:-0}"
-            echo "::error::device not reachable on its SSH port over tailscale (offline, subnet route not approved, or an ACL blocks the runner's tags)"
+            echo "::error::device not reachable on its SSH port over tailscale (offline, subnet route not approved, or an ACL blocks the runner's tags; subnet routes visible: ${ROUTES:-0})"
             exit 1
           fi
           OUT=$(SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${OPI_TAILSCALE_IP}" \
@@ -267,7 +246,6 @@ jobs:
             echo "::error::ssh login failed (exit ${RC}): check OPI_SSH_USER / OPI_SSH_PASSWORD and that sshd allows passwords"
             exit 1
           fi
-          echo "[*] $(echo "$OUT" | tail -n1 | perl "$SAN")"
 
       - name: Run script via Tailscale SSH
         env:
@@ -418,7 +396,6 @@ jobs:
             EARNAPP_UUID="sdk-node-$(printf 'earnapp-opi:%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | sha256sum | cut -c1-32)"
             echo "::add-mask::${EARNAPP_UUID}"
             export EARNAPP_UUID
-            echo "[*] EARNAPP_UUID not set: using the ID derived from the Tailscale OAuth secret"
           fi
 
           # `export KEY='value'` for every set env var starting with $1. An unset secret
@@ -477,16 +454,7 @@ jobs:
             fi
           } > "$PAYLOAD"
 
-          NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
           SHA=$(sha256sum "${SCRIPT_PATH}" | cut -c1-12)
-          echo "::group::Run context (safe)"
-          {
-            echo "[*] script: ${SCRIPT_PATH} ($(wc -l < "${SCRIPT_PATH}") lines, sha256 ${SHA})"
-            echo "[*] env forwarded to the device: $(echo "$NAMES" | wc -w) variables (values are never printed)"
-            echo "[*] variable names: ${NAMES}"
-            echo "[*] debug logs: ${DEBUG_LOGS}"
-          } | perl "$SAN"
-          echo "::endgroup::"
 
           # The device's host name = its Tailscale name unless OPI_TS_HOSTNAME says otherwise; used
           # to find the node again if the session drops
@@ -513,7 +481,6 @@ jobs:
             TRIES=0
             while [ "$RC" -eq 255 ] && [ "$TRIES" -lt 6 ]; do
               TRIES=$((TRIES + 1))
-              echo "[*] SSH session dropped (expected while the container is replaced); waiting for the device to come back (attempt ${TRIES}/6)"
               TARGET=""
               for _ in $(seq 1 36); do
                 # Plus wherever the node is online now, found by name in the runner's peer list
@@ -529,7 +496,6 @@ jobs:
                 echo "::error::the device did not come back on the tailnet within 6 minutes"
                 break
               fi
-              echo "[+] device reachable again over tailscale; following the deployment"
               SSHPASS="$OPI_SSH_PASSWORD" sshpass -e ssh -p "$PORT" "${OPI_SSH_USER}@${TARGET}" 'bash -s' \
                 < "${PAYLOAD}.attach" > "$LOG" 2>&1
               RC=$?
@@ -570,40 +536,31 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           }
 
+          # The script's output goes to the job summary only; the log gets its [!] lines as
+          # warnings, and a short sanitized tail when it fails.
           if [ "$RC" -eq 0 ]; then
-            echo "[*] script completed successfully in ${DUR}s"
             # The link-device URL holds the ID, so it goes to Telegram, never to this public log
             if [ "${SCRIPT_PATH##*/}" = "init-earnapp.sh" ]; then
               if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
                 TEXT="EarnApp is running on the Orange Pi. If this device isn't linked yet, open this once while logged in to EarnApp: https://earnapp.com/r/${EARNAPP_UUID}"
-                if curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                if ! curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
                     --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXT}" \
                     -d "disable_web_page_preview=true" 2>/dev/null; then
-                  echo "[+] EarnApp link-device URL sent to Telegram"
-                else
                   echo "::warning::could not send the EarnApp link-device URL to Telegram"
                 fi
               else
                 echo "::warning::TELEGRAM_TOKEN/TELEGRAM_CHAT_ID not set: no way to send the EarnApp link-device URL privately"
               fi
             fi
-            echo "::group::Script output (sanitized)"
-            show || true
-            echo "::endgroup::"
             { show | grep -a '^\[!\] ' | head -n 5 | while IFS= read -r w; do echo "::warning::${w#\[!\] }"; done; } || true
             summary "succeeded"
             exit 0
           fi
 
-          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s"
-          [ "$RC" -eq 255 ] && echo "[!] exit 255 = the SSH connection itself failed (not the script)."
-          echo "::group::Script output (sanitized)"
-          show || true
-          echo "::endgroup::"
-          # Raw tail is sanitized and limited to lines that look like errors, not arbitrary output
-          echo "---- diagnostic tail (sanitized) ----"
-          perl "$SAN" "$LOG" | grep -avE 'Permanently added|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' | tail -40 || true
-          echo "---- end ----"
+          HINT=""; [ "$RC" -eq 255 ] && HINT=": the SSH connection itself failed, not the script"
+          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s${HINT}"
+          # Short raw tail, sanitized, with SSH/key noise dropped
+          perl "$SAN" "$LOG" | grep -avE 'Permanently added|BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' | tail -n 20 || true
           summary "FAILED"
           exit "$RC"
 

@@ -60,7 +60,6 @@ jobs:
             exit 1
           fi
           echo "::add-mask::${OPI_TAILSCALE_IP}"
-          echo "[+] required secrets are set"
 
       - name: Join the tailnet
         run: |
@@ -76,7 +75,6 @@ jobs:
             sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
               --hostname="$HOST" --accept-routes >/dev/null 2>&1
           fi
-          echo "[+] joined the tailnet"
 
       - name: Check device
         id: probe
@@ -91,9 +89,7 @@ jobs:
             sleep 5
           done
           echo "online=${ONLINE}" >> "$GITHUB_OUTPUT"
-          if [ "$ONLINE" = "1" ]; then
-            echo "[+] device online (attempt ${attempt})"
-          else
+          if [ "$ONLINE" != "1" ]; then
             echo "::error::device not reachable over tailscale"
           fi
 
@@ -114,7 +110,6 @@ jobs:
             --data-urlencode "text=${TEXT}" \
             -d "disable_web_page_preview=true" \
             || { echo "::error::Telegram sendMessage failed"; exit 1; }
-          echo "[+] Telegram alert sent"
 
       - name: Fail when offline
         if: steps.probe.outputs.online == '0'

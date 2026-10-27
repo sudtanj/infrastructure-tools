@@ -58,14 +58,21 @@ jobs:
           failed=0
           for f in $folders; do
             [ -d "$f" ] || continue
-            echo "::group::$f"
             rc=0
-            bash bash-scripts/deploy-botkeep.sh "$f" || rc=$?
+            # Quiet unless diagnosing (its whole point is printing); a failed
+            # deploy prints only its last lines.
+            if [ "$BOTKEEP_DIAGNOSE" = "true" ]; then
+              bash bash-scripts/deploy-botkeep.sh "$f" || rc=$?
+            else
+              out=$(mktemp)
+              bash bash-scripts/deploy-botkeep.sh "$f" >"$out" 2>&1 || rc=$?
+            fi
             if [ "$rc" -eq 3 ]; then
               echo "::warning::No Botkeep workload named '$f'; skipped"
             elif [ "$rc" -ne 0 ]; then
+              echo "::error::$f deploy failed (exit $rc)"
+              [ "$BOTKEEP_DIAGNOSE" = "true" ] || tail -n 20 "$out"
               failed=1
             fi
-            echo "::endgroup::"
           done
           exit "$failed"

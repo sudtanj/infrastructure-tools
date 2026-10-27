@@ -33,9 +33,9 @@ name: "Deploy Deno Projects (private repo)"
 #   * This file is public: visible to everyone and forkable.
 #   * DENO_DEPLOY_TOKEN can deploy apps. Keep push access to trusted people,
 #     and scope the token to the least privilege your plan offers.
-#   * Build output is reduced to pass/fail with paths stripped so private file
-#     names stay out of this public repo's logs. `deno deploy` output is left
-#     intact because the resulting URL is the point of the run.
+#   * Command output is captured: steps print nothing on success (the deploy
+#     step prints only the resulting URL) and a short, path-stripped tail on
+#     failure, so private file names stay out of this public repo's logs.
 #
 # SETUP
 #   secret DENO_DEPLOY_TOKEN   required; from console.deno.com
@@ -190,22 +190,13 @@ jobs:
           PREV=""
           [ -f /tmp/deno-deploy-state.txt ] && PREV="$(cat /tmp/deno-deploy-state.txt)"
 
-          echo "Tracked:     $REPO@$REF"
-          echo "Latest:      ${RESP:0:12}"
-          echo "Last deploy: ${PREV:-<none>}"
-
           CHANGED="false"
           if [ "$RESP" != "$PREV" ]; then
             CHANGED="true"
-            echo "New commit detected."
-          else
-            echo "No new commit; nothing to deploy."
           fi
 
-          echo "Force input received: '${FORCE:-<empty>}'"
           if force_on; then
             CHANGED="true"
-            echo "force is ON; deploying regardless of the commit comparison."
           fi
 
           # Deliberately NOT written here. Recording the commit before the
@@ -294,7 +285,6 @@ jobs:
             base="$(cat /tmp/deno-deploy-state.txt)"
           fi
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "No comparable base commit; selecting every Deno project found."
             base=''
           fi
 
@@ -303,24 +293,12 @@ jobs:
           # diff against the deployed commit, find nothing, and deploy
           # nothing -- the opposite of what force asks for.
           if force_on; then
-            echo "force is ON; ignoring the diff and selecting every project."
             base=''
           fi
 
           changed=()
           if [ -n "$base" ]; then
             mapfile -t changed < <(git diff --name-only "$base" "$TARGET_SHA")
-          fi
-
-          echo "Comparing ${base:-<nothing>}..${TARGET_SHA:0:12} (${#changed[@]} changed file(s)):"
-          if [ ${#changed[@]} -eq 0 ]; then
-            if [ -n "$base" ]; then
-              echo "  (none; with a baseline this means nothing to deploy)"
-            else
-              echo "  (none, no baseline: selecting every project)"
-            fi
-          else
-            printf '  %s\n' "${changed[@]}"
           fi
 
           mapfile -t configs < <(
@@ -330,7 +308,6 @@ jobs:
           )
 
           projects=()
-          skipped=()
           # `${configs[@]+"${configs[@]}"}` and not `"${configs[@]:-}"`: the latter
           # expands an EMPTY array to one empty string, and dirname of that is
           # "." -- inventing a phantom project at the repo root that would
@@ -355,7 +332,6 @@ jobs:
               done
             fi
             if [ -z "$reason" ]; then
-              skipped+=("$dir")
               continue
             fi
 
@@ -378,26 +354,14 @@ jobs:
             projects+=("$dir"$'\t'"$leaf"$'\t'"$deploy_cfg"$'\t'"$reason")
           done
 
-          echo "Deploying ${#projects[@]} Deno project(s):"
-          if [ ${#projects[@]} -eq 0 ]; then
-            echo "  (none)"
-            # A forced run that finds nothing is a misconfiguration, not a
-            # reason to skip the deploy job quietly: there is no deno.json in
-            # the checkout, which almost always means the wrong repo or the
-            # wrong branch.
-            if force_on; then
-              echo "::error::force was requested but no Deno project was found in ${PRIVATE_REPO_NAME:-the private repo}@${TARGET_SHA:0:12}."
-              echo "Check BUILD_REF points at the branch you meant, and that each project folder contains a deno.json or deno.jsonc."
-              exit 1
-            fi
-          else
-            for project in "${projects[@]}"; do
-              IFS=$'\t' read -r d l c r <<<"$project"
-              echo "  - dir=$d${l:+ (name: $l)} (config: $c, reason: $r)"
-            done
-          fi
-          if [ ${#skipped[@]} -gt 0 ]; then
-            echo "Unchanged, skipping: ${skipped[*]}"
+          # A forced run that finds nothing is a misconfiguration, not a
+          # reason to skip the deploy job quietly: there is no deno.json in
+          # the checkout, which almost always means the wrong repo or the
+          # wrong branch.
+          if [ ${#projects[@]} -eq 0 ] && force_on; then
+            echo "::error::force was requested but no Deno project was found in ${PRIVATE_REPO_NAME:-the private repo}@${TARGET_SHA:0:12}."
+            echo "Check BUILD_REF points at the branch you meant, and that each project folder contains a deno.json or deno.jsonc."
+            exit 1
           fi
 
           # Application names come from folder names, so two folders sharing a
@@ -532,7 +496,6 @@ jobs:
           else
             WANTED_APP="${APP_PREFIX:+$APP_PREFIX-}${PRIVATE_REPO##*/}"
           fi
-          echo "Wanting '$WANTED_APP' in org '$DEPLOY_ORG'."
 
           cat > /tmp/deno-resolve.mjs <<'RESOLVER'
           // Shared helper: reads the CLI's --json output and picks a match.
@@ -609,7 +572,7 @@ jobs:
           # cannot see the org, so name the orgs the token can reach.
           case "$(verdict_of orgs /tmp/whoami.json "$DEPLOY_ORG")" in
             "OK"$'	'*)
-              echo "Org '$DEPLOY_ORG' is visible to this token." ;;
+              ;;
             NONE)
               echo "::error::Org '$DEPLOY_ORG' is not visible to this token."
               echo "Orgs this token can reach:"
@@ -648,10 +611,15 @@ jobs:
                 echo "::error::No application named '$WANTED_APP' exists, and no main.ts, src/main.ts or mod.ts was found to create it with."
                 exit 1
               fi
-              echo "No application named '$WANTED_APP' exists; creating it (entrypoint $entrypoint)."
-              (cd "$PROJECT_DIR" && deno deploy create --non-interactive \
+              echo "Creating application '$WANTED_APP'."
+              if ! (cd "$PROJECT_DIR" && deno deploy create --non-interactive \
                 --org "$DEPLOY_ORG" --app "$WANTED_APP" --source local \
-                --runtime-mode dynamic --entrypoint "$entrypoint" --region global)
+                --runtime-mode dynamic --entrypoint "$entrypoint" --region global) \
+                > /tmp/create.log 2>&1; then
+                echo "::error::deno deploy create failed."
+                tail -n 20 /tmp/create.log | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+                exit 1
+              fi
               app="$WANTED_APP" ;;
             *)
               echo "::warning::Could not read the app list; using the configured name."
@@ -662,7 +630,6 @@ jobs:
           if [ "$app" != "$WANTED_APP" ]; then
             echo "::warning::Deno Deploy knows this application as '$app'; using that."
           fi
-          echo "Resolved to application '$app'."
           # A file, not a step output: the name may contain the app-prefix
           # secret, and GitHub discards outputs containing a secret.
           printf '%s' "$app" > /tmp/deno-app.txt
@@ -681,7 +648,8 @@ jobs:
           key: deno-${{ matrix.project.dir }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(matrix.project.dir == '.' && 'private/deno.lock' || format('private/{0}/deno.lock', matrix.project.dir)) }}
 
       # `deno check` names private files and imports. This repo is PUBLIC, so
-      # capture the output and emit only pass/fail with paths stripped.
+      # capture the output: silent on success, a short path-stripped tail on
+      # failure.
       - name: Type check
         working-directory: private/${{ matrix.project.dir }}
         shell: bash
@@ -692,26 +660,22 @@ jobs:
             local label="$1"; shift
             local log; log="$(mktemp)"
             if "$@" >"$log" 2>&1; then
-              echo "$label: OK"
               rm -f "$log"; return 0
             fi
             echo "::error::$label failed (output suppressed to protect private source)"
-            echo "--- last lines of $label (paths stripped to basenames) ---"
             tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
-            echo "--- end ---"
             rm -f "$log"
             return 1
           }
 
           # An entrypoint is not required (static sites and framework presets
           # differ), so a non-zero exit here is a warning rather than a failure.
-          if run_quiet "deno check" deno check --quiet; then
-            echo "Type check passed."
-          else
+          if ! run_quiet "deno check" deno check --quiet; then
             echo "::warning::Type check reported problems; deploying anyway."
           fi
 
-      # NOT redacted: the URL Deno prints is the useful output of this run.
+      # Output is captured: nothing is printed on success, a short
+      # path-stripped tail on failure.
       - name: Deploy
         working-directory: private/${{ matrix.project.dir }}
         shell: bash
@@ -722,12 +686,16 @@ jobs:
             exit 1
           fi
           APP_NAME="$(cat /tmp/deno-app.txt)"
-          echo "Deploying '$APP_NAME' from this directory..."
-          deno deploy \
+          log="$(mktemp)"
+          if ! deno deploy \
             --non-interactive \
             --org "${{ secrets.DENO_DEPLOY_ORG }}" \
             --app "$APP_NAME" \
-            --prod
+            --prod >"$log" 2>&1; then
+            echo "::error::deno deploy failed."
+            tail -n 20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
+            exit 1
+          fi
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
           DENO_DEPLOY_ORG: ${{ secrets.DENO_DEPLOY_ORG }}
@@ -787,7 +755,6 @@ jobs:
           fi
 
           printf '%s' "$DEPLOYED_SHA" > /tmp/deno-deploy-state.txt
-          echo "Recorded $DEPLOYED_SHA as the last deployed commit."
 
       # The run id is in the key because cache entries are immutable: this
       # state has to be rewritten after every clean deploy.

@@ -1,7 +1,8 @@
 // Plays EraSpace's "Luncurkan Roket" (launch the rocket) on the emulator:
 // opens it from the rocket badge on the home screen, presses "Mulai Bermain",
 // then "Luncurkan" until the app says "Kamu Perlu Token Bermain" (no tokens
-// left: one free launch a day, more from purchases), and logs the points won.
+// left: one free launch a day, more from purchases). Logs only why it stopped
+// early.
 //
 //   node eraspace.ts      (Node 23.6+; needs adb, no modules)
 //
@@ -74,19 +75,16 @@ async function tap(n: Node) {
 async function clearInterruptions(nodes: Node[]): Promise<boolean> {
   const f = await focused();
   if (f.includes("com.android.settings/")) {
-    log("closing the App info page EraSpace opened");
     await shell("input keyevent KEYCODE_BACK");
     return true;
   }
   const deny = byId(nodes, "permission_deny_button");
   if (deny) {
-    log("declining the location prompt");
     await tap(deny);
     return true;
   }
   const close = byId(nodes, "mcsdk_iam_close");
   if (close) {
-    log("closing a promotion pop-up");
     await tap(close);
     return true;
   }
@@ -123,8 +121,6 @@ async function restoreDensity() {
 async function play(): Promise<void> {
   const home = await waitFor(["fabGamification"]);
   if (!home) return log("the rocket badge did not show on the home screen; skipping");
-  const before = byId(home.nodes, "tvPoint")?.text;
-  log(`points before: ${before ?? "?"}`);
   await tap(home.node);
 
   const landing = await waitFor(["btnStartPlay", "btnLaunch"]);
@@ -135,28 +131,21 @@ async function play(): Promise<void> {
   while (launches < MAX_LAUNCHES) {
     const game = await waitFor(["btnLaunch"]);
     if (!game) return log('"Luncurkan" did not show; stopping');
-    log(`tokens: ${byId(game.nodes, "tvToken")?.text ?? "?"}; launching`);
     await tap(game.node);
     // Either a prize ("100 Poin", with "Luncurkan Lagi") or a dialog.
     const answer = await waitFor(["tvPointReward", "tvTitle"], 60_000);
     if (!answer) return log("no answer to the launch; stopping");
     if (answer.id === "tvTitle") {
-      const desc = byId(answer.nodes, "tvDesc")?.text ?? "";
-      log(`"${answer.node.text}": ${desc}`);
       const ok = byId(answer.nodes, "btnSuccess");
       if (ok) await tap(ok);
       break;
     }
     launches++;
-    log(`launch ${launches}: won ${answer.node.text}`);
     const again = byId(answer.nodes, "btnLaunchRocket");
     if (again) await tap(again);
   }
-  log(launches ? `${launches} launch(es) done` : "no launches left today");
-
+  // Let the last result settle before the app is closed.
   await sleep(3_000);
-  const after = byId(await screen(), "tvPoint")?.text;
-  if (after) log(`points shown in the game: ${after}`);
 }
 
 async function main() {
@@ -177,7 +166,6 @@ async function main() {
     await shell(`wm density ${DENSITY}`);
     // A fresh start, so it lays out at the new density.
     await shell(`am force-stop ${PKG}`);
-    log("launching", PKG);
     await shell(`monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
     await play();
   } finally {

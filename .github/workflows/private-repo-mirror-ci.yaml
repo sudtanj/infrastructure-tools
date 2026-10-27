@@ -115,22 +115,10 @@ jobs:
           PREV=""
           [ -f /tmp/private-ci-state.txt ] && PREV="$(cat /tmp/private-ci-state.txt)"
 
-          echo "Tracked:    $REPO@$REF"
-          echo "Latest:     ${RESP:0:12}"
-          echo "Last built: ${PREV:-<none>}"
-
           CHANGED="false"
-          if [ "$RESP" != "$PREV" ]; then
-            CHANGED="true"
-            echo "New commit detected."
-          else
-            echo "No new commit; skipping build."
-          fi
-
-          if [ "${FORCE:-false}" = "true" ]; then
-            CHANGED="true"
-            echo "force=true; building regardless."
-          fi
+          if [ "$RESP" != "$PREV" ]; then CHANGED="true"; fi
+          # force=true builds regardless.
+          if [ "${FORCE:-false}" = "true" ]; then CHANGED="true"; fi
 
           # Recorded unconditionally so a forced run records what it built.
           printf '%s' "$RESP" > /tmp/private-ci-state.txt
@@ -189,13 +177,10 @@ jobs:
             local label="$1"; shift
             local log; log="$(mktemp)"
             if "$@" >"$log" 2>&1; then
-              echo "$label: OK"
               rm -f "$log"; return 0
             fi
-            echo "::error::$label failed (output suppressed to protect private source)"
-            echo "--- last lines of $label (paths stripped to basenames) ---"
+            echo "::error::$label failed (last lines below, paths stripped to basenames)"
             tail -20 "$log" | sed -E 's#(/[A-Za-z0-9._-]+)+/([A-Za-z0-9._-]+)#\2#g' || true
-            echo "--- end ---"
             rm -f "$log"
             return 1
           }
@@ -206,14 +191,12 @@ jobs:
           [ -f Cargo.toml ]     && DETECTED="rust"
           [ -f pyproject.toml ] && DETECTED="python"
           [ -f Dockerfile ]     && DETECTED="docker"
-          echo "Detected: $DETECTED"
 
           if [ "$DETECTED" = "none" ]; then
             echo "::warning::No recognisable build system; nothing to run."
             exit 0
           fi
 
-          echo "::group::Build"
           case "$DETECTED" in
             node)
               PM=npm
@@ -223,11 +206,10 @@ jobs:
               else
                 run_quiet "install" npm ci
               fi
+              # No 'build' script: install alone is the build.
               if grep -q '"build"[[:space:]]*:' package.json; then
                 [ "$PM" = "bun" ] && run_quiet "build" bun run build \
                                  || run_quiet "build" npm run build
-              else
-                echo "No 'build' script defined; install succeeded."
               fi
               ;;
             go)     run_quiet "go build" go build ./... ;;
@@ -235,7 +217,6 @@ jobs:
             python) run_quiet "compile" python -m compileall -q . ;;
             docker) run_quiet "docker build" docker build -t "ci-mirror:${BUILD_SHA:0:12}" . ;;
           esac
-          echo "::endgroup::"
 
       - name: Summary
         if: always()

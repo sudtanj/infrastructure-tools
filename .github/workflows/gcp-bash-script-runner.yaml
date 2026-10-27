@@ -63,7 +63,6 @@ jobs:
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
           fi
-          echo "[*] requested: ${REQUESTED:-all} -> ${#files[@]} script(s)"
           if [ "${#files[@]}" -eq 0 ]; then
             echo "scripts=[]" >> "$GITHUB_OUTPUT"
             exit 0
@@ -76,7 +75,6 @@ jobs:
             echo "::error::Missing script(s): ${missing[*]}"
             exit 1
           fi
-          printf '[*] selected: %s\n' "${files[@]}"
           json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
           echo "scripts=$json" >> "$GITHUB_OUTPUT"
 
@@ -98,18 +96,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run context (safe)
-        env:
-          SCRIPT_PATH: ${{ matrix.script }}
-          DEBUG_LOGS: ${{ inputs.debug }}
-        run: |
-          echo "workflow : ${GITHUB_WORKFLOW}"
-          echo "script   : ${SCRIPT_PATH}"
-          echo "ref      : ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}"
-          echo "run      : #${GITHUB_RUN_NUMBER}, attempt ${GITHUB_RUN_ATTEMPT}"
-          echo "runner   : ${RUNNER_OS}/${RUNNER_ARCH} ${ImageOS:-} ${ImageVersion:-}"
-          echo "debug    : ${DEBUG_LOGS:-true}"
-
       - name: Verify required config
         run: |
           set -euo pipefail
@@ -121,7 +107,6 @@ jobs:
             echo "::error::Missing secrets: ${missing[*]}"
             exit 1
           fi
-          echo "[+] all 5 required GCP secrets are set"
 
       - name: Mask sensitive values
         run: |
@@ -157,7 +142,8 @@ jobs:
             print $l;
           }
           PERL
-          perl -c "${RUNNER_TEMP}/sanitize.pl"
+          # perl -c reports "syntax OK" on success: only print its output when the check fails
+          out=$(perl -c "${RUNNER_TEMP}/sanitize.pl" 2>&1) || { echo "::error::sanitize.pl does not compile"; printf '%s\n' "$out" | tail -n 20; exit 1; }
 
       - name: Restore gcloud SDK cache
         id: gcloud-cache
@@ -205,23 +191,13 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          echo "[*] cloud sdk: $(gcloud --version 2>/dev/null | head -n 1)"
-          ACCOUNTS=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | wc -l)
-          echo "[*] active gcloud credentials: ${ACCOUNTS}"
-
-          # Only non-identifying fields are printed: status, machine type, and whether an external
-          # IPv4 exists (yes/no). The address itself is never printed.
+          # Prints only when something is wrong: the VM can't be read, or is not RUNNING.
           STATUS=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
                      --format='value(status)' 2>/dev/null)
           if [ -z "$STATUS" ]; then
             echo "[!] could not read VM details (missing compute.instances.get permission, wrong name or wrong zone)"
-          else
-            MTYPE=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
-                      --format='value(machineType.basename())' 2>/dev/null)
-            EXT=$(gcloud compute instances describe "${GCP_VM_NAME}" --zone="${GCP_ZONE}" \
-                    --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null)
-            echo "[*] vm status: ${STATUS} | machine type: ${MTYPE:-unknown} | external IPv4: $([ -n "$EXT" ] && echo yes || echo no)"
-            [ "$STATUS" = "RUNNING" ] || echo "[!] VM is not RUNNING; the IAP SSH step will fail"
+          elif [ "$STATUS" != "RUNNING" ]; then
+            echo "[!] VM is not RUNNING (${STATUS}); the IAP SSH step will fail"
           fi
 
       - name: Preload runner image to VM
@@ -235,19 +211,22 @@ jobs:
               --tunnel-through-iap \
               --quiet \
               --ssh-key-expire-after=5m \
-              --command="docker image inspect '${IMAGE}' >/dev/null 2>&1"; then
-            echo "[*] ${IMAGE} already loaded on VM"
+              --command="docker image inspect '${IMAGE}' >/dev/null 2>&1" >/dev/null 2>&1; then
             exit 0
           fi
-          echo "[*] pulling ${IMAGE} on runner"
-          docker pull "${IMAGE}"
-          echo "[*] loading ${IMAGE} into VM"
-          docker save "${IMAGE}" | gcloud compute ssh "${GCP_VM_NAME}" \
+          # Output goes to a file; only its tail is printed, and only on failure.
+          out=$(mktemp)
+          if ! docker pull -q "${IMAGE}" >"$out" 2>&1; then
+            echo "::error::docker pull failed"; tail -n 20 "$out"; exit 1
+          fi
+          if ! docker save "${IMAGE}" 2>>"$out" | gcloud compute ssh "${GCP_VM_NAME}" \
             --zone="${GCP_ZONE}" \
             --tunnel-through-iap \
             --quiet \
             --ssh-key-expire-after=15m \
-            --command="docker load"
+            --command="docker load" >>"$out" 2>&1; then
+            echo "::error::loading the image into the VM failed"; perl "${RUNNER_TEMP}/sanitize.pl" "$out" | tail -n 20; exit 1
+          fi
 
       - name: Verify script exists locally
         env:
@@ -255,10 +234,8 @@ jobs:
         run: |
           if [ ! -f "${SCRIPT_PATH}" ]; then
             echo "::error::Script not found: ${SCRIPT_PATH}"
-            ls -la bash-scripts/ || true
             exit 1
           fi
-          echo "[*] script: ${SCRIPT_PATH}"
 
       - name: Run script via IAP SSH
         env:
@@ -402,15 +379,6 @@ jobs:
           # Names only, never values.
           NAMES=$(grep -oE '^export [A-Za-z_][A-Za-z0-9_]*' "$PAYLOAD" | awk '{print $2}' | sort -u | paste -sd' ' -)
           SHA=$(sha256sum "${SCRIPT_PATH}" | cut -c1-12)
-          echo "::group::Run context (safe)"
-          {
-            echo "[*] script: ${SCRIPT_PATH} ($(wc -l < "${SCRIPT_PATH}") lines, sha256 ${SHA})"
-            echo "[*] payload: $(wc -c < "$PAYLOAD") bytes"
-            echo "[*] env forwarded to the VM: $(echo "$NAMES" | wc -w) variables (values are never printed)"
-            echo "[*] variable names: ${NAMES}"
-            echo "[*] debug logs: ${DEBUG_LOGS}"
-          } | perl "$SAN"
-          echo "::endgroup::"
 
           gcloud compute ssh "${GCP_VM_NAME}" \
             --zone="${GCP_ZONE}" \
@@ -458,34 +426,24 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           }
 
+          # The script's output goes to the job summary only; the log gets its [!] lines as
+          # warnings, and a short sanitized tail when it fails.
           if [ "$RC" -eq 0 ]; then
-            echo "[*] script completed successfully in ${DUR}s"
-            echo "::group::Script output (sanitized)"
-            show || true
-            echo "::endgroup::"
             # Surface warnings as annotations on the run page (max 5)
             { show | grep -a '^\[!\] ' | head -n 5 | while IFS= read -r w; do echo "::warning::${w#\[!\] }"; done; } || true
             summary "succeeded"
             exit 0
           fi
 
-          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s"
+          HINT=""
+          [ "$RC" -eq 255 ] && HINT=": the SSH/IAP connection itself failed, not the script"
+          echo "::error::Script ${SCRIPT_PATH} failed (exit ${RC}) after ${DUR}s${HINT}"
           if [ "$STRUCT_LINES" -eq 0 ]; then
-            echo "[!] the script produced no output: it most likely never started."
-            echo "[!] Check: VM is RUNNING (see Preflight), IAP firewall rule for TCP 22 from the IAP range, and the service account's IAP-secured Tunnel User + Compute OS Login roles."
+            echo "::error::No script output, it likely never started. Check the VM is RUNNING, the IAP firewall rule for TCP 22, and the service account's IAP-secured Tunnel User + Compute OS Login roles."
           fi
-          if [ "$RC" -eq 255 ]; then
-            echo "[!] exit 255 = the SSH/IAP connection itself failed (not the script)."
-          fi
-          echo "::group::Script output (sanitized)"
-          show || true
-          echo "::endgroup::"
-          # Raw tail for cases where the script died without structured lines. Sanitized first
-          # (masking, not dropping), then SSH/gcloud noise is removed.
-          echo "---- diagnostic tail (sanitized) ----"
+          # Short raw tail, sanitized first (masking, not dropping), then SSH/gcloud noise is removed.
           perl "$SAN" "$LOG" | grep -avE \
             'Your (identification|public key)|key fingerprint|randomart|SHA256:|SSH keygen|WARNING|NumPy|Updating project|Waiting for SSH|Permanently added|external IP|To increase the performance|\+---|^\| |BEGIN [A-Z ]+KEY|PRIVATE KEY|Bearer |tskey-' \
-            | tail -60 || true
-          echo "---- end ----"
+            | tail -n 20 || true
           summary "FAILED"
           exit "$RC"

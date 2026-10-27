@@ -64,11 +64,10 @@ name: "Commute traffic: home and work, to Telegram"
 #                      to say whether today's odd-even rule bars your car
 #
 # THIS REPO IS PUBLIC: the addresses, chat ID, time zone and plate live only
-# in secrets. The log prints only the step reached, route, report and camera
-# counts and, on failure, the kind of page Google showed; the times, routes,
-# streets, map links, Waze reports, weather, CCTV and screenshots go only to
-# Telegram. No artifacts are
-# uploaded.
+# in secrets. The log prints only failures (the step that failed and the kind
+# of page Google showed) and warnings; the times, routes, streets, map links,
+# Waze reports, weather, CCTV and screenshots go only to Telegram. No
+# artifacts are uploaded.
 # ---------------------------------------------------------------------------
 
 on:
@@ -141,7 +140,6 @@ jobs:
           fi
           # Not a secret, but a real address in a public log.
           echo "::add-mask::${TAILSCALE_EXIT_NODE}"
-          echo "Secrets present."
 
       - name: Skip non-working days
         id: gate
@@ -153,7 +151,6 @@ jobs:
           # Manual runs always go ahead, right away.
           if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             if [ "$(date +%u)" -gt 5 ]; then
-              echo "Weekend; nothing to do."
               echo "run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -169,8 +166,8 @@ jobs:
               code="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
                 "https://date.nager.at/api/v3/IsTodayPublicHoliday/${HOLIDAY_COUNTRY}?offset=${offset}" || true)"
               case "$code" in
-                200) echo "Public holiday; nothing to do."; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
-                204) echo "Working day." ;;
+                200) echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+                204) ;;
                 *)   echo "::warning::Holiday check unavailable (HTTP ${code:-none}); going ahead." ;;
               esac
             fi
@@ -197,7 +194,7 @@ jobs:
 
       - name: Install Playwright (CDP client only)
         if: steps.gate.outputs.run == 'true'
-        run: npm ci --prefix private/commute_traffic --no-audit --no-fund
+        run: npm ci --prefix private/commute_traffic --no-audit --no-fund --loglevel=error
 
       # Same encrypted profile and format as chrome-cdp-session.yaml, restored
       # as in tokopedia-search.yaml (before the VPN: faster).
@@ -224,7 +221,6 @@ jobs:
             | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
             | tar -x --zstd -C "$PROFILE_DIR"
           rm -rf /tmp/state
-          echo "Saved Chrome profile restored."
 
       # The same packages as chrome-cdp-session.yaml, so Google sees the
       # browser it saw before (real GL, audio device, desktop fonts).
@@ -233,7 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update -qq
+          sudo apt-get update -qq >/dev/null
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
           sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio \
@@ -242,7 +238,6 @@ jobs:
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           fc-cache -f >/dev/null
           rm /tmp/chrome.deb
-          google-chrome --version
           setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
           sleep 2
           pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
@@ -256,9 +251,8 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v tailscale >/dev/null 2>&1; then
-            curl -fsSL https://tailscale.com/install.sh | sh
+            curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
           fi
-          tailscale version
 
       # Same credential handling as typescript-worker-run.yaml: the OAuth
       # client secret is exchanged for a single-use, ephemeral, 10-minute auth
@@ -318,14 +312,17 @@ jobs:
             authkey="$TAILSCALE_AUTH_KEY"
           fi
 
-          sudo tailscale up --authkey="$authkey" "${args[@]}"
+          if ! sudo tailscale up --authkey="$authkey" "${args[@]}" >/tmp/ts-up.log 2>&1; then
+            echo "::error::tailscale up failed."
+            tail -n 20 /tmp/ts-up.log
+            exit 1
+          fi
           # Never print raw `tailscale status`: it lists every tailnet IP and host name.
           state="$(sudo tailscale status --json | jq -r '.BackendState // "unknown"')"
           if [ "$state" != "Running" ]; then
             echo "::error::Tailscale is not connected (BackendState=${state})."
             exit 1
           fi
-          echo "Joined the tailnet$([ -n "${TAILSCALE_EXIT_NODE:-}" ] && echo ' through the exit node')."
 
       # After the tailnet, so Google sees the exit node's IP, never this
       # datacenter one. Flags as in tokopedia-search.yaml.
@@ -363,7 +360,6 @@ jobs:
             >/tmp/chrome.log 2>&1 &
           for _ in $(seq 1 30); do
             if curl -fs http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
-              echo "Chrome ready."
               exit 0
             fi
             sleep 1
@@ -378,7 +374,11 @@ jobs:
           WORK_ADDRESS: ${{ secrets.WORK_ADDRESS }}
           PLATE_PARITY: ${{ secrets.PLATE_PARITY }}
           CHROME_CDP_URL: http://127.0.0.1:9222
-        run: node private/commute_traffic/commute_traffic.ts
+        # Only its masks, warnings and errors reach the log; the rest is Telegram's.
+        run: |
+          set -euo pipefail
+          node private/commute_traffic/commute_traffic.ts \
+            | { grep --line-buffered -E '^::(add-mask|warning|error)::' || true; }
 
       - name: Stop Chrome, leave the tailnet
         if: always() && steps.gate.outputs.run == 'true'
@@ -386,11 +386,14 @@ jobs:
           # Nothing to save (the profile is not uploaded); just stop it.
           pkill -f -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null || true
           # A node left joined keeps an exit-node route and a tailnet slot.
-          sudo tailscale logout 2>&1 | tail -3 || true
+          sudo tailscale logout >/dev/null 2>&1 || true
 
       - name: Send to Telegram
         if: always() && steps.gate.outputs.run == 'true'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: node private/commute_traffic/commute_traffic.ts --send
+        run: |
+          set -euo pipefail
+          node private/commute_traffic/commute_traffic.ts --send \
+            | { grep --line-buffered -E '^::(add-mask|warning|error)::' || true; }

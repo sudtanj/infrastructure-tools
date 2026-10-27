@@ -46,7 +46,6 @@ const PLAY_TIMEOUT_MS = 45_000;
 const DISMISS = /^(skip|not now|later|close|cancel|got it|no thanks|don.t allow|maybe later)$/i;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 type Player = { piid: string; state: string };
 
@@ -114,7 +113,6 @@ async function shouldStop(d: AndroidDevice): Promise<boolean> {
     nextCoinCheck = Date.now() + COIN_CHECK_MS;
     if (await inForeground(d)) {
       coinMisses = (await viewShown(d, COIN_ID)) ? 0 : coinMisses + 1;
-      if (coinMisses === 1) log("coin not found; checking again");
       if (coinMisses >= 2) stopReason = "the coin is gone";
     }
   }
@@ -127,7 +125,6 @@ async function inForeground(d: AndroidDevice): Promise<boolean> {
 }
 
 async function launch(d: AndroidDevice) {
-  log("launching", PKG);
   await shell(d, `monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline && !(await inForeground(d))) await sleep(POLL_MS);
@@ -138,7 +135,6 @@ async function dismissPopups(d: AndroidDevice) {
   for (const sel of [{ pkg: PKG, text: DISMISS }, { pkg: PKG, desc: DISMISS }]) {
     try {
       await d.tap(sel, { timeout: 3_000 });
-      log("dismissed a popup");
     } catch {}
   }
 }
@@ -184,28 +180,21 @@ function followLogcat() {
   lc.on("exit", () => setTimeout(followLogcat, 5_000));
 }
 
-async function watch(d: AndroidDevice, uid: string, first: Player) {
+async function watch(d: AndroidDevice, uid: string) {
   const start = Date.now();
-  let current = first.piid;
   let silentSince = 0;
   while (Date.now() - start < MAX_WATCH_MS) {
     await sleep(POLL_MS);
     if (await shouldStop(d)) return;
-    if (!(await inForeground(d))) return log("app left the foreground");
-    if (finishedAt > start) return log("video finished");
-    const p = playing(await players(d, uid));
-    if (p) {
+    if (!(await inForeground(d))) return;
+    if (finishedAt > start) return;
+    if (playing(await players(d, uid))) {
       silentSince = 0;
-      if (p.piid !== current) {
-        log(`app moved on by itself (player ${current} -> ${p.piid})`);
-        current = p.piid;
-      }
       continue;
     }
     silentSince ||= Date.now();
-    if (Date.now() - silentSince >= END_GRACE_MS) return log("video finished");
+    if (Date.now() - silentSince >= END_GRACE_MS) return;
   }
-  log(`watched ${MAX_WATCH_MS / 1000}s; moving on`);
 }
 
 async function main() {
@@ -221,7 +210,6 @@ async function main() {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  log("device", d.serial(), d.model());
   await shell(d, "input keyevent KEYCODE_WAKEUP");
   // After a cold boot a "not responding" dialog (often the launcher's) can
   // cover the screen and take every tap.
@@ -240,16 +228,13 @@ async function main() {
     if (await shouldStop(d)) break;
     const p = await waitForPlayback(d, uid);
     if (!p) {
-      log("nothing is playing; swiping past");
       await swipeUp(d);
       continue;
     }
-    log(`video ${n} playing (player ${p.piid})`);
-    await watch(d, uid, p);
+    await watch(d, uid);
     if (stopReason) break;
     if (await inForeground(d)) await swipeUp(d);
   }
-  log("stopping:", stopReason || "video limit reached");
   // Watching can unlock more (watch-time milestones).
   if (REWARDS) {
     if (!(await inForeground(d))) await launch(d);

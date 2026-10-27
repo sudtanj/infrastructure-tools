@@ -44,8 +44,8 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #        "not a job" instead of a failure -- but only when nothing declared
 #        the file to be an entry point.
 #
-#   Nothing is hidden: every skipped file is named in the log with the rule
-#   that caught it, and the summary counts them separately from passes.
+#   Skipped files are not listed in the public log; the summary counts CLI
+#   skips separately from passes.
 #
 #   `typescript-worker/entrypoints.txt` overrides the inference entirely, for
 #   the cases a heuristic cannot know about:
@@ -64,7 +64,7 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #
 # HOW A .ts FILE IS EXECUTED
 #   There is no `node script.ts` that works everywhere, so the runner is
-#   chosen once, in the discovery step, and reported before anything runs:
+#   chosen once, in the discovery step (not printed):
 #     1. typescript-worker/node_modules/.bin/tsx      -> `tsx <file>`
 #     2. typescript-worker/node_modules/.bin/ts-node  -> `ts-node <file>`
 #     3. otherwise                                     -> `node <file>`
@@ -149,15 +149,15 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #   details, so neither is ever printed:
 #     * TAILSCALE_EXIT_NODE is registered with ::add-mask:: as if it were a
 #       secret, so GitHub replaces it with *** anywhere it would appear.
-#     * The log shows a 12-character SHA-256 FINGERPRINT of the exit node
-#       instead. Two runs can be compared, and a failure can be traced to a
+#     * The step summary shows a 12-character SHA-256 FINGERPRINT of the
+#       exit node instead. Two runs can be compared, and a failure can be traced to a
 #       node, without the address ever being disclosed.
 #     * The egress IP is masked the instant it is read -- before it is
 #       compared, so even the "unchanged IP" failure cannot leak it -- and
-#       reported only as "recorded" or "changed".
+#       never reported.
 #     * Raw `tailscale status` is never printed; it lists every tailnet IP and
-#       host name. A jq rollup (state, peer count, exit-node-capable peers)
-#       answers the same questions without identifying anything.
+#       host name. On failure only, a jq rollup (state, peer count,
+#       exit-node-capable peers) answers the same questions anonymously.
 #     * Everything a script writes is passed through redact(), which replaces
 #       IPv4, IPv6 and *.ts.net host names (loopback is kept).
 #
@@ -173,8 +173,8 @@ name: "Run private repo typescript-worker scripts over Tailscale"
 #     They do NOT get PRIVATE_REPO_TOKEN
 #     (the clone credential), TAILSCALE_AUTH_KEY / TAILSCALE_OAUTH_CLIENT_SECRET
 #     (the VPN credentials), STATE_KEY or GITHUB_TOKEN.
-#   * A successful script's output is NOT printed: it goes to a log file and
-#     only a one-line pass is shown, because this run's log is public. On
+#   * A successful script's output is NOT printed: it goes to a log file,
+#     because this run's log is public; pass/fail is in the step summary. On
 #     failure the last 60 lines are printed so the stack trace is debuggable.
 #     Check "verbose" when dispatching to see everything.
 #   * `npm ci` is preferred over `npm install`: it installs exactly the lock
@@ -294,8 +294,6 @@ jobs:
           if [ ! -d "$TSWORKER_DIR" ]; then
             {
               echo "::error::No '${TSWORKER_DIR}/' folder at the root of the private repo."
-              echo "Root contents:"
-              ls -1
             } >&2
             echo "count=0" >> "$GITHUB_OUTPUT"
             exit 1
@@ -323,7 +321,6 @@ jobs:
           MANIFEST="$TSWORKER_DIR/entrypoints.txt"
           scripts=()
           if [ -f "$MANIFEST" ]; then
-            echo "Entry points from ${TSWORKER_DIR}/entrypoints.txt:"
             while IFS= read -r line || [ -n "$line" ]; do
               line="${line#"${line%%[![:space:]]*}"}"
               line="${line%"${line##*[![:space:]]}"}"
@@ -350,8 +347,7 @@ jobs:
                   exit 1
                   ;;
                 *)
-                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${TSWORKER_DIR}/ instead:"
-                  for h in "${hits[@]}"; do echo "  - ${h#"$TSWORKER_DIR"/}"; done
+                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${TSWORKER_DIR}/ instead."
                   exit 1
                   ;;
               esac
@@ -383,7 +379,6 @@ jobs:
             # `exec-entry.ts` wants a script name in argv, so it exits 2
             # printing a usage line. The run step recognises that and
             # reports it as a CLI rather than a failure.
-            echo "No ${TSWORKER_DIR}/entrypoints.txt; selecting entry points automatically."
             candidates=()
             while IFS= read -r f; do
               [ -n "$f" ] && candidates+=("$f")
@@ -404,47 +399,28 @@ jobs:
                 -not -path '*/.*/*' \
                 | LC_ALL=C sort
             )
-            excluded=0
             for f in "${candidates[@]}"; do
               base="${f##*/}"; base="${base%.*}"
               case "$base" in
-                *.test|*.spec)
-                  echo "  not an entry point: ${f#"$TSWORKER_DIR"/} (test file)"
-                  excluded=$((excluded + 1))
-                  continue
-                  ;;
+                *.test|*.spec) continue ;;
               esac
               # Escaped because the name is used as a regex below.
               esc="$(printf '%s' "$base" | sed 's/[][\.*^$()+?{}|\\]/\\&/g')"
               importers="$(grep -rlE \
                 "(from|import|require\\()[^;]{0,120}['\"][^'\"]*${esc}['\"]" \
                 --include='*.ts' "$TSWORKER_DIR" 2>/dev/null | grep -vxF "$f" || true)"
-              if [ -n "$importers" ]; then
-                echo "  not an entry point: ${f#"$TSWORKER_DIR"/} (imported by $(printf '%s\n' "$importers" | wc -l) other file(s))"
-                excluded=$((excluded + 1))
-                continue
-              fi
+              [ -z "$importers" ] || continue
               scripts+=("$f")
             done
-            echo "Selected ${#scripts[@]} entry point(s) from ${#candidates[@]} candidate(s); ${excluded} excluded above."
-            echo "Add ${TSWORKER_DIR}/entrypoints.txt to state the list explicitly instead of inferring it."
           fi
 
           if [ "${#scripts[@]}" -eq 0 ]; then
-            {
-              echo "::error::No entry points selected under ${TSWORKER_DIR}/."
-              echo "Every file was excluded as a test or as an imported module."
-              echo "Add ${TSWORKER_DIR}/entrypoints.txt to name them explicitly."
-            } >&2
+            echo "::error::No entry points under ${TSWORKER_DIR}/: every file is a test or an imported module. Name them in ${TSWORKER_DIR}/entrypoints.txt." >&2
             echo "count=0" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           count=${#scripts[@]}
-          echo "Found ${count} TypeScript entry point(s) under ${TSWORKER_DIR}/ on ${REF}:"
-          for s in "${scripts[@]+"${scripts[@]}"}"; do
-            echo "  - ${s#"$TSWORKER_DIR"/}"
-          done
 
           # Dependency source. `npm ci` is the default whenever a lock file
           # exists: it installs exactly what is locked down and runs no
@@ -460,13 +436,9 @@ jobs:
           if [ -n "$lock_path" ]; then
             lockfile=true
             install=ci
-            echo "Dependencies: npm ci against ${lock_path}."
           elif [ -f "$TSWORKER_DIR/package.json" ]; then
             install=install
-            echo "Dependencies: npm install (no lock file in ${TSWORKER_DIR}/)."
             echo "::warning::No package-lock.json; versions can drift between runs."
-          else
-            echo "Dependencies: no package.json; the bare Node runtime is used."
           fi
 
           # How a .ts file gets executed, decided ONCE here so the run step
@@ -477,14 +449,9 @@ jobs:
           elif [ -x "$TSWORKER_DIR/node_modules/.bin/ts-node" ]; then
             runner=ts-node
           fi
-          if [ "$runner" = none ]; then
-            runner=node
-            echo "TypeScript runner: bare 'node', using built-in type stripping."
-            echo "  Scripts using enum, namespace, parameter properties or"
-            echo "  decorators need tsx or ts-node as a devDependency."
-          else
-            echo "TypeScript runner: ${runner} from node_modules/.bin."
-          fi
+          # Bare 'node' uses built-in type stripping: enum, namespace,
+          # parameter properties and decorators need tsx or ts-node.
+          [ "$runner" != none ] || runner=node
 
           # Type stripping is on by default from Node 23.6. Below that the
           # flag is required, and this turns out to be harmless on newer
@@ -511,9 +478,6 @@ jobs:
                 fi
                 ;;
             esac
-            if [ "$strip" = true ]; then
-              echo "Node ${NODE_VERSION}: passing --experimental-strip-types."
-            fi
           fi
 
           # `git rev-parse` failing inside an echo would not trip `set -e`, so
@@ -616,14 +580,15 @@ jobs:
           # needs its install step (better-sqlite3, sharp) would then fail at
           # import time instead. devDependencies are kept too, because the
           # TypeScript runner itself (tsx / ts-node) is usually a devDep.
-          if [ "${{ needs.discover.outputs.install }}" = "ci" ]; then
-            # --quiet: this log is public, and npm's resolution chatter can
-            # contain private package names and file paths.
-            npm ci --no-fund --no-audit --loglevel=error
-          else
-            npm install --no-fund --no-audit --loglevel=error
+          # Quiet: this log is public, and npm's resolution chatter can contain
+          # private package names and file paths. A failure prints its tail.
+          if [ "${{ needs.discover.outputs.install }}" = "ci" ]; then cmd=ci; else cmd=install; fi
+          out=$(mktemp)
+          if ! npm "$cmd" --no-fund --no-audit --loglevel=error >"$out" 2>&1; then
+            echo "::error::npm $cmd failed."
+            tail -n 20 "$out"
+            exit 1
           fi
-          echo "Dependencies installed in private/${TSWORKER_DIR}/."
 
       - name: Verify required secrets
         env:
@@ -639,10 +604,7 @@ jobs:
           # (which needs tags) wins, the 90-day auth key is the fallback.
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
             if [ -z "${TAILSCALE_TAGS:-}" ]; then missing+=("TAILSCALE_TAGS"); fi
-            echo "Tailscale credential: OAuth client (does not expire)"
-          elif [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
-            echo "Tailscale credential: auth key (expires; consider the OAuth client)"
-          else
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
             missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -653,9 +615,6 @@ jobs:
             true|false) ;;
             *) echo "::error::TAILSCALE_ACCEPT_DNS must be 'true' or 'false'."; exit 1 ;;
           esac
-          echo "Node:      $(node --version 2>&1)"
-          echo "Exit node: <masked>"
-          echo "Accept DNS: ${TAILSCALE_ACCEPT_DNS}"
 
       - name: Mask sensitive values and install log redaction
         run: |
@@ -698,8 +657,6 @@ jobs:
           REDACT
           chmod 600 /tmp/redact.sh
 
-          echo "Exit node fingerprint: $(cat /tmp/exit-node-fp.txt) (address masked)"
-
       # ---------------- Tailscale: install, join, verify ----------------
 
       # ------------- Chrome profile and install (before the VPN) -------------
@@ -726,19 +683,16 @@ jobs:
           # The save step compares against this to spot a newer save made meanwhile.
           echo "$id" > /tmp/chrome-restored-id
           mkdir -p "$PROFILE_DIR"
-          if [ -z "$id" ]; then
-            echo "No saved Chrome profile; starting clean."
-            exit 0
-          fi
+          # No saved profile: start clean.
+          [ -n "$id" ] || exit 0
           mkdir -p /tmp/state
           cd /tmp/state
-          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*"
+          gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*" >/dev/null
           sha256sum -c --quiet "state-${id}.sha256"
           cat state-"${id}".part-* \
             | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
             | tar -x --zstd -C "$PROFILE_DIR"
           rm -rf /tmp/state
-          echo "Saved Chrome profile restored."
 
       # The same packages as chrome-cdp-session.yaml, so the browser has the
       # same fingerprint in both (real GL, audio device, desktop fonts). No VNC.
@@ -748,36 +702,34 @@ jobs:
         if: ${{ env.USE_BROWSER == 'true' }}
         run: |
           set -euo pipefail
-          echo "Downloading Chrome."
           curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
           # and dpkg fsyncs each file. Neither matters on a throwaway runner.
           sudo rm -f /var/lib/man-db/auto-update
           echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
-          echo "Updating package lists."
-          sudo timeout -k 15 300 apt-get update -qq
+          sudo timeout -k 15 300 apt-get update -qq >/dev/null
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
           # A mirror can stall a download forever: give apt a network timeout, bound
           # each try, and retry after repairing whatever a killed dpkg left behind.
+          # Output goes to a file; a failed try prints only its tail.
           apt_install() {
             for attempt in 1 2 3; do
-              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
-                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" && return 0
+              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -qq \
+                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" \
+                >/tmp/apt-install.log 2>&1 && return 0
               echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
+              tail -n 20 /tmp/apt-install.log
               sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
             done
             return 1
           }
-          echo "Installing Chrome and the display packages."
           apt_install /tmp/chrome.deb xvfb openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio ffmpeg \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
           # The fonts package downloads from SourceForge and can hang; it is optional.
-          echo "Installing optional fonts."
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           timeout 120 fc-cache -f >/dev/null || true
           rm /tmp/chrome.deb
-          google-chrome --version
           setsid nohup Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension GLX +extension RANDR +render -nolisten tcp -noreset >/dev/null 2>&1 &
           sleep 2
           pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
@@ -789,16 +741,18 @@ jobs:
       - name: Install Tailscale
         run: |
           set -euo pipefail
-          if command -v tailscale >/dev/null 2>&1; then
-            echo "Tailscale is already present; skipping the installer."
-          else
-            curl -fsSL https://tailscale.com/install.sh | sh
+          if ! command -v tailscale >/dev/null 2>&1; then
+            out=$(mktemp)
+            if ! curl -fsSL https://tailscale.com/install.sh | sh >"$out" 2>&1; then
+              echo "::error::The Tailscale installer failed."
+              tail -n 20 "$out"
+              exit 1
+            fi
           fi
           if ! command -v tailscale >/dev/null 2>&1; then
             echo "::error::Tailscale did not install; the scripts cannot run over the VPN."
             exit 1
           fi
-          tailscale version
 
       - name: Join the tailnet through the exit node
         # Backstop: a hung join must not hold the queue for the 90-minute job timeout.
@@ -829,17 +783,13 @@ jobs:
 
           # Egress IP BEFORE the tunnel, so the check afterwards can prove
           # traffic actually left somewhere else. It is a real public address
-          # in a public log, so it is masked the moment it is read and only
-          # ever reported as "recorded" / "unavailable". A failure here is
-          # never fatal.
+          # in a public log, so it is masked the moment it is read and never
+          # reported. A failure here is never fatal.
           curl -fsS --max-time 10 https://api.ipify.org > /tmp/egress-before.txt 2>/dev/null || \
             : > /tmp/egress-before.txt
           before="$(cat /tmp/egress-before.txt 2>/dev/null || true)"
           if [ -n "$before" ]; then
             echo "::add-mask::${before}"
-            echo "Egress IP before Tailscale: recorded (masked)."
-          else
-            echo "Egress IP before Tailscale: unavailable."
           fi
 
           # Prefer the OAuth client secret: it never expires. It is exchanged
@@ -882,7 +832,6 @@ jobs:
               exit 1
             fi
             echo "::add-mask::${access_token}"
-            echo "OAuth client secret accepted."
 
             printf 'Authorization: Bearer %s\n' "$access_token" > /tmp/ts-auth-header
             body="$(jq -cn --arg t "$TAILSCALE_TAGS" '{
@@ -907,7 +856,6 @@ jobs:
             fi
             rm -f /tmp/ts-key.json
             echo "::add-mask::${authkey}"
-            echo "Ephemeral auth key created."
             tag_args=(--advertise-tags="$TAILSCALE_TAGS")
           else
             authkey="$TAILSCALE_AUTH_KEY"
@@ -917,6 +865,7 @@ jobs:
           # `tailscale up` can wait forever for Running after the login went
           # through; bound each try and retry. The key is only spent once the
           # node is registered, and a registered node does not need it again.
+          # Its output goes to a file; only the last try's tail is printed.
           for attempt in 1 2 3; do
             if sudo tailscale up \
               --authkey="$authkey" \
@@ -924,11 +873,14 @@ jobs:
               --exit-node="$TARGET" \
               --accept-dns="$TAILSCALE_ACCEPT_DNS" \
               --hostname="github-actions-${GITHUB_RUN_ID}" \
-              --timeout=90s; then
+              --timeout=90s >/tmp/ts-up.log 2>&1; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
               echo "::error::Tailscale did not reach Running after 3 tries."
+              # shellcheck disable=SC1091
+              . /tmp/redact.sh
+              tail -n 20 /tmp/ts-up.log | redact
               exit 1
             fi
             echo "::warning::tailscale up did not finish (try ${attempt}); retrying."
@@ -981,7 +933,6 @@ jobs:
             safe_status
             exit 1
           fi
-          echo "Exit node is online (fingerprint $(cat /tmp/exit-node-fp.txt))."
 
           # Whether the default route really went through the exit node is
           # settled empirically below, by comparing the egress IP from
@@ -1007,14 +958,6 @@ jobs:
           fi
           if [ -z "$after" ]; then
             echo "::warning::Could not read the post-tunnel egress IP (the exit node may block it). Relying on the Tailscale status checks above."
-          else
-            echo "Egress IP after Tailscale: changed (both values masked) -- traffic leaves via the exit node."
-          fi
-
-          if [ "$TAILSCALE_ACCEPT_DNS" = "true" ]; then
-            echo "DNS: sent through the tailnet / exit node."
-          else
-            echo "DNS: resolved by the runner, not the exit node (TAILSCALE_ACCEPT_DNS=false)."
           fi
 
       # ------------------------- Chrome (CDP) -------------------------
@@ -1048,7 +991,6 @@ jobs:
             printf 'export CHROME_CDP_URL=%q\n' "$URL"
             printf 'export CDP_URL=%q\n' "$URL"
           } > /tmp/chrome-cdp.env
-          echo "Using the chrome-cdp-session browser."
 
       - name: Start Chrome
         id: chrome
@@ -1115,8 +1057,8 @@ jobs:
                 printf 'export CHROME_CDP_URL=%q\n' "$URL"
                 printf 'export CDP_URL=%q\n' "$URL"
               } > /tmp/chrome-cdp.env
-              curl -fs "$URL/json/version" | jq -r '.Browser'
-              echo "Chrome ready on ${URL}."
+              # Still answering after the tab cleanup (fails the step otherwise).
+              curl -fs "$URL/json/version" | jq -r '.Browser' >/dev/null
               exit 0
             fi
             sleep 1
@@ -1182,8 +1124,7 @@ jobs:
                   exit 1
                   ;;
                 *)
-                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${TSWORKER_DIR}/ instead:"
-                  for h in "${hits[@]}"; do echo "  - ${h}"; done
+                  echo "::error::entrypoints.txt lists '${line}', which matches ${#hits[@]} files. List it by its path relative to ${TSWORKER_DIR}/ instead."
                   exit 1
                   ;;
               esac
@@ -1219,33 +1160,21 @@ jobs:
                 -not -path '*/.*/*' \
                 | LC_ALL=C sort
             )
-            excluded=0
             for f in "${candidates[@]}"; do
               base="${f##*/}"; base="${base%.*}"
               case "$base" in
-                *.test|*.spec)
-                  echo "  not an entry point: ${f#./} (test file)"
-                  excluded=$((excluded + 1))
-                  continue
-                  ;;
+                *.test|*.spec) continue ;;
               esac
               esc="$(printf '%s' "$base" | sed 's/[][\.*^$()+?{}|\\]/\\&/g')"
               importers="$(grep -rlE \
                 "(from|import|require\\()[^;]{0,120}['\"][^'\"]*${esc}['\"]" \
                 --include='*.ts' . 2>/dev/null | grep -vxF "$f" || true)"
-              if [ -n "$importers" ]; then
-                echo "  not an entry point: ${f#./} (imported by $(printf '%s\n' "$importers" | wc -l) other file(s))"
-                excluded=$((excluded + 1))
-                continue
-              fi
+              [ -z "$importers" ] || continue
               scripts+=("${f#./}")
             done
-            echo "Selected ${#scripts[@]} entry point(s) from ${#candidates[@]} candidate(s); ${excluded} excluded above."
           fi
           if [ "${#scripts[@]}" -eq 0 ]; then
-            echo "::error::No TypeScript entry points found in ${TSWORKER_DIR}/."
-            echo "Every .ts file was excluded as a test or an imported module."
-            echo "Add ${TSWORKER_DIR}/entrypoints.txt to name the entry points explicitly."
+            echo "::error::No entry points in ${TSWORKER_DIR}/: every .ts file is a test or an imported module. Name them in ${TSWORKER_DIR}/entrypoints.txt."
             exit 1
           fi
 
@@ -1259,12 +1188,10 @@ jobs:
               if [ "$base" = "$want" ]; then chosen+=("$s"); fi
             done
             if [ "${#chosen[@]}" -eq 0 ]; then
-              echo "::error::No script named '${want}' in ${TSWORKER_DIR}/. Available:"
-              for s in "${scripts[@]}"; do echo "  - $(basename "$s" .ts)"; done
+              echo "::error::No script named '${want}' in ${TSWORKER_DIR}/."
               exit 1
             fi
             scripts=("${chosen[@]}")
-            echo "Single-script mode: ${#scripts[@]} selected."
           fi
 
           # The runner matches what the discover job reported, so the log and
@@ -1277,14 +1204,12 @@ jobs:
           elif [ -x ./node_modules/.bin/ts-node ]; then
             RUNNER=ts-node
           fi
-          echo "Executing ${#scripts[@]} script(s) with: ${RUNNER}"
 
           # `force` hands runner.ts --force, so it runs each script now instead
           # of gating it on its SCHEDULE / RUN_EVERY_*. Only runner.ts gets it:
           # workerlib/exec-entry.ts would take the flag for a script path.
           FORCE_TARGET=runner.ts
           if [ "$FORCE" = "true" ]; then
-            echo "Force mode: ${FORCE_TARGET} ignores script schedules for this run."
             found=0
             for s in "${scripts[@]}"; do
               [ "$(basename "$s")" = "$FORCE_TARGET" ] && found=1
@@ -1307,9 +1232,6 @@ jobs:
           if [ -s /tmp/chrome-cdp.env ]; then
             # shellcheck disable=SC1091
             . /tmp/chrome-cdp.env
-            echo "Chrome: CHROME_CDP_URL set"
-          else
-            echo "Chrome: not used for this run."
           fi
 
           # Redaction helper from the mask step. Anything a script prints --
@@ -1331,7 +1253,6 @@ jobs:
             safe="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
             log="/tmp/ts-${safe}.log"
 
-            echo "==> ${name}"
             ARGS=()
             if [ "$FORCE" = "true" ] && [ "$name" = "$FORCE_TARGET" ]; then
               ARGS+=(--force)
@@ -1352,15 +1273,13 @@ jobs:
                 ;;
             esac
 
-            # Always show what the script printed. It used to appear only on
-            # failure or with verbose=true, so a script that swallowed its own
-            # error and exited 0 looked like it did nothing.
-            echo "::group::output of ${name} (exit ${rc}, $(wc -l < "$log") lines)"
-            redact < "$log"
-            echo "::endgroup::"
+            # The full output only with verbose=true; a failure prints its
+            # last 60 lines below. Pass/fail rows go to the step summary.
+            if [ "$VERBOSE" = "true" ]; then
+              redact < "$log"
+            fi
 
             if [ "$rc" -eq 0 ]; then
-              echo "[ok] ${name}"
               printf 'ok\t%s\n' "$name" >> /tmp/ts-results.txt
             elif [ "$AUTO" = "true" ] && [ "$rc" -eq 2 ] && grep -qiE 'usage:' "$log"; then
               # A CLI that prints usage and exits 2 is saying it needs
@@ -1368,13 +1287,13 @@ jobs:
               # when nothing declared this file to be an entry point: with
               # an explicit entrypoints.txt a usage error stays a failure,
               # because someone asserted this was a job.
-              echo "[~] ${name} exited ${rc} printing a usage message -- treated as a CLI, not a job"
               printf 'cli\t%s\n' "$name" >> /tmp/ts-results.txt
               rm -f "$log"
               continue
             else
               failures=$((failures + 1))
-              echo "[x] ${name} exited ${rc}"
+              echo "::error::${name} exited ${rc}"
+              [ "$VERBOSE" = "true" ] || tail -n 60 "$log" | redact
               printf 'fail\t%s\t%s\n' "$name" "$rc" >> /tmp/ts-results.txt
               # No `set -e` here: the failure has to be recorded before this
               # step exits non-zero, or the summary loses the row.
@@ -1395,7 +1314,6 @@ jobs:
             echo "::error::${failures} script(s) failed."
             exit 1
           fi
-          echo "All ${#scripts[@]} script(s) completed under the exit node."
 
       - name: Stop Chrome and leave the tailnet
         if: always()
@@ -1411,11 +1329,10 @@ jobs:
               sleep 1
             done
             pkill -KILL -f -- "--user-data-dir=$PROFILE_DIR" || true
-            echo "Chrome stopped."
           fi
           # Always, even after a failed script: a node left joined keeps
           # burning auth key uses and holds an exit-node route.
-          sudo tailscale logout 2>&1 | tail -3 || true
+          sudo tailscale logout >/dev/null 2>&1 || true
 
       - name: Save the Chrome profile
         # Never when the restore failed or was cancelled: that profile is
@@ -1435,10 +1352,7 @@ jobs:
           # (a login over VNC). Its profile is newer than ours, so it wins.
           latest="$(gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' 2>/dev/null \
             | sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' | sort -n | tail -1 || true)"
-          if [ "$latest" != "$(cat /tmp/chrome-restored-id)" ]; then
-            echo "::notice::A newer Chrome profile was saved during this run; keeping it."
-            exit 0
-          fi
+          [ "$latest" = "$(cat /tmp/chrome-restored-id)" ] || exit 0
           id="${{ github.run_id }}"
           mkdir -p /tmp/save
           cd /tmp/save
@@ -1466,8 +1380,8 @@ jobs:
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1 || \
             gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Chrome CDP state" \
               --notes "Encrypted Chrome profile saved by infrastructure-tools chrome-cdp-session." >/dev/null
-          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
-          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-* >/dev/null
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256" >/dev/null
           # Old sets go only after the new manifest is up, so a failed upload
           # never loses the last good save. tailscaled.state.enc is kept.
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
@@ -1476,7 +1390,6 @@ jobs:
             | while read -r name; do
                 gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
               done
-          echo "Chrome profile saved."
 
       - name: Summary
         if: always()

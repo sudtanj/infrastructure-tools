@@ -29,7 +29,6 @@ const BAR_ID = "jui";
 // begin tasks instead, so they are left alone.
 const COLLECT = /check\s*in|klaim/i;
 const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, accepted by the owner
-const REFUSED = /salah|gagal/i; // "Ada sesuatu yang salah", "... gagal"
 const MAX_PRESSES = 6;
 // Exchanging: at most once per run, and only when the Tukar page offers both
 // DANA and Rp500. Nothing is ever typed: if it asks to link DANA or for a
@@ -215,12 +214,10 @@ async function redeem(d: AndroidDevice, device: string) {
   const poin = ws.find((w) => /^poin$/i.test(w.text));
   const rp = poin && ws.find((w) => /^rp/i.test(w.text) && w.y > poin.y && w.y - poin.y < 120);
   const amount = rp && rupiah(ws, rp);
-  if (!rp || amount === undefined) return log(`balance not found${rp ? ` (read "${lineOf(ws, rp)}")` : ""}`);
-  log(`balance Rp${amount} (read "${lineOf(ws, rp)}")`);
+  if (!rp || amount === undefined) return log("balance not found");
   if (amount < REDEEM_AT) return;
   const tukar = ws.find((w) => /^tukar$/i.test(w.text) && Math.abs(w.y - rp.y) < 50);
   if (!tukar) return log('"Tukar" not found');
-  log(`balance is at least Rp${REDEEM_AT}; opening Tukar`);
   await press(d, tukar.x, tukar.y);
 
   // A web page; it can take a while.
@@ -248,7 +245,6 @@ async function redeem(d: AndroidDevice, device: string) {
     }
     // Still the same button: the first press was not accepted. Never press twice.
     if (last && last.label === b.label && Math.abs(last.y - b.y) < 40) break;
-    log(`pressing "${b.label}"`);
     redeemed = true;
     await press(d, b.x, b.y);
     last = b;
@@ -302,7 +298,6 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       const s = await screenshot(device);
       const accept = (await words(s)).find((w) => ACCEPT.test(w.text));
       if (accept && accepts < 2) {
-        log("accepting the 18+ terms prompt");
         accepts++;
         await press(d, accept.x, accept.y);
         await sleep(5_000);
@@ -322,22 +317,13 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       tried.add(`${scrolls}:${target.label}:${target.y}`);
       presses++;
       await press(d, target.x, target.y);
-      // The answer is a toast for about 2 s, or the button changing.
-      await sleep(2_000);
-      const after = await words(await screenshot(device));
-      const bad = after.find((w) => REFUSED.test(w.text));
-      const said = bad ? ` ("${lineOf(after, bad)}")` : "";
       // Collected only if the button is gone (or relabelled) once the page settles.
-      await sleep(4_000);
+      await sleep(6_000);
       const still = (await buttons(await screenshot(device))).some(
         (b) => b.label === target.label && Math.abs(b.y - target.y) < 40,
       );
-      if (still) {
-        refused.add(target.label);
-        log(`"${target.label}": not accepted${said}`);
-      } else log(`"${target.label}": claimed${said}`);
+      if (still) refused.add(target.label);
     }
-    if (presses === 0) log("nothing to check in or claim");
     if (REDEEM && !redeemed) await redeem(d, device);
   } catch (e) {
     log("failed:", String(e).slice(0, 300));

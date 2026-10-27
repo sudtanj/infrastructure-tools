@@ -71,7 +71,6 @@ function redact(text: string): string {
   return text;
 }
 
-const log = (msg: string) => console.log(redact(msg));
 const warn = (msg: string) => console.log("::warning::" + redact(msg).replace(/\s*\n[\s\S]*/, ""));
 // Playwright errors carry a multi-line call log; the first line is enough.
 const brief = (e: unknown) => String(e instanceof Error ? e.message : e).split("\n")[0];
@@ -350,7 +349,7 @@ async function googleVerify(page: Page, cf: Cloudflare, zone: string, zoneId: st
     if (!seen) throw new ApiError("Search Console showed neither a TXT record nor a verified domain");
     if (seen.i === 1) return "already verified";
 
-    log(`  google: TXT record on ${zone}: ${await cf.ensureRecord(zoneId, "TXT", zone, seen.m[0])}`);
+    await cf.ensureRecord(zoneId, "TXT", zone, seen.m[0]);
     if (DRY_RUN) return "would verify";
     await page.getByRole("button", { name: /^verify$/i }).last().click({ timeout: 10_000 });
     const result = await waitForText(page, [VERIFIED_RE, /verification failed|couldn.t verify|could not verify/i], 90_000);
@@ -376,7 +375,6 @@ async function googleSitemap(page: Page, zone: string, sitemap: string): Promise
 
 async function google(page: Page, cf: Cloudflare, zone: string, zoneId: string, sitemaps: string[]) {
   const state = await googleVerify(page, cf, zone, zoneId);
-  log(`  google: ${zone} ${state}`);
   if (DRY_RUN) return `${state}; would submit ${sitemaps.length} sitemap(s)`;
   let ok = 0;
   for (const sm of sitemaps) {
@@ -466,7 +464,6 @@ async function bing(api: Bing, cf: Cloudflare, host: string, zoneId: string, sit
     await api.call("POST", "AddSite", { siteUrl: `https://${host}/` });
     site = (await api.sites(true)).get(host);
     if (!site) throw new ApiError("Bing AddSite succeeded but the site is not listed");
-    log(`  bing: ${host} added`);
   }
   const siteUrl: string = site.Url;
 
@@ -474,7 +471,7 @@ async function bing(api: Bing, cf: Cloudflare, host: string, zoneId: string, sit
     const cname = String(site.DnsVerificationCode || `${String(site.AuthenticationCode ?? "").toLowerCase()}.${host}`)
       .toLowerCase().replace(/\.$/, "");
     if (!cname.endsWith("." + host)) throw new ApiError("Bing returned no usable DNS verification code");
-    log(`  bing: CNAME record: ${await cf.ensureRecord(zoneId, "CNAME", cname, "verify.bing.com")}`);
+    await cf.ensureRecord(zoneId, "CNAME", cname, "verify.bing.com");
     if (DRY_RUN) return "would verify and submit";
     let verified = false;
     for (let attempt = 1; attempt <= 5 && !verified; attempt++) {
@@ -482,7 +479,6 @@ async function bing(api: Bing, cf: Cloudflare, host: string, zoneId: string, sit
       if (!verified && attempt < 5) await sleep(20_000);
     }
     if (!verified) return "added, verification pending (the CNAME stays; the next run retries)";
-    log(`  bing: ${host} verified`);
   } else if (DRY_RUN) {
     return "already verified; would submit";
   }
@@ -507,7 +503,6 @@ async function main(): Promise<number> {
   }
   const urlLimit = Number.parseInt(env("BING_URL_LIMIT"), 10) || 100;
   const engines = (env("ENGINES") || "google,bing").toLowerCase();
-  if (DRY_RUN) log("Dry run: nothing is created, verified or submitted.");
 
   const cf = new Cloudflare(token, account);
   const { hosts, zones } = await discover(cf);
@@ -519,7 +514,6 @@ async function main(): Promise<number> {
   for (const z of [...zones.keys()].sort()) label(z, "zone");
   const sorted = [...hosts.keys()].sort();
   for (const h of sorted) label(h, "site");
-  log(`Found ${hosts.size} custom hostname(s) in ${zones.size} zone(s).`);
 
   const rows: [string, string, string][] = [];
   const sites = new Map<string, { zone: string; sitemaps: string[] }>();
@@ -533,7 +527,6 @@ async function main(): Promise<number> {
     }
     const sitemaps = await findSitemaps(host);
     sites.set(host, { zone: zone!, sitemaps });
-    log(`${label(host, "site")} (${[...hosts.get(host)!].sort().join(", ")}): website, ${sitemaps.length} sitemap(s)`);
   }
 
   let failed = false;
@@ -544,7 +537,6 @@ async function main(): Promise<number> {
     try {
       if (engines.includes("google")) {
         for (const zone of [...new Set([...sites.values()].map((s) => s.zone))].sort()) {
-          log(`Google: ${zone}`);
           const sitemaps = [...sites.values()].filter((s) => s.zone === zone).flatMap((s) => s.sitemaps);
           try {
             rows.push([label(zone, "zone"), "google", await google(page, cf, zone, zones.get(zone)!, sitemaps)]);
@@ -568,7 +560,6 @@ async function main(): Promise<number> {
           api = null;
         }
         for (const [host, { zone, sitemaps }] of api ? [...sites].sort((a, b) => a[0].localeCompare(b[0])) : []) {
-          log(`Bing: ${host}`);
           try {
             rows.push([label(host, "site"), "bing", await bing(api!, cf, host, zones.get(zone)!, sitemaps, urlLimit)]);
           } catch (e) {
@@ -594,11 +585,11 @@ async function main(): Promise<number> {
     ...rows.map(([a, b, c]) => `| ${a} | ${b} | ${c.replace(/\|/g, "/")} |`),
   ].join("\n");
   const text = redact(summary) + "\n";
-  console.log(text);
+  // In Actions the table goes to the job summary only, not the log.
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, text);
-  }
+  } else console.log(text);
   return failed ? 1 : 0;
 }
 

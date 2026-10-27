@@ -17,7 +17,6 @@ hw.lcd.height=1280
 hw.lcd.density=320
 showDeviceFrame=no
 EOF
-grep -E '^(hw\.lcd\.|hw\.ramSize|hw\.cpu\.ncore)' "$cfg"
 
 # Save state skips runs that fail before this point (the AVD is as restored).
 touch /tmp/emulator-launched

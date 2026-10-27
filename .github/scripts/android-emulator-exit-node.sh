@@ -6,10 +6,7 @@
 # GitHub's IP.
 set -euo pipefail
 
-if [ "${USE_EXIT_NODE:-true}" != true ]; then
-  echo "Exit node off for this run."
-  exit 0
-fi
+if [ "${USE_EXIT_NODE:-true}" != true ]; then exit 0; fi
 target="$(printf '%s' "${TAILSCALE_EXIT_NODE:-}" | tr -d '[:space:]')"
 if [ -z "$target" ]; then
   echo "::error title=No exit node::TAILSCALE_EXIT_NODE is not set; run with exit_node off to go without one."
@@ -37,4 +34,3 @@ if [ -z "$after" ] || [ "$after" = "$before" ]; then
   sudo tailscale set --exit-node= || true
   exit 1
 fi
-echo "Internet traffic now leaves through the exit node (fingerprint $(printf '%s' "$target" | sha256sum | cut -c1-12))."

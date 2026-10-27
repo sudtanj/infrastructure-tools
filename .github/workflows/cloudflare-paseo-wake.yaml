@@ -74,7 +74,6 @@ jobs:
             echo "::error::Missing secrets:${missing} (see the comment at the top of this workflow)"
             exit 1
           fi
-          echo "[+] all secrets are set"
 
       - name: Install instabox CLI
         run: |
@@ -102,7 +101,6 @@ jobs:
           echo "::add-mask::${url}"
           echo "::add-mask::${url#https://}"
           { echo "id=${id}"; echo "url=${url}"; } >> "$GITHUB_OUTPUT"
-          echo "[+] found the machine and its public URL (not shown)"
 
       - name: Check the wake key can wake the machine
         env:
@@ -114,11 +112,11 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "X-API-Key: ${WAKE_KEY}" \
             "${INSTABOX_API_URL}/v1/machines/${MACHINE_ID}/wake" || echo 000)
           case "$code" in
-            2??) echo "[+] wake API answered ${code}" ;;
+            2??) ;;
             401|403) echo "::error::INSTABOX_WAKE_API_KEY was refused (${code}): expired, revoked, or missing machines:write"; exit 1 ;;
             404|405) echo "::error::the Instabox wake API answered ${code}; the Worker would not be able to wake the machine"; exit 1 ;;
             # e.g. "not paused": the key and the endpoint are fine, the machine is just awake.
-            4??) echo "[+] wake API answered ${code} (machine not paused right now)" ;;
+            4??) ;;
             *) echo "::error::the Instabox wake API answered ${code}"; exit 1 ;;
           esac
 
@@ -145,7 +143,6 @@ jobs:
             echo "::add-mask::${worker#https://}"
             echo "worker=${worker}" >> "$GITHUB_OUTPUT"
           fi
-          echo "[+] Worker deployed"
 
       - name: Set the Worker secrets
         working-directory: ${{ env.WORKER_DIR }}
@@ -173,7 +170,6 @@ jobs:
             echo "::error::could not set the Worker secrets (the Worker answers 503 until they are set)"
             exit 1
           fi
-          echo "[+] Worker secrets set: UPSTREAM_URL INSTABOX_MACHINE_ID INSTABOX_WAKE_KEY PASSWORD_SALT PASSWORD_SHA256"
 
       - name: Smoke test
         if: steps.deploy.outputs.worker != ''
@@ -186,15 +182,13 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
             -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
             -H 'Sec-WebSocket-Protocol: paseo.bearer.definitely-not-the-password' "${WORKER}/ws" || echo 000)
-          [ "$code" = 401 ] && echo "[+] wrong password refused (401)" || { echo "::error::wrong password got ${code}, expected 401"; exit 1; }
+          [ "$code" = 401 ] || { echo "::error::wrong password got ${code}, expected 401"; exit 1; }
           # Anything outside / and /ws is not proxied.
           code=$(curl -sS -o /dev/null -w '%{http_code}' "${WORKER}/anything-else" || echo 000)
-          [ "$code" = 404 ] && echo "[+] other paths refused (404)" || { echo "::error::other path got ${code}, expected 404"; exit 1; }
+          [ "$code" = 404 ] || { echo "::error::other path got ${code}, expected 404"; exit 1; }
           # The page: the daemon's pairing page (200) when awake, the wake form (503) when asleep.
           code=$(curl -sS -o /dev/null -w '%{http_code}' "${WORKER}/" || echo 000)
           case "$code" in
-            200) echo "[+] page proxied to the daemon (machine awake)" ;;
-            503) echo "[+] wake page served (machine asleep)" ;;
+            200|503) ;;
             *) echo "::error::page got ${code}"; exit 1 ;;
           esac
-          echo "[*] the Worker URL is in the Cloudflare dashboard (Workers > paseo-wake); use it in the Paseo app"
