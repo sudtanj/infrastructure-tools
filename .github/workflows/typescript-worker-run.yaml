@@ -1087,6 +1087,8 @@ jobs:
           # gcp_billing sends its summary to Telegram.
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # runner.ts queues a line here when a script fails logged out; sent by "Send login alerts".
+          ALERT_FILE: /tmp/login-alerts.txt
         run: |
           set -uo pipefail
           cd "private/$TSWORKER_DIR"
@@ -1333,6 +1335,26 @@ jobs:
           # Always, even after a failed script: a node left joined keeps
           # burning auth key uses and holds an exit-node route.
           sudo tailscale logout >/dev/null 2>&1 || true
+
+      # After the tailnet: Telegram times out through the exit node.
+      - name: Send login alerts to Telegram
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          [ -s /tmp/login-alerts.txt ] || exit 0
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_TOKEN or TELEGRAM_CHAT_ID is not set; alerts not sent."
+            exit 0
+          fi
+          text="$(printf 'TypeScript worker logged out (%s), log in again over VNC:\n' "$(TZ=Asia/Jakarta date '+%d %b %H:%M WIB')"; awk '!seen[$0]++ { print "- " $0 }' /tmp/login-alerts.txt)"
+          curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            && echo "Login alert sent to Telegram." \
+            || echo "::warning::Telegram sendMessage failed."
 
       - name: Save the Chrome profile
         # Never when the restore failed or was cancelled: that profile is
