@@ -30,7 +30,9 @@ name: "Android emulator session over Tailscale"
 #
 # PINEDRAMA AUTOPLAY
 #   Daily at 07:00 and 17:00 UTC+7 (GitHub can start a scheduled run late),
-#   or with `autoplay` on, the runner plays PineDrama itself with
+#   or with `autoplay` on, the runner first launches EraSpace's rocket
+#   ("Luncurkan Roket") until it is out of tokens with
+#   .github/scripts/eraspace/eraspace.ts, then plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
 #   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
 #   balance reaches it, plays until the coin timer at the top left is gone or

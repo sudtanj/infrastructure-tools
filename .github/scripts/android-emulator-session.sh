@@ -112,12 +112,17 @@ emulator_died() {
   exit 1
 }
 
-# Scheduled runs: play PineDrama until its coin timer is gone or
-# AUTOPLAY_MINUTES pass, then end the session so it saves.
+# Scheduled runs: launch EraSpace's rocket, play PineDrama until its coin
+# timer is gone or AUTOPLAY_MINUTES pass, then end the session so it saves.
 if [ "${AUTOPLAY:-false}" = true ]; then
   minutes="${AUTOPLAY_MINUTES:-30}"
   echo "Emulator ready. Playing PineDrama until the coin is gone (limit ${minutes} minutes)."
   log_memory
+  # EraSpace's daily rocket launch first: a few minutes at most.
+  DEVICE=emulator-5554 timeout 10m node .github/scripts/eraspace/eraspace.ts \
+    || echo "::warning::The EraSpace script ended with an error; going on."
+  # It lowers the screen density while it plays; PineDrama's taps assume 320.
+  adb shell wm density reset || true
   DEVICE=emulator-5554 MAX_MINUTES="$minutes" \
     timeout "$((minutes + 15))m" node .github/scripts/pinedrama/pinedrama.ts \
     || echo "::warning::The PineDrama script ended with an error; saving anyway."
