@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import type { AndroidDevice } from "playwright-core";
 import { createWorker, PSM, type Worker } from "tesseract.js";
+import { alert, LOGIN_ACTIVITY } from "../android-alert.ts";
 
 const PKG = "com.ss.android.ttmd.video";
 const PAGE = "com.bytedance.hybrid.spark.page.SparkActivity";
@@ -41,6 +42,7 @@ const CONFIRM = /tukar|tarik|konfirmasi|lanjut/i;
 const NEEDS_OWNER = /^(masukkan|otp|hubungkan|tautkan|sambungkan|verifikasi)$/i;
 const RESULT = /berhasil|sukses|diproses|gagal|salah|tidak/i;
 let redeemed = false;
+let loginAlerted = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), "rewards:", ...a);
@@ -258,6 +260,18 @@ async function redeem(d: AndroidDevice, device: string) {
   log("exchange sent; no answer seen");
 }
 
+// A login screen instead of the rewards page, or after pressing a claim
+// button: the session expired. (Not OCR: "Masuk" is also check-in wording.)
+// Alerts once per run; true if logged out.
+async function loggedOut(d: AndroidDevice): Promise<boolean> {
+  if (!LOGIN_ACTIVITY.test(await focused(d).catch(() => ""))) return false;
+  if (!loginAlerted) {
+    loginAlerted = true;
+    alert("PineDrama is logged out (its login screen opened); rewards were not claimed. Log in again over VNC.");
+  }
+  return true;
+}
+
 async function waitFor(d: AndroidDevice, what: string, ms: number): Promise<boolean> {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(2_000)) if ((await focused(d)).includes(what)) return true;
   return false;
@@ -275,7 +289,10 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
     }
     if (!tab) return log("coin tab not found; skipping");
     await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
-    if (!(await waitFor(d, PAGE, 60_000))) return log("the rewards page did not open; skipping");
+    if (!(await waitFor(d, PAGE, 60_000))) {
+      if (!(await loggedOut(d))) log("the rewards page did not open; skipping");
+      return;
+    }
     await sleep(8_000); // the page loads its data after it shows
     // It reopens where it was last scrolled to; Check in is at the top.
     for (let i = 0; i < 3; i++) {
@@ -319,6 +336,8 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       await press(d, target.x, target.y);
       // Collected only if the button is gone (or relabelled) once the page settles.
       await sleep(6_000);
+      // Logged out, a claim opens the login screen.
+      if (await loggedOut(d)) return;
       const still = (await buttons(await screenshot(device))).some(
         (b) => b.label === target.label && Math.abs(b.y - target.y) < 40,
       );

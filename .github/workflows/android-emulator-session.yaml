@@ -39,6 +39,9 @@ name: "Android emulator session over Tailscale"
 #   `autoplay_minutes` pass, then saves; no stop file needed.
 #   Also daily at 05:00 UTC+7 for the EraSpace rocket alone (no PineDrama).
 #   If a session is already running, the scheduled one waits for it.
+#   If EraSpace or PineDrama turns out to be logged out (or EraSpace's rocket
+#   can't be reached), a message goes to Telegram at the end of the run, once
+#   the exit node is off; log in again over VNC in a manual session.
 #
 # EXIT NODE
 #   With `exit_node` on (the default), the runner's internet traffic, and so
@@ -59,6 +62,8 @@ name: "Android emulator session over Tailscale"
 #   TAILSCALE_TAGS                 e.g. "tag:ci"
 #   STATE_KEY                      passphrase that encrypts the saved AVD
 #   VNC_PASSWORD                   VNC password (only the first 8 chars count)
+#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID  login alerts (optional; shared with the
+#                                  other alerts)
 # ---------------------------------------------------------------------------
 
 on:
@@ -115,6 +120,8 @@ jobs:
       AUTOPLAY: ${{ github.event_name == 'schedule' || inputs.autoplay }}
       AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 30 }}
       PLAY_PINEDRAMA: ${{ github.event.schedule != '0 22 * * *' }}
+      # The scripts queue alerts here (android-alert.ts); sent by "Send alerts".
+      ALERT_FILE: /tmp/android-alerts.txt
 
     steps:
       - uses: actions/checkout@v4
@@ -355,6 +362,26 @@ jobs:
       - name: Leave the exit node
         if: ${{ always() && env.USE_EXIT_NODE == 'true' }}
         run: sudo tailscale set --exit-node= || true
+
+      # After the exit node: Telegram times out through it.
+      - name: Send alerts to Telegram
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          [ -s "$ALERT_FILE" ] || exit 0
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_TOKEN or TELEGRAM_CHAT_ID is not set; alerts not sent."
+            exit 0
+          fi
+          # Once each, in order (PineDrama claims twice a run).
+          text="$(printf 'Android emulator (%s):\n' "$(TZ=Asia/Jakarta date '+%d %b %H:%M WIB')"; awk '!seen[$0]++ { print "- " $0 }' "$ALERT_FILE")"
+          curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            || echo "::warning::Telegram sendMessage failed."
 
       - name: Save state
         # Whenever the emulator ran, however its step ended (stop file, failure,

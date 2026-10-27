@@ -21,6 +21,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { alert, LOGIN_ACTIVITY, LOGIN_LABEL } from "../android-alert.ts";
 
 const PKG = "com.eraspace.app";
 const DEVICE = process.env.DEVICE ?? "100.113.219.108:5555";
@@ -118,13 +119,26 @@ async function restoreDensity() {
   originalDensity = undefined;
 }
 
+// When a screen we expect does not show: a login screen or a login button
+// means the session expired; anything else may be a changed app. Either way
+// the owner hears about it.
+async function stuck(what: string) {
+  const f = await focused().catch(() => "");
+  const login = (await screen()).find((n) => LOGIN_LABEL.test(n.text.trim()) || LOGIN_LABEL.test(n.desc.trim()));
+  if (LOGIN_ACTIVITY.test(f) || login) {
+    alert(`EraSpace is logged out (${login ? `"${login.text || login.desc}" button` : "login screen"} shown); log in again over VNC.`);
+  } else {
+    alert(`EraSpace: ${what}, so the rocket was not launched. Not logged in, or the app changed.`);
+  }
+}
+
 async function play(): Promise<void> {
   const home = await waitFor(["fabGamification"]);
-  if (!home) return log("the rocket badge did not show on the home screen; skipping");
+  if (!home) return stuck("the rocket badge did not show on the home screen");
   await tap(home.node);
 
   const landing = await waitFor(["btnStartPlay", "btnLaunch"]);
-  if (!landing) return log('"Mulai Bermain" did not show; skipping');
+  if (!landing) return stuck('"Mulai Bermain" did not show');
   if (landing.id === "btnStartPlay") await tap(landing.node);
 
   let launches = 0;
