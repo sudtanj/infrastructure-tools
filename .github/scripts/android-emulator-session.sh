@@ -123,9 +123,12 @@ if [ "${AUTOPLAY:-false}" = true ]; then
     || echo "::warning::The EraSpace script ended with an error; going on."
   # It lowers the screen density while it plays; PineDrama's taps assume 320.
   adb shell wm density reset || true
-  DEVICE=emulator-5554 MAX_MINUTES="$minutes" \
-    timeout "$((minutes + 15))m" node .github/scripts/pinedrama/pinedrama.ts \
-    || echo "::warning::The PineDrama script ended with an error; saving anyway."
+  # The 05:00 run is for the rocket alone.
+  if [ "${PLAY_PINEDRAMA:-true}" = true ]; then
+    DEVICE=emulator-5554 MAX_MINUTES="$minutes" \
+      timeout "$((minutes + 15))m" node .github/scripts/pinedrama/pinedrama.ts \
+      || echo "::warning::The PineDrama script ended with an error; saving anyway."
+  fi
   pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
   log_memory
   max=0

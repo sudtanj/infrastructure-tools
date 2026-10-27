@@ -37,6 +37,7 @@ name: "Android emulator session over Tailscale"
 #   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
 #   balance reaches it, plays until the coin timer at the top left is gone or
 #   `autoplay_minutes` pass, then saves; no stop file needed.
+#   Also daily at 05:00 UTC+7 for the EraSpace rocket alone (no PineDrama).
 #   If a session is already running, the scheduled one waits for it.
 #
 # EXIT NODE
@@ -61,10 +62,12 @@ name: "Android emulator session over Tailscale"
 # ---------------------------------------------------------------------------
 
 on:
-  # 07:00 and 17:00 UTC+7.
+  # 07:00 and 17:00 UTC+7; 05:00 UTC+7 (22:00 UTC the day before) launches
+  # EraSpace's rocket only, see PLAY_PINEDRAMA.
   schedule:
     - cron: '0 0 * * *'
     - cron: '0 10 * * *'
+    - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
       max_minutes:
@@ -111,6 +114,7 @@ jobs:
       USE_EXIT_NODE: ${{ github.event_name == 'schedule' || inputs.exit_node }}
       AUTOPLAY: ${{ github.event_name == 'schedule' || inputs.autoplay }}
       AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 30 }}
+      PLAY_PINEDRAMA: ${{ github.event.schedule != '0 22 * * *' }}
 
     steps:
       - uses: actions/checkout@v4
