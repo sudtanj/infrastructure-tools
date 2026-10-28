@@ -66,8 +66,9 @@ RUN cd /src && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" \
 # What wipter-app.bin links against, plus Xvfb, nothing else: no window
 # manager, VNC, fonts beyond what cairo pulls in, or shell tools. libgbm1
 # drags in Mesa's drivers and LLVM (~150 MB) only for the GPU, which isn't
-# used (--disable-gpu, Xvfb without GLX): removed, as are translations and
-# icon themes nothing displays.
+# used (--disable-gpu, Xvfb without GLX): removed, as are systemd and the
+# D-Bus daemon (pulled in, never started), translations and icon themes
+# nothing displays.
 # The app reads its user name (os.userInfo), so uid 65532 gets a passwd entry.
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
@@ -79,9 +80,11 @@ RUN apt-get update \
       libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
       libxrandr2 xvfb \
  && for p in mesa-libgallium libgl1-mesa-dri libglx-mesa0 mesa-vulkan-drivers libvulkan1 \
-            libllvm19 libz3-4 libdrm-amdgpu1 libdrm-radeon1 libdrm-nouveau2 libdrm-intel1; do \
+            libllvm19 libz3-4 libdrm-amdgpu1 libdrm-radeon1 libdrm-nouveau2 libdrm-intel1 \
+            systemd systemd-sysv libsystemd-shared libpam-systemd dbus dbus-bin dbus-daemon \
+            dbus-session-bus-common dbus-system-bus-common; do \
       if dpkg-query -W -f '${Status}' "$p" 2>/dev/null | grep -qx 'install ok installed'; then \
-        dpkg --purge --force-depends "$p"; fi; done \
+        dpkg --purge --force-depends --force-remove-protected "$p"; fi; done \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* /usr/share/doc /usr/share/man /usr/share/info \
       /usr/share/locale /usr/share/icons/Adwaita \
  && echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/usr/sbin/nologin' >> /etc/passwd \
@@ -98,10 +101,16 @@ FROM runtime AS check
 ARG TARGETARCH
 RUN ! ldd /opt/Wipter/wipter-app.bin /usr/bin/Xvfb | grep -F 'not found' \
  && dpkg-query -W -f '${Installed-Size}\t${Package}\n' | sort -rn | head -20 \
- && du -xsk /opt/Wipter /usr/lib/* /usr/share/* 2>/dev/null | sort -rn | head -15
+ && du -xsk /opt/Wipter /usr/lib/* /usr/share/* 2>/dev/null | sort -rn | head -15 \
+ && find /usr/lib -type f -size +1M -printf '%k\t%p\n' | sort -rn | head -25
 USER 65532:65532
 RUN if [ "$TARGETARCH" = amd64 ]; then WIPTER_DEBUG=1 timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
  && touch /tmp/check-ok
+# Informational: memory with candidate switches (a failure doesn't fail the build).
+RUN if [ "$TARGETARCH" = amd64 ]; then \
+      for f in --single-process --js-flags=--lite-mode --js-flags=--max-semi-space-size=1; do \
+        echo "variant $f:"; WIPTER_CHROMIUM_FLAGS="$f" timeout 120 /usr/local/bin/wipter-entry -selftest || echo "variant $f failed"; \
+      done; fi
 
 FROM runtime
 COPY --from=check /tmp/check-ok /tmp/check-ok

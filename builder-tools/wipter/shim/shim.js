@@ -121,9 +121,10 @@ function memory() {
         try {
             const pss = +/^Pss:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8'))[1];
             const argv = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-            const type = argv[0].endsWith('wipter-app.bin')
-                ? ((argv.find(a => a.startsWith('--type=')) || '--type=main').slice(7))
-                : path.basename(argv[0]);
+            // Chromium starts its helpers as /proc/self/exe --type=...
+            const type = argv.find(a => a.startsWith('--utility-sub-type='))?.slice(19).split('.').pop()
+                || argv.find(a => a.startsWith('--type='))?.slice(7)
+                || (argv[0].endsWith('wipter-app.bin') ? 'main' : path.basename(argv[0]));
             by[type] = (by[type] || 0) + pss;
             total += pss;
         } catch {}
