@@ -15,6 +15,8 @@ name: "Deploy GitHub runner on Instabox"
 # connection to GitHub does not count as activity). Start it again with mode "wake",
 # `instabox start <machine>` or the dashboard. Jobs queued meanwhile wait in GitHub's queue
 # (up to 24 h) and run once it's back.
+# Mode "status" shows the machine state, memory, runner containers, OOM kills and the
+# supervisors' logs (sanitized).
 # Nothing from the runner is kept on the machine's disk: no swap, the system journal in RAM,
 # the supervisor's log in RAM, no job container logs.
 #
@@ -39,13 +41,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "deploy: create/start the machine and (re)deploy the runner. wake: only start the paused machine"
+        description: "deploy: create/start the machine and (re)deploy the runner. wake: only start the paused machine. status: wake it and show the runners, memory and supervisor logs"
         required: false
         default: "deploy"
         type: choice
         options:
           - deploy
           - wake
+          - status
       machine_name:
         description: "Instabox machine name (blank: repo variable INSTABOX_RUNNER_MACHINE, else gh-runner)"
         required: false
@@ -70,7 +73,7 @@ env:
 
 jobs:
   runner:
-    name: "${{ inputs.mode == 'wake' && 'Wake' || 'Deploy runner' }}"
+    name: "${{ inputs.mode == 'wake' && 'Wake' || inputs.mode == 'status' && 'Status' || 'Deploy runner' }}"
     # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -162,6 +165,7 @@ jobs:
           }
           if info=$(instabox get "$MACHINE_NAME" --json 2>/dev/null); then
             state=$(jq -r '.state // "unknown"' <<< "$info")
+            echo "[*] machine ${MACHINE_NAME}: ${state}"
             case "$state" in
               running) ;;
               # start resumes a paused machine, or boots it fresh when its memory cannot be restored
@@ -177,9 +181,11 @@ jobs:
           fi
           # A command also wakes a machine paused for being idle, and resets its idle timer.
           quiet instabox exec "$MACHINE_NAME" --timeout 120 -- true
+          state=$(instabox get "$MACHINE_NAME" --json 2>/dev/null | jq -r '.state // "unknown"') || state=unknown
+          echo "[+] machine ${MACHINE_NAME}: ${state} (answers commands)"
 
       - name: Configure SSH
-        if: inputs.mode == 'deploy'
+        if: inputs.mode != 'wake'
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -195,6 +201,38 @@ jobs:
           [ -n "$alias" ] || { echo "::error::instabox ssh-config printed no Host block"; exit 1; }
           echo "SSH_ALIAS=${alias}" >> "$GITHUB_ENV"
           ssh -T -o BatchMode=yes "$alias" true
+
+      - name: Show runner status
+        if: inputs.mode == 'status'
+        env:
+          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra repos <<< "$GH_RUNNER_REPO"
+          for r in "${repos[@]}"; do
+            r="${r//[[:space:]]/}"; r="${r#https://github.com/}"; r="${r%.git}"; r="${r%/}"
+            [ -n "$r" ] || continue
+            echo "::add-mask::${r}"; echo "::add-mask::${r#*/}"
+          done
+          # Read-only: names, states, memory and the supervisors' own logs (which print no secrets).
+          ssh -T -o BatchMode=yes "$SSH_ALIAS" 'bash -s' <<'SH' 2>&1 | perl "${RUNNER_TEMP}/sanitize.pl"
+          D=docker; docker info >/dev/null 2>&1 || D="sudo -n docker"
+          echo "== up since"; uptime -s; uptime
+          echo "== memory (MB)"; free -m
+          echo "== containers"; $D ps -a --format '{{.Names}}\t{{.Status}}' | sort
+          echo "== usage"; $D stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' | sort
+          for c in $($D ps --format '{{.Names}}' | grep -E '^gh-runner-job' | sort); do
+            echo "== ${c}: RAM dirs and biggest processes"
+            $D exec "$c" df -h /home/runner/_work /tmp 2>/dev/null | tail -n +2
+            $D top "$c" -eo rss,comm 2>/dev/null | sort -rn | head -n 6
+          done
+          echo "== kernel OOM kills"
+          sudo -n dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -n 20 || true
+          for s in $($D ps -a --format '{{.Names}}' | grep -E '^gh-runner-supervisor' | sort); do
+            echo "== ${s} log (last 25 lines)"
+            $D exec "$s" sh -c 'cat /tmp/supervisor.log.1 /tmp/supervisor.log 2>/dev/null' | tail -n 25
+          done
+          SH
 
       - name: Run upsert-github-runner.sh over SSH
         if: inputs.mode == 'deploy'
