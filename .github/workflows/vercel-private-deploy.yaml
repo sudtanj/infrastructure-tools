@@ -56,8 +56,11 @@ name: "Deploy Vercel Projects (private repo)"
 # ---------------------------------------------------------------------------
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       force:

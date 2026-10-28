@@ -45,8 +45,12 @@ on:
       - '!builder-tools/mi3-padavan-firmware-builder/**'
       - '!builder-tools/opi-zero3-armbian/**'
       - '.github/workflows/builder-tools-docker-publish.yml'
-  schedule:
-    - cron: '17 4 * * 1'
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # It passes no_cache=true, as the scheduled run built without cache.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: '17 4 * * 1'
   workflow_dispatch:
     inputs:
       folder:

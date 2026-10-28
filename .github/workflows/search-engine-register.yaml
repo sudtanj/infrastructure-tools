@@ -60,8 +60,11 @@ name: "Register Cloudflare sites with Google and Bing (Yahoo)"
 on:
   # Weekly: new sites are picked up within a week, and Bing's URL quota is not
   # spent re-sending the same pages daily. Run it by hand after launching a site.
-  schedule:
-    - cron: "23 2 * * 1"
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: "23 2 * * 1"
   workflow_dispatch:
     inputs:
       engines:

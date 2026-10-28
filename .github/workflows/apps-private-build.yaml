@@ -81,8 +81,11 @@ name: "Build cross-platform apps: Android, iOS, Windows, macOS, Linux (private r
 on:
   # Every 30 minutes: app builds are slower and rarer than web deploys. Each
   # poll is one API call, and a no-change run stops at the poll job.
-  schedule:
-    - cron: "7,37 * * * *"
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       force:

@@ -31,7 +31,8 @@ seconds. So workflow-cron keeps the cron table itself and, at the exact minute, 
 | `WORKFLOW_CRON_REF` | `main` | Branch the workflows run from |
 | `WORKFLOW_CRON_TELEGRAM_TOKEN`, `WORKFLOW_CRON_TELEGRAM_CHAT_ID` | | Optional failure alert |
 
-A job line is five cron fields, the workflow file name, then `workflow_dispatch` inputs:
+A job line is five cron fields, the workflow file name, then `workflow_dispatch` inputs
+(a few of the lines in `init-workflow-cron.sh`):
 
 ```
 # min hour dom mon dow  workflow file                    inputs
@@ -76,6 +77,7 @@ Telegram alerts reuse the `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` secrets.
 Logs: `docker logs workflow-cron` on the device (or Dozzle). Each dispatch prints how late it
 was sent.
 
-`typescript-worker-run.yaml`, `android-emulator-session.yaml` and `commute-traffic.yaml` no longer have a
-`schedule:` of their own, so nothing runs twice. If the device goes away, put their
+Every workflow in the job list (all the repo's crons except `opi-uptime-check.yaml`, which
+watches the Orange Pi and so stays on GitHub's clock) no longer has a
+`schedule:` of its own, so nothing runs twice. If the device goes away, put the
 `schedule:` blocks back (the old crons are in a comment in each file).

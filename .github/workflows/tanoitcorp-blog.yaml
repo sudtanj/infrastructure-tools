@@ -27,9 +27,12 @@ name: "Tanoit Corp blog: write and publish new tech posts"
 # ---------------------------------------------------------------------------
 
 on:
-  schedule:
-    # 01:17 UTC on odd days of the month: every two days (twice in a row at a month's end).
-    - cron: '17 1 */2 * *'
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   # 01:17 UTC on odd days of the month: every two days (twice in a row at a month's end).
+  #   - cron: '17 1 */2 * *'
   workflow_dispatch:
 
 permissions:

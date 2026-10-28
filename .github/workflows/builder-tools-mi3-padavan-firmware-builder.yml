@@ -4,9 +4,18 @@ name: Builder Tools - Build Mi 3 Padavan firmware
 # PADAVAN_COMMIT in builder-tools/mi3-padavan-firmware-builder/variables, commits it and
 # builds a fresh Xiaomi Mi 3 firmware image. Independent of docker-publish.yml.
 on:
-  schedule:
-    - cron: '23 */6 * * *'
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # It passes only_if_updated=true.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: '23 */6 * * *'
   workflow_dispatch:
+    inputs:
+      only_if_updated:
+        description: "Build only when padavan-ng has new commits (as a scheduled run)"
+        type: boolean
+        default: false
   push:
     branches: [main]
     tags:
@@ -34,6 +43,8 @@ jobs:
 
       - name: Compare upstream stable branch with pinned commit
         id: decide
+        env:
+          ONLY_IF_UPDATED: ${{ github.event_name == 'schedule' || inputs.only_if_updated == true }}
         run: |
           set -euo pipefail
           . <(sed 's|\r$||' "$DIR/variables")
@@ -49,7 +60,7 @@ jobs:
             git commit -m "mi3-padavan-firmware-builder: update padavan-ng to ${latest:0:8}"
             git push
             build=true
-          elif [ "${{ github.event_name }}" != "schedule" ]; then
+          elif [ "$ONLY_IF_UPDATED" != true ]; then
             build=true
           fi
           echo "build=$build" >> "$GITHUB_OUTPUT"

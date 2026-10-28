@@ -26,9 +26,9 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 #   there is no way to subscribe to pushes on another repository. This polls
 #   instead, which means nothing at all is installed in the private repo.
 #
-#   Trade-off: latency is up to one cron interval, and scheduled workflows in
-#   public repos are auto-disabled after ~60 days without repo activity. Run it
-#   manually (force=true) if the schedule goes quiet.
+#   Trade-off: latency is up to one 15-minute poll. The polls come from
+#   workflow-cron (see `on:` below), so GitHub's auto-disable of idle scheduled
+#   workflows does not stop them. Run it manually (force=true) to deploy now.
 #
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo: visible to everyone, and forkable.
@@ -93,11 +93,13 @@ name: "Deploy Cloudflare Workers and Pages (private repo)"
 on:
   # Poll every 15 minutes. Each poll is a single authenticated API call (about
   # 4 per hour against a 5,000/hour limit) and a no-change run stops at the
-  # poll job. GitHub may delay scheduled runs under load, so treat the interval
-  # as best-effort. Comment these two lines out to pause polling; manual runs
-  # still work.
-  schedule:
-    - cron: "*/15 * * * *"
+  # poll job. To pause polling, remove its line from bash-scripts/init-workflow-cron.sh;
+  # manual runs still work.
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force:

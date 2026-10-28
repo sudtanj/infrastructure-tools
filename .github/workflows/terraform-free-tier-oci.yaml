@@ -2,8 +2,11 @@ name: "OCI Free Tier - Capacity Grab"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (best-effort)
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: "*/15 * * * *"   # every 15 minutes (best-effort)
 
 permissions:
   contents: read

@@ -27,7 +27,8 @@ IMAGE="${WORKFLOW_CRON_IMAGE:-sudtanj/workflow-cron:latest}"
 MEMORY_LIMIT="32m"
 CPU_LIMIT="0.10"
 
-# What runs when, in TZ_NAME. These replace the workflows' GitHub `schedule:`. One job per line:
+# What runs when, in TZ_NAME. These replace the workflows' GitHub `schedule:` (all but
+# opi-uptime-check.yaml, which watches this Orange Pi and so must not depend on it). One job per line:
 #   <min> <hour> <dom> <month> <dow> <workflow file> [input=value ...]
 TZ_NAME="Asia/Jakarta"
 JOBS='
@@ -35,6 +36,18 @@ JOBS='
 0 7,17 * * *  android-emulator-session.yaml exit_node=true autoplay=true
 0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
 0 8,11,17,18 * * 1-5  commute-traffic.yaml skip_off_days=true
+# Every 15-30 minutes.
+*/15 * * * *  cloudflare-private-deploy.yaml
+*/15 * * * *  terraform-free-tier-oci.yaml
+*/30 * * * *  vercel-private-deploy.yaml
+7,37 * * * *  apps-private-build.yaml
+*/30 * * * *  workflow-cleanup-job.yaml
+# Builders and chores (their old UTC crons, +7 hours).
+23 1,7,13,19 * * *  builder-tools-mi3-padavan-firmware-builder.yml only_if_updated=true
+17 11 * * 1   builder-tools-docker-publish.yml no_cache=true
+41 12 * * 1   builder-tools-opi-zero3-armbian.yml only_if_updated=true
+23 9  * * 1   search-engine-register.yaml
+17 8  */2 * * tanoitcorp-blog.yaml
 '
 
 export WORKFLOW_CRON_JOBS="$JOBS"

@@ -1,7 +1,10 @@
 name: 'Delete old workflow runs'
 on:
-  schedule:
-    - cron: '*/30 * * * *' # Every 30 minutes
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: '*/30 * * * *' # Every 30 minutes
   workflow_dispatch:
 
 # Never let two cleanup runs overlap (they would cancel each other)

@@ -15,8 +15,12 @@ name: Builder Tools - Build Orange Pi Zero 3 Armbian image
 #              lands on main. A newer release branch (new kernel line, U-Boot, ...) is only
 #              announced; it is tried when a manual run asks for it (input new_release)
 on:
-  schedule:
-    - cron: '41 5 * * 1'
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # It passes only_if_updated=true.
+  # Without that device, put this back:
+  # schedule:
+  #   - cron: '41 5 * * 1'
   workflow_dispatch:
     inputs:
       upstream:
@@ -25,6 +29,10 @@ on:
         default: true
       new_release:
         description: "Move to the newest Armbian release branch instead (promoted when tests pass)"
+        type: boolean
+        default: false
+      only_if_updated:
+        description: "Build only when there is an Armbian update to try (as a scheduled run)"
         type: boolean
         default: false
   push:
@@ -67,6 +75,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           TRY_UPSTREAM: ${{ github.event_name == 'schedule' || inputs.upstream == true }}
           NEW_RELEASE: ${{ inputs.new_release == true }}
+          ONLY_IF_UPDATED: ${{ github.event_name == 'schedule' || inputs.only_if_updated == true }}
         run: |
           set -euo pipefail
           . <(sed 's|\r$||' "$DIR/variables")
@@ -90,10 +99,8 @@ jobs:
           fi
           echo "pinned=$ARMBIAN_BRANCH@$ARMBIAN_COMMIT building=$branch@$commit bump=$bump"
           build=true
-          case "$EVENT" in
-            pull_request) build=false ;;              # unit tests only
-            schedule) [ "$bump" = true ] || build=false ;;
-          esac
+          [ "$EVENT" = pull_request ] && build=false          # unit tests only
+          [ "$ONLY_IF_UPDATED" = true ] && [ "$bump" != true ] && build=false
           {
             echo "build=$build"
             echo "branch=$branch"
