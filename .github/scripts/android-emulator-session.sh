@@ -120,6 +120,10 @@ if [ "${AUTOPLAY:-false}" = true ]; then
     || echo "::warning::The EraSpace script ended with an error; going on."
   # It lowers the screen density while it plays; PineDrama's taps assume 320.
   adb shell wm density reset || true
+  # Blibli's daily check-in: a minute or two. Every run tries it; once done
+  # the page only says to come back tomorrow.
+  DEVICE=emulator-5554 timeout 10m node .github/scripts/blibli/blibli.ts \
+    || echo "::warning::The Blibli script ended with an error; going on."
   # The 05:00 run is for the rocket alone.
   if [ "${PLAY_PINEDRAMA:-true}" = true ]; then
     DEVICE=emulator-5554 MAX_MINUTES="$minutes" \

@@ -1,7 +1,7 @@
-// Alerts for the owner from the emulator scripts (eraspace.ts, pinedrama.ts):
-// each is logged as a workflow warning and, when ALERT_FILE is set (by
-// android-emulator-session.sh), queued there; the workflow sends the queue to
-// Telegram at the end of the run.
+// Alerts for the owner from the emulator scripts (eraspace.ts, blibli.ts,
+// pinedrama.ts): each is logged as a workflow warning and, when ALERT_FILE is
+// set (by android-emulator-session.sh), queued there; the workflow sends the
+// queue to Telegram at the end of the run.
 
 import { appendFileSync } from "node:fs";
 

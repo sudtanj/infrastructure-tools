@@ -32,15 +32,17 @@ name: "Android emulator session over Tailscale"
 #   Daily at 07:00 and 17:00 UTC+7 (dispatched on time by workflow-cron on the
 #   GCP VM or Orange Pi, see below), or with `autoplay` on, the runner first launches EraSpace's rocket
 #   ("Luncurkan Roket") until it is out of tokens with
-#   .github/scripts/eraspace/eraspace.ts, then plays PineDrama itself with
+#   .github/scripts/eraspace/eraspace.ts, does Blibli's daily check-in with
+#   .github/scripts/blibli/blibli.ts, then plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
 #   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
 #   balance reaches it, plays until the coin timer at the top left is gone or
 #   `autoplay_minutes` pass, then saves; no stop file needed.
-#   Also daily at 05:00 UTC+7 for the EraSpace rocket alone (`pinedrama` off).
+#   Also daily at 05:00 UTC+7 for the EraSpace rocket and the Blibli check-in
+#   alone (`pinedrama` off).
 #   If a session is already running, the scheduled one waits for it.
-#   If EraSpace or PineDrama turns out to be logged out (or EraSpace's rocket
-#   can't be reached), a message goes to Telegram at the end of the run, once
+#   If EraSpace, Blibli or PineDrama turns out to be logged out (or EraSpace's
+#   rocket or Blibli's check-in can't be reached), a message goes to Telegram at the end of the run, once
 #   the exit node is off; log in again over VNC in a manual session.
 #
 # EXIT NODE
@@ -90,7 +92,7 @@ on:
         type: boolean
         default: true
       autoplay:
-        description: 'Run the EraSpace rocket and play PineDrama until the coin is gone, then save (as the schedule does)'
+        description: 'Run the EraSpace rocket and the Blibli check-in, play PineDrama until the coin is gone, then save (as the schedule does)'
         type: boolean
         default: false
       autoplay_minutes:
@@ -98,7 +100,7 @@ on:
         type: number
         default: 30
       pinedrama:
-        description: 'With autoplay, also play PineDrama after the rocket (off: the rocket only)'
+        description: 'With autoplay, also play PineDrama after the rocket and the check-in (off: those only)'
         type: boolean
         default: true
 
