@@ -31,8 +31,11 @@ const app = "/opt/Wipter/wipter-app.bin"
 // compositing, done in the main process: no GPU process, and the build drops
 // the GPU libraries), one page process, no sandbox and no zygote (the sandbox
 // needs user namespaces or a setuid helper; the container is the sandbox), no
-// keyring (the app then keeps its login in its own config file), fatal-only
-// Chromium logging. WIPTER_CHROMIUM_FLAGS (space-separated) adds more.
+// keyring (the app then keeps its login in its own config file), a small V8
+// young generation (~15 MB less, measured), fatal-only Chromium logging.
+// WIPTER_CHROMIUM_FLAGS (space-separated) adds more or overrides these:
+// --js-flags=--lite-mode saves ~30 MB more but turns off V8's optimizing
+// compiler; --single-process hangs.
 // Chromium's headless display backend would need no X server at all, but in
 // Electron its GPU process still looks for one and the window never opens.
 var appArgs = []string{
@@ -45,6 +48,7 @@ var appArgs = []string{
 	"--renderer-process-limit=1",
 	"--disable-features=SpareRendererForSitePerProcess,MediaRouter,DialMediaRouteProvider,AudioServiceOutOfProcess",
 	"--disable-renderer-accessibility",
+	"--js-flags=--max-semi-space-size=1",
 	"--password-store=basic",
 	"--log-level=3",
 }

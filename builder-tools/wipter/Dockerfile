@@ -101,16 +101,10 @@ FROM runtime AS check
 ARG TARGETARCH
 RUN ! ldd /opt/Wipter/wipter-app.bin /usr/bin/Xvfb | grep -F 'not found' \
  && dpkg-query -W -f '${Installed-Size}\t${Package}\n' | sort -rn | head -20 \
- && du -xsk /opt/Wipter /usr/lib/* /usr/share/* 2>/dev/null | sort -rn | head -15 \
- && find /usr/lib -type f -size +1M -printf '%k\t%p\n' | sort -rn | head -25
+ && du -xsk /opt/Wipter /usr/lib/* /usr/share/* 2>/dev/null | sort -rn | head -15
 USER 65532:65532
 RUN if [ "$TARGETARCH" = amd64 ]; then WIPTER_DEBUG=1 timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
  && touch /tmp/check-ok
-# Informational: memory with candidate switches (a failure doesn't fail the build).
-RUN if [ "$TARGETARCH" = amd64 ]; then \
-      for f in --single-process --js-flags=--lite-mode --js-flags=--max-semi-space-size=1; do \
-        echo "variant $f:"; WIPTER_CHROMIUM_FLAGS="$f" timeout 120 /usr/local/bin/wipter-entry -selftest || echo "variant $f failed"; \
-      done; fi
 
 FROM runtime
 COPY --from=check /tmp/check-ok /tmp/check-ok

@@ -58,8 +58,10 @@ docker logs -f wipter              # "wipter-entry: signed in", then "status: On
   devices per IP. Run it once per network, at home.
 - **Resources**: Electron is far heavier than the other clients here: 512 MB
   cap, 0.5 CPU, 256 pids (Chromium counts threads). The log shows the app's
-  memory 5 minutes after sign-in; lower `WIPTER_MEMORY_LIMIT` to fit.
-  `WIPTER_CHROMIUM_FLAGS` adds Chromium switches (space-separated).
+  memory 5 minutes after sign-in (about 290 MB on amd64 at the sign-in form:
+  app 125, page 105, network 50, Xvfb 8); lower `WIPTER_MEMORY_LIMIT` to
+  fit. `WIPTER_CHROMIUM_FLAGS` adds Chromium switches (space-separated);
+  `--js-flags=--lite-mode` saves ~30 MB more at some CPU cost.
 - **Updates**: the app's updater can't install anything (no root, read-only
   rootfs). A new version is a new image.
 - **Redistribution**: this image republishes Wipter's binary. Consider
