@@ -28,9 +28,11 @@ import (
 const app = "/opt/Wipter/wipter-app.bin"
 
 // Chromium switches: X11 on the virtual display, no GPU (software
-// compositing), no sandbox and no zygote (the sandbox needs user namespaces
-// or a setuid helper; the container is the sandbox), no keyring (the app then
-// keeps its login in its own config file), fatal-only Chromium logging.
+// compositing, done in the main process: no GPU process, and the build drops
+// the GPU libraries), one page process, no sandbox and no zygote (the sandbox
+// needs user namespaces or a setuid helper; the container is the sandbox), no
+// keyring (the app then keeps its login in its own config file), fatal-only
+// Chromium logging. WIPTER_CHROMIUM_FLAGS (space-separated) adds more.
 // Chromium's headless display backend would need no X server at all, but in
 // Electron its GPU process still looks for one and the window never opens.
 var appArgs = []string{
@@ -38,16 +40,22 @@ var appArgs = []string{
 	"--no-zygote",
 	"--ozone-platform=x11",
 	"--disable-gpu",
+	"--in-process-gpu",
+	"--disable-software-rasterizer",
+	"--renderer-process-limit=1",
+	"--disable-features=SpareRendererForSitePerProcess,MediaRouter,DialMediaRouteProvider,AudioServiceOutOfProcess",
+	"--disable-renderer-accessibility",
 	"--password-store=basic",
 	"--log-level=3",
 }
 
 const display = ":99"
 
-// startX starts Xvfb on display :99, local socket only, and waits for it.
+// startX starts Xvfb on display :99, local socket only, without GLX (the
+// app draws in software; the build drops Mesa), and waits for it.
 func startX(debug bool) *exec.Cmd {
 	x := exec.Command("/usr/bin/Xvfb", display, "-screen", "0", "800x600x16",
-		"-nolisten", "tcp", "-noreset", "-nocursor")
+		"-nolisten", "tcp", "-noreset", "-nocursor", "-extension", "GLX")
 	if debug {
 		x.Stdout, x.Stderr = os.Stdout, os.Stderr
 	}
@@ -92,9 +100,9 @@ func main() {
 	x := startX(debug)
 	defer x.Process.Kill()
 	os.Setenv("DISPLAY", display)
-	args := appArgs
+	args := append(appArgs[:len(appArgs):len(appArgs)], strings.Fields(os.Getenv("WIPTER_CHROMIUM_FLAGS"))...)
 	if debug {
-		args = append(args[:len(args):len(args)], "--enable-logging=stderr", "--log-level=0")
+		args = append(args, "--enable-logging=stderr", "--log-level=0")
 	}
 	cmd := exec.Command(app, args...)
 	cmd.Stdout, cmd.Stderr = w, w

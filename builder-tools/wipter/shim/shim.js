@@ -102,6 +102,7 @@ app.on('browser-window-created', (_e, win) => {
         if (watching || !win.webContents.getURL().includes('index.html'))
             return;
         watching = true;
+        wc.insertCSS(stillCSS).catch(() => {});
         (selftest ? runSelftest : supervise)(win).catch(err => {
             log(`stopped: ${err && err.message || err}`);
             app.exit(1);
@@ -111,12 +112,37 @@ app.on('browser-window-created', (_e, win) => {
 
 const probe = win => run(win, probeJS);
 
+// Memory of the app's processes (proportional set size, so shared pages count
+// once), by Chromium process type.
+function memory() {
+    const by = {};
+    let total = 0;
+    for (const pid of fs.readdirSync('/proc').filter(p => /^\d+$/.test(p))) {
+        try {
+            const pss = +/^Pss:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8'))[1];
+            const argv = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+            const type = argv[0].endsWith('wipter-app.bin')
+                ? ((argv.find(a => a.startsWith('--type=')) || '--type=main').slice(7))
+                : path.basename(argv[0]);
+            by[type] = (by[type] || 0) + pss;
+            total += pss;
+        } catch {}
+    }
+    const mb = kb => `${Math.round(kb/1024)} MB`;
+    return `${mb(total)} (${Object.entries(by).sort((a, b) => b[1]-a[1]).map(([t, kb]) => `${t} ${mb(kb)}`).join(', ')})`;
+}
+
+// Animations cost CPU on every frame even though nobody sees the window.
+const stillCSS = '*, *::before, *::after { animation: none !important; transition: none !important; }';
+
 async function runSelftest(win) {
     let last = '';
     for (;;) {
         const s = await probe(win).catch(err => ({ error: err.message }));
         if (s.ready && s.signin) {
             log('selftest: the sign-in form loaded');
+            await sleep(15000);
+            log(`selftest: memory ${memory()}`);
             return app.exit(0);
         }
         const now = JSON.stringify(s);
@@ -150,6 +176,7 @@ async function signIn(win) {
 
 async function supervise(win) {
     let signedIn = false, lastStatus = '', offlineSince = 0, lastToggle = 0, failures = 0;
+    setTimeout(() => log(`memory after 5 minutes: ${memory()}`), 5*60*1000).unref();
     for (;;) {
         const s = await probe(win).catch(() => ({}));
         if (!s.ready) {

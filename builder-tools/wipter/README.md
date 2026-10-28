@@ -4,7 +4,8 @@
 > the generic per-folder build workflow works.
 
 The official [Wipter](https://wipter.com) desktop app, pinned by checksum and
-run headless: no X server, window manager, VNC or keyring.
+run on a bare virtual display (Xvfb): no window manager, VNC or keyring, and
+none of the GPU drivers.
 Built for `linux/amd64` and `linux/arm64` (Orange Pi Zero 3 included).
 Upstream publishes no Docker image.
 
@@ -16,7 +17,7 @@ the window with fake key presses.
 
 | Community image | This image |
 |---|---|
-| Xvfb + Openbox + x11vnc + noVNC + gnome-keyring + dbus, plus git, Python, xterm and fonts | Chromium's headless display backend; only the libraries the Electron binary links against |
+| Xvfb + Openbox + x11vnc + noVNC + gnome-keyring + dbus, plus git, Python, xterm and fonts | A bare Xvfb (Chromium's headless backend deadlocks in Electron); only the libraries the Electron binary links against, minus Mesa, LLVM, SwiftShader and Vulkan (software drawing, no GPU process, one page process) |
 | Types the email and password into the window with `xte` and fixed sleeps | A small shim loaded before the app (`shim/shim.js`, in `resources/app/`) fills in the sign-in form from inside the app. No DevTools port: the app relays third-party traffic, so a port on localhost would be reachable through it |
 | Randomises the hostname, vendor, model and firmware it reports on every start | Reports the real system; one stable machine ID kept on the host |
 | Downloads whatever `latest` is, runs as root | One version pinned by sha256, runs as `nonroot` (uid 65532) with `cap_drop: ALL`, `no-new-privileges` and a read-only rootfs |
@@ -56,8 +57,9 @@ docker logs -f wipter              # "wipter-entry: signed in", then "status: On
 - **Residential IPs only**: Wipter flags non-residential IPs and too many
   devices per IP. Run it once per network, at home.
 - **Resources**: Electron is far heavier than the other clients here: 512 MB
-  cap, 0.5 CPU, 256 pids (Chromium counts threads). Check `docker stats` and
-  lower `WIPTER_MEMORY_LIMIT` if it uses much less.
+  cap, 0.5 CPU, 256 pids (Chromium counts threads). The log shows the app's
+  memory 5 minutes after sign-in; lower `WIPTER_MEMORY_LIMIT` to fit.
+  `WIPTER_CHROMIUM_FLAGS` adds Chromium switches (space-separated).
 - **Updates**: the app's updater can't install anything (no root, read-only
   rootfs). A new version is a new image.
 - **Redistribution**: this image republishes Wipter's binary. Consider
