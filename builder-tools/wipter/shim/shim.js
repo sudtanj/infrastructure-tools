@@ -1,5 +1,6 @@
-// Loaded by Electron from resources/app/ (which it prefers over app.asar),
-// before the app's own, unchanged main process. It does what a user would do
+// Loaded by Electron from resources/app/ (the build renames the app's
+// app.asar to wipter.asar, so Electron finds this instead), then loads the
+// app's own, unchanged main process from wipter.asar. It does what a user would do
 // in the window nobody sees: sign in, accept the consent prompt, turn
 // sharing on, and it reports status on stdout as "wipter-shim: ..." lines.
 // Everything happens inside the app's process: no DevTools port or pipe.
@@ -36,6 +37,13 @@ function run(win, js) {
 
 if (debug || selftest)
     log('shim loaded');
+
+if (debug || selftest) {
+    // A stalled main thread shows as the heartbeat stopping.
+    const t0 = Date.now();
+    setInterval(() => log(`heartbeat ${Math.round((Date.now()-t0)/1000)} s`), 10000).unref();
+    app.on('ready', () => log('app ready'));
+}
 
 if (selftest) {
     setTimeout(() => {
@@ -200,4 +208,6 @@ async function supervise(win) {
 
 if (debug || selftest)
     log('loading the app');
-require(path.join(process.resourcesPath, 'app.asar', 'dist-electron', 'main', 'main.js'));
+require(path.join(process.resourcesPath, 'wipter.asar', 'dist-electron', 'main', 'main.js'));
+if (debug || selftest)
+    log('the app loaded');

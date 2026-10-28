@@ -8,10 +8,10 @@
 # Here the official .deb is pinned by checksum (the versioned URL from the
 # app's own update feed, https://provider-assets.wipter.com/latest/linux/
 # <x64|arm64>/latest-linux*.yml) and run with Chromium's headless display
-# backend: no X server, window manager, VNC or keyring. shim/shim.js goes in
-# resources/app/, which Electron loads before app.asar (this build allows
-# it: its OnlyLoadAppFromAsar fuse is off). It loads the app's own main
-# process unchanged and, from inside it, signs in, accepts the consent prompt
+# backend: no X server, window manager, VNC or keyring. app.asar becomes
+# wipter.asar and shim/shim.js goes in resources/app/, which Electron then
+# loads (this build allows it: its OnlyLoadAppFromAsar fuse is off). The shim
+# loads the app's own main process unchanged and, from inside it, signs in, accepts the consent prompt
 # and keeps sharing on: no DevTools port or pipe (Electron ignores
 # --remote-debugging-pipe, and a port would be reachable through the
 # traffic the app relays). entry/main.go starts it and keeps only the shim's
@@ -46,6 +46,7 @@ RUN dpkg-deb -f /tmp/wipter.deb Version | grep -qx "${WIPTER_VERSION}" \
  && dpkg-deb -x /tmp/wipter.deb /x \
  && cd /x/opt/Wipter \
  && rm -f chrome-sandbox LICENSES.chromium.html wipter-app \
+ && mv resources/app.asar resources/wipter.asar \
  && find locales -type f ! -name en-US.pak -delete \
  && test -x wipter-app.bin \
  && test -x resources/wipter-tunnel/wipter-tunnel_0.1.0_linux/wipter-tunnel \
@@ -81,7 +82,8 @@ COPY --from=entry /wipter-entry /usr/local/bin/wipter-entry
 # also starts headless and shows its sign-in form, with a throwaway profile.
 FROM runtime AS check
 ARG TARGETARCH
-RUN ! ldd /opt/Wipter/wipter-app.bin | grep -F 'not found'
+RUN ! ldd /opt/Wipter/wipter-app.bin | grep -F 'not found' \
+ && ls -la /opt/Wipter/resources /opt/Wipter/resources/app && cat /opt/Wipter/resources/app/package.json
 USER 65532:65532
 RUN if [ "$TARGETARCH" = amd64 ]; then WIPTER_DEBUG=1 timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
  && touch /tmp/check-ok
