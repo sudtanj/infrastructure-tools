@@ -50,6 +50,7 @@ RUN cd /src && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" \
 
 # What wipter-app.bin links against (it loads GTK even without a display),
 # nothing else: no X server, fonts beyond what cairo pulls in, or shell tools.
+# The app reads its user name (os.userInfo), so uid 65532 gets a passwd entry.
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -60,6 +61,8 @@ RUN apt-get update \
       libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
       libxrandr2 \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* /usr/share/doc /usr/share/man /usr/share/info \
+ && echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/usr/sbin/nologin' >> /etc/passwd \
+ && echo 'nonroot:x:65532:' >> /etc/group \
  && mkdir -p /home/nonroot/.config \
  && chown -R 65532:65532 /home/nonroot
 COPY --from=unpack /x/opt/Wipter /opt/Wipter
