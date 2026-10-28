@@ -8,10 +8,15 @@
 # Here the official .deb is pinned by checksum (the versioned URL from the
 # app's own update feed, https://provider-assets.wipter.com/latest/linux/
 # <x64|arm64>/latest-linux*.yml) and run with Chromium's headless display
-# backend: no X server, window manager, VNC or keyring. entry/main.go signs
-# in through the DevTools protocol on a pipe (no port) and keeps the app
-# going. Runs as uid 65532 on debian:trixie-slim with only the libraries the
-# Electron binary links against.
+# backend: no X server, window manager, VNC or keyring. shim/shim.js goes in
+# resources/app/, which Electron loads before app.asar (this build allows
+# it: its OnlyLoadAppFromAsar fuse is off). It loads the app's own main
+# process unchanged and, from inside it, signs in, accepts the consent prompt
+# and keeps sharing on: no DevTools port or pipe (Electron ignores
+# --remote-debugging-pipe, and a port would be reachable through the
+# traffic the app relays). entry/main.go starts it and keeps only the shim's
+# status lines. Runs as uid 65532 on debian:trixie-slim with only the
+# libraries the Electron binary links against.
 ARG WIPTER_VERSION=1.25.1012
 ARG WIPTER_BUILD=20261005140844_1_25_1012
 
@@ -30,17 +35,21 @@ FROM deb-${TARGETARCH} AS deb
 # Unpacked on the build host, without running the package scripts (they only
 # add a symlink, the setuid sandbox and an AppArmor profile). Dropped: the
 # setuid sandbox (unused with --no-sandbox), every locale but en-US, and the
-# 19 MB Chromium licence page.
+# 19 MB Chromium licence page. The shim's package.json keeps the app's name
+# and version: they set its profile folder (~/.config/wipter-app) and the
+# version it reports.
 FROM --platform=$BUILDPLATFORM debian:trixie-slim AS unpack
 ARG WIPTER_VERSION
 COPY --from=deb /wipter.deb /tmp/wipter.deb
+COPY shim/shim.js /x/opt/Wipter/resources/app/shim.js
 RUN dpkg-deb -f /tmp/wipter.deb Version | grep -qx "${WIPTER_VERSION}" \
  && dpkg-deb -x /tmp/wipter.deb /x \
  && cd /x/opt/Wipter \
  && rm -f chrome-sandbox LICENSES.chromium.html wipter-app \
  && find locales -type f ! -name en-US.pak -delete \
  && test -x wipter-app.bin \
- && test -x resources/wipter-tunnel/wipter-tunnel_0.1.0_linux/wipter-tunnel
+ && test -x resources/wipter-tunnel/wipter-tunnel_0.1.0_linux/wipter-tunnel \
+ && printf '{"name":"wipter-app","version":"%s","main":"shim.js","private":true}\n' "${WIPTER_VERSION}" > resources/app/package.json
 
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS entry
 ARG TARGETARCH

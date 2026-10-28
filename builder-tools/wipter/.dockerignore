@@ -1,4 +1,5 @@
-# Only the Dockerfile and the launcher source reach the build context.
+# Only the Dockerfile, the launcher and the shim reach the build context.
 *
 !Dockerfile
 !entry/
+!shim/

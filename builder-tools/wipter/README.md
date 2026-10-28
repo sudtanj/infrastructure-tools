@@ -17,7 +17,7 @@ the window with fake key presses.
 | Community image | This image |
 |---|---|
 | Xvfb + Openbox + x11vnc + noVNC + gnome-keyring + dbus, plus git, Python, xterm and fonts | Chromium's headless display backend; only the libraries the Electron binary links against |
-| Types the email and password into the window with `xte` and fixed sleeps | `wipter-entry` signs in through the DevTools protocol on a pipe, no port: the app relays third-party traffic, so a port on localhost would be reachable through it |
+| Types the email and password into the window with `xte` and fixed sleeps | A small shim loaded before the app (`shim/shim.js`, in `resources/app/`) fills in the sign-in form from inside the app. No DevTools port: the app relays third-party traffic, so a port on localhost would be reachable through it |
 | Randomises the hostname, vendor, model and firmware it reports on every start | Reports the real system; one stable machine ID kept on the host |
 | Downloads whatever `latest` is, runs as root | One version pinned by sha256, runs as `nonroot` (uid 65532) with `cap_drop: ALL`, `no-new-privileges` and a read-only rootfs |
 | Can reach your LAN like any program on the device | `init-wipter.sh` drops all traffic from the container to private, Tailscale, link-local and multicast ranges, and sends all DNS to AdGuard Family Protection |
@@ -35,11 +35,11 @@ docker logs -f wipter              # "wipter-entry: signed in", then "status: On
 |---|---|---|
 | `WIPTER_EMAIL` | yes | Your Wipter account (sign up in the app or on wipter.com first) |
 | `WIPTER_PASSWORD` | yes | Only used when there is no saved session; never passed on to the app |
-| `WIPTER_DEBUG` | no | `1` shows the app's own (noisy) output |
+| `WIPTER_DEBUG` | no | `1` shows the app's own (noisy) output, which includes the account email |
 
 ## Notes
 
-- **What the launcher does**: starts the app, signs in when the sign-in form
+- **What the shim does**: the app's own code runs unchanged; the shim signs in when the sign-in form
   shows (at most 3 tries, then it waits 30 minutes and exits so Docker
   restarts it), clicks *agree* on Wipter's bandwidth-sharing consent prompt
   (the app shares nothing until it is accepted: running this image is that
@@ -75,4 +75,4 @@ and bump `WIPTER_VERSION`, `WIPTER_BUILD` and both sha256 values in the
 Dockerfile. The build checks the version inside the .deb, and on amd64 that
 the app starts and shows its sign-in form; if the form's test IDs
 (`email-input`, `password-input`, `sign-in-button`) changed, update
-`entry/main.go`.
+`shim/shim.js`.
