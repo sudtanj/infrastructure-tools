@@ -36,9 +36,9 @@ JOBS='
 0 7,17 * * *  android-emulator-session.yaml exit_node=true autoplay=true
 0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
 0 8,11,17,18 * * 1-5  commute-traffic.yaml skip_off_days=true
-# Every 15-30 minutes.
+# Every 5-30 minutes.
 */15 * * * *  cloudflare-private-deploy.yaml
-*/15 * * * *  terraform-free-tier-oci.yaml
+*/5  * * * *  terraform-free-tier-oci.yaml
 */30 * * * *  vercel-private-deploy.yaml
 7,37 * * * *  apps-private-build.yaml
 */30 * * * *  workflow-cleanup-job.yaml

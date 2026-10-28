@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
   # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
   # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
-  # Without that device, put this back:
+  # It runs every 5 minutes. Without that device, put this back (GitHub's minimum):
   # schedule:
-  #   - cron: "*/15 * * * *"   # every 15 minutes (best-effort)
+  #   - cron: "*/5 * * * *"
 
 permissions:
   contents: read
