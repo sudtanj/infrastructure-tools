@@ -19,9 +19,8 @@ provider "oci" {
   private_key  = var.api_key_private_key
 
   # "Out of host capacity" is a retryable 500 to the provider, which by default
-  # keeps retrying for 600s: past the job's 10-minute timeout, so every run was
-  # cancelled. Give up after a minute; workflow-cron starts the next attempt
-  # 5 minutes later.
+  # keeps retrying for 600s, past the job's timeout. Give up after a minute;
+  # workflow-cron starts the next attempt 5 minutes later.
   retry_duration_seconds = 60
 }
 
