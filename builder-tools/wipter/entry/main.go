@@ -26,15 +26,14 @@ import (
 
 const app = "/opt/Wipter/wipter-app.bin"
 
-// Chromium switches: no display (headless Ozone), no GPU, no sandbox (needs
-// user namespaces or a setuid helper; the container is the sandbox), no
-// keyring (the app then keeps its login in its own config file), fatal-only
-// Chromium logging.
+// Chromium switches: no display (headless Ozone, drawing with its software
+// GPU), no sandbox and no zygote (the sandbox needs user namespaces or a
+// setuid helper; the container is the sandbox), no keyring (the app then
+// keeps its login in its own config file), fatal-only Chromium logging.
 var appArgs = []string{
 	"--no-sandbox",
+	"--no-zygote",
 	"--ozone-platform=headless",
-	"--disable-gpu",
-	"--disable-software-rasterizer",
 	"--password-store=basic",
 	"--log-level=3",
 }

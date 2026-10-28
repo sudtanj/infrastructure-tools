@@ -35,7 +35,8 @@ FROM deb-${TARGETARCH} AS deb
 # Unpacked on the build host, without running the package scripts (they only
 # add a symlink, the setuid sandbox and an AppArmor profile). Dropped: the
 # setuid sandbox (unused with --no-sandbox), every locale but en-US, and the
-# 19 MB Chromium licence page. The shim's package.json keeps the app's name
+# 19 MB Chromium licence page. The package ships its files world-writable:
+# no longer. The shim's package.json keeps the app's name
 # and version: they set its profile folder (~/.config/wipter-app) and the
 # version it reports.
 FROM --platform=$BUILDPLATFORM debian:trixie-slim AS unpack
@@ -47,6 +48,7 @@ RUN dpkg-deb -f /tmp/wipter.deb Version | grep -qx "${WIPTER_VERSION}" \
  && cd /x/opt/Wipter \
  && rm -f chrome-sandbox LICENSES.chromium.html wipter-app \
  && mv resources/app.asar resources/wipter.asar \
+ && chmod -R go-w /x/opt/Wipter \
  && find locales -type f ! -name en-US.pak -delete \
  && test -x wipter-app.bin \
  && test -x resources/wipter-tunnel/wipter-tunnel_0.1.0_linux/wipter-tunnel \
