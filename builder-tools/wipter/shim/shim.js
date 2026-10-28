@@ -17,8 +17,26 @@ const selftest = process.env.WIPTER_SELFTEST === '1';
 for (const k of ['WIPTER_EMAIL', 'WIPTER_PASSWORD', 'WIPTER_SELFTEST', 'VITE_DEV_SERVER_URL'])
     delete process.env[k];
 
+const debug = process.env.WIPTER_DEBUG === '1';
 const log = msg => process.stdout.write(`wipter-shim: ${msg}\n`);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Runs a script in the page, giving up after 20 s.
+function run(win, js) {
+    if (win.isDestroyed())
+        return Promise.reject(new Error('the app window closed'));
+    return Promise.race([
+        win.webContents.executeJavaScript(js),
+        sleep(20000).then(() => { throw new Error('the page did not answer in 20 s'); }),
+    ]);
+}
+
+if (selftest) {
+    setTimeout(() => {
+        log('selftest: no sign-in form after 4 minutes');
+        app.exit(1);
+    }, 4*60*1000).unref();
+}
 
 // The app's own test IDs (data-testid) on the elements used here.
 const probeJS = `(() => {
@@ -56,7 +74,17 @@ const clickJS = id => `(() => {
 
 let watching = false;
 app.on('browser-window-created', (_e, win) => {
-    win.webContents.once('did-finish-load', () => {
+    const wc = win.webContents;
+    if (debug || selftest)
+        log('app window created');
+    wc.on('did-fail-load', (_e, code, desc, url) => log(`the page failed to load (${code} ${desc}) ${url}`));
+    wc.on('render-process-gone', (_e, d) => log(`the page's process is gone: ${d.reason} (exit code ${d.exitCode})`));
+    wc.on('unresponsive', () => log('the page is not responding'));
+    if (debug)
+        wc.on('console-message', (e, _level, message) => log(`page console: ${e.message || message}`));
+    wc.once('did-finish-load', () => {
+        if (debug || selftest)
+            log(`page loaded: ${path.basename(wc.getURL().split('#')[0])}`);
         if (watching || !win.webContents.getURL().includes('index.html'))
             return;
         watching = true;
@@ -67,30 +95,28 @@ app.on('browser-window-created', (_e, win) => {
     });
 });
 
-async function probe(win) {
-    if (win.isDestroyed())
-        throw new Error('the app window closed');
-    return win.webContents.executeJavaScript(probeJS);
-}
+const probe = win => run(win, probeJS);
 
 async function runSelftest(win) {
-    const end = Date.now() + 4*60*1000;
-    while (Date.now() < end) {
-        const s = await probe(win).catch(() => ({}));
+    let last = '';
+    for (;;) {
+        const s = await probe(win).catch(err => ({ error: err.message }));
         if (s.ready && s.signin) {
             log('selftest: the sign-in form loaded');
             return app.exit(0);
         }
+        const now = JSON.stringify(s);
+        if (now != last)
+            log(`selftest: page state ${now}`);
+        last = now;
         await sleep(2000);
     }
-    log('selftest: no sign-in form after 4 minutes');
-    app.exit(1);
 }
 
 async function signIn(win) {
     log('signing in');
     for (const [id, value] of [['email-input', email], ['password-input', password]]) {
-        if (!await win.webContents.executeJavaScript(fillJS(id, value)))
+        if (!await run(win, fillJS(id, value)))
             throw new Error(`the sign-in form changed: no ${id}`);
     }
     for (let i = 0; !(await probe(win)).signinEnabled; i++) {
@@ -98,7 +124,7 @@ async function signIn(win) {
             throw new Error('the sign-in button stays disabled (is WIPTER_EMAIL a valid address?)');
         await sleep(1000);
     }
-    await win.webContents.executeJavaScript(clickJS('sign-in-button'));
+    await run(win, clickJS('sign-in-button'));
     for (let i = 0; i < 45; i++) {
         await sleep(2000);
         const s = await probe(win);
@@ -119,7 +145,7 @@ async function supervise(win) {
         if (s.consent) {
             // The app shares nothing until its data-sharing consent is
             // accepted; running this image is that choice.
-            if (await win.webContents.executeJavaScript(clickJS('consent-agree-button')))
+            if (await run(win, clickJS('consent-agree-button')))
                 log("accepted the app's bandwidth-sharing consent prompt");
         } else if (s.signin) {
             if (signedIn) {
@@ -155,7 +181,7 @@ async function supervise(win) {
             if (s.status.toLowerCase() == 'offline' && s.toggle) {
                 offlineSince = offlineSince || Date.now();
                 if (Date.now()-offlineSince > 90*1000 && Date.now()-lastToggle > 10*60*1000
-                    && await win.webContents.executeJavaScript(clickJS('switch-status-button'))) {
+                    && await run(win, clickJS('switch-status-button'))) {
                     log('sharing was off: turned it on');
                     lastToggle = Date.now();
                 }
@@ -166,4 +192,6 @@ async function supervise(win) {
     }
 }
 
+if (debug || selftest)
+    log('loading the app');
 require(path.join(process.resourcesPath, 'app.asar', 'dist-electron', 'main', 'main.js'));
