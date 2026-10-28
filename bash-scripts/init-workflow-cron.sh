@@ -27,13 +27,14 @@ IMAGE="${WORKFLOW_CRON_IMAGE:-sudtanj/workflow-cron:latest}"
 MEMORY_LIMIT="32m"
 CPU_LIMIT="0.10"
 
-# What runs when, in TZ_NAME. These replace the two workflows' GitHub `schedule:`. One job per line:
+# What runs when, in TZ_NAME. These replace the workflows' GitHub `schedule:`. One job per line:
 #   <min> <hour> <dom> <month> <dow> <workflow file> [input=value ...]
 TZ_NAME="Asia/Jakarta"
 JOBS='
 0 *    * * *  typescript-worker-run.yaml
 0 7,17 * * *  android-emulator-session.yaml exit_node=true autoplay=true
 0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
+0 8,11,17,18 * * 1-5  commute-traffic.yaml skip_off_days=true
 '
 
 export WORKFLOW_CRON_JOBS="$JOBS"

@@ -38,6 +38,7 @@ A job line is five cron fields, the workflow file name, then `workflow_dispatch`
 0    *    *   *   *     typescript-worker-run.yaml
 0    7,17 *   *   *     android-emulator-session.yaml    exit_node=true autoplay=true
 0    5    *   *   *     android-emulator-session.yaml    exit_node=true autoplay=true pinedrama=false
+0    8,11,17,18 * * 1-5 commute-traffic.yaml        skip_off_days=true
 ```
 
 Fields take `*`, `n`, `a-b`, `*/s`, `a-b/s` and comma lists (no names like `MON`). Input
@@ -75,6 +76,6 @@ Telegram alerts reuse the `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` secrets.
 Logs: `docker logs workflow-cron` on the device (or Dozzle). Each dispatch prints how late it
 was sent.
 
-`typescript-worker-run.yaml` and `android-emulator-session.yaml` no longer have a
+`typescript-worker-run.yaml`, `android-emulator-session.yaml` and `commute-traffic.yaml` no longer have a
 `schedule:` of their own, so nothing runs twice. If the device goes away, put their
 `schedule:` blocks back (the old crons are in a comment in each file).

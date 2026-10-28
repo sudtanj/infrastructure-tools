@@ -15,8 +15,8 @@ name: "Commute traffic: home and work, to Telegram"
 # `direction` input says otherwise.
 #
 # HOW THIS WORKS
-#   1. The crons fire at 08:00, 11:00, 17:00 and 18:00 in UTC+7 (GitHub can
-#      start scheduled runs a few minutes late). Weekends in COMMUTE_TZ are
+#   1. workflow-cron starts it at 08:00, 11:00, 17:00 and 18:00 in UTC+7 (see
+#      `on:` below), with skip_off_days. Weekends in COMMUTE_TZ are
 #      skipped, and public holidays too when HOLIDAY_COUNTRY is set (date.nager.at; if that
 #      service is down the run goes ahead).
 #   2. The saved Chrome profile (release tag `chrome-cdp-state` on the private
@@ -57,7 +57,7 @@ name: "Commute traffic: home and work, to Telegram"
 #   HOME_ADDRESS       home, as you would type it in Google Maps, or "lat,lng"
 #   WORK_ADDRESS       work, same format
 #   COMMUTE_TZ         OPTIONAL IANA time zone, default Asia/Jakarta. Outside
-#                      UTC+7, change the cron below too (it is in UTC).
+#                      UTC+7, change bash-scripts/init-workflow-cron.sh too.
 #   HOLIDAY_COUNTRY    OPTIONAL two-letter country code (e.g. ID) to skip
 #                      public holidays
 #   PLATE_PARITY       OPTIONAL "odd" or "even" (or the plate's last digit),
@@ -71,13 +71,15 @@ name: "Commute traffic: home and work, to Telegram"
 # ---------------------------------------------------------------------------
 
 on:
-  schedule:
-    # 01:00, 04:00, 10:00 and 11:00 UTC = 08:00, 11:00, 17:00 and 18:00 in
-    # UTC+7, Monday to Friday.
-    - cron: '0 1 * * 1-5'
-    - cron: '0 4 * * 1-5'
-    - cron: '0 10 * * 1-5'
-    - cron: '0 11 * * 1-5'
+  # Dispatched at 08:00, 11:00, 17:00 and 18:00 UTC+7, Monday to Friday, by
+  # workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh) with skip_off_days=true: GitHub's own
+  # `schedule:` starts late. Without that device, put this back:
+  #   schedule:
+  #     - cron: '0 1 * * 1-5'
+  #     - cron: '0 4 * * 1-5'
+  #     - cron: '0 10 * * 1-5'
+  #     - cron: '0 11 * * 1-5'
   workflow_dispatch:
     inputs:
       direction:
@@ -85,6 +87,10 @@ on:
         type: choice
         options: [auto, to-work, to-home]
         default: auto
+      skip_off_days:
+        description: 'Do nothing on weekends and public holidays (as a scheduled run)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -145,11 +151,12 @@ jobs:
         id: gate
         env:
           HOLIDAY_COUNTRY: ${{ secrets.HOLIDAY_COUNTRY }}
+          SKIP_OFF_DAYS: ${{ inputs.skip_off_days }}
         run: |
           set -euo pipefail
           export TZ="$COMMUTE_TZ"
-          # Manual runs always go ahead, right away.
-          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+          # Manual runs go ahead unless skip_off_days (workflow-cron sets it).
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] || [ "$SKIP_OFF_DAYS" = "true" ]; then
             if [ "$(date +%u)" -gt 5 ]; then
               echo "run=false" >> "$GITHUB_OUTPUT"
               exit 0
