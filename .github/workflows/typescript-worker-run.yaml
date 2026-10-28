@@ -1296,7 +1296,8 @@ jobs:
             else
               failures=$((failures + 1))
               echo "::error::${name} exited ${rc}"
-              [ "$VERBOSE" = "true" ] || tail -n 60 "$log" | redact
+              # Without the pw:api trace, which would push a failed script's error out of the tail.
+              [ "$VERBOSE" = "true" ] || grep -v ' pw:' "$log" | tail -n 60 | redact
               printf 'fail\t%s\t%s\n' "$name" "$rc" >> /tmp/ts-results.txt
               # No `set -e` here: the failure has to be recorded before this
               # step exits non-zero, or the summary loses the row.
