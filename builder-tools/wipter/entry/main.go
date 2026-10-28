@@ -1,5 +1,6 @@
-// wipter-entry starts the Wipter desktop app (Electron) without a display and
-// keeps its output short: the app and Chromium log a lot (some of it with the
+// wipter-entry starts the Wipter desktop app (Electron) on a private virtual
+// display (Xvfb, nothing else: no window manager or VNC) and keeps its output
+// short: the app and Chromium log a lot (some of it with the
 // account email), so only the status lines of the shim it loads first
 // (shim/shim.js: signs in, accepts the consent prompt, keeps sharing on) are
 // shown, as "wipter-entry: ..." lines. WIPTER_DEBUG=1 shows everything.
@@ -26,16 +27,42 @@ import (
 
 const app = "/opt/Wipter/wipter-app.bin"
 
-// Chromium switches: no display (headless Ozone, drawing with its software
-// GPU), no sandbox and no zygote (the sandbox needs user namespaces or a
-// setuid helper; the container is the sandbox), no keyring (the app then
+// Chromium switches: X11 on the virtual display, no GPU (software
+// compositing), no sandbox and no zygote (the sandbox needs user namespaces
+// or a setuid helper; the container is the sandbox), no keyring (the app then
 // keeps its login in its own config file), fatal-only Chromium logging.
+// Chromium's headless display backend would need no X server at all, but in
+// Electron its GPU process still looks for one and the window never opens.
 var appArgs = []string{
 	"--no-sandbox",
 	"--no-zygote",
-	"--ozone-platform=headless",
+	"--ozone-platform=x11",
+	"--disable-gpu",
 	"--password-store=basic",
 	"--log-level=3",
+}
+
+const display = ":99"
+
+// startX starts Xvfb on display :99, local socket only, and waits for it.
+func startX(debug bool) *exec.Cmd {
+	x := exec.Command("/usr/bin/Xvfb", display, "-screen", "0", "800x600x16",
+		"-nolisten", "tcp", "-noreset", "-nocursor")
+	if debug {
+		x.Stdout, x.Stderr = os.Stdout, os.Stderr
+	}
+	if err := x.Start(); err != nil {
+		fail("cannot start Xvfb: " + err.Error())
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat("/tmp/.X11-unix/X99"); err == nil {
+			return x
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	x.Process.Kill()
+	fail("Xvfb did not start")
+	return nil
 }
 
 const shimPrefix = "wipter-shim: "
@@ -62,6 +89,9 @@ func main() {
 	if err != nil {
 		fail(err.Error())
 	}
+	x := startX(debug)
+	defer x.Process.Kill()
+	os.Setenv("DISPLAY", display)
 	args := appArgs
 	if debug {
 		args = append(args[:len(args):len(args)], "--enable-logging=stderr", "--log-level=0")
@@ -95,6 +125,7 @@ func main() {
 	case <-copied:
 	case <-time.After(2 * time.Second):
 	}
+	x.Process.Kill()
 	code := cmd.ProcessState.ExitCode()
 	if code != 0 {
 		fmt.Printf("wipter-entry: the app exited (%v)\n", err)

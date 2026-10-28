@@ -7,8 +7,8 @@
 #
 # Here the official .deb is pinned by checksum (the versioned URL from the
 # app's own update feed, https://provider-assets.wipter.com/latest/linux/
-# <x64|arm64>/latest-linux*.yml) and run with Chromium's headless display
-# backend: no X server, window manager, VNC or keyring. app.asar becomes
+# <x64|arm64>/latest-linux*.yml) and run on a bare Xvfb: no window manager,
+# VNC or keyring. app.asar becomes
 # wipter.asar and shim/shim.js goes in resources/app/, which Electron then
 # loads (this build allows it: its OnlyLoadAppFromAsar fuse is off). The shim
 # loads the app's own main process unchanged and, from inside it, signs in, accepts the consent prompt
@@ -60,8 +60,8 @@ COPY entry/ /src/
 RUN cd /src && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" \
       go build -trimpath -ldflags '-s -w' -o /wipter-entry .
 
-# What wipter-app.bin links against (it loads GTK even without a display),
-# nothing else: no X server, fonts beyond what cairo pulls in, or shell tools.
+# What wipter-app.bin links against, plus Xvfb, nothing else: no window
+# manager, VNC, fonts beyond what cairo pulls in, or shell tools.
 # The app reads its user name (os.userInfo), so uid 65532 gets a passwd entry.
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
@@ -71,7 +71,7 @@ RUN apt-get update \
       libcairo2 libcups2t64 libdbus-1-3 libexpat1 libgbm1 libglib2.0-0t64 \
       libgtk-3-0t64 libnspr4 libnss3 libpango-1.0-0 libudev1 libx11-6 \
       libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
-      libxrandr2 \
+      libxrandr2 xvfb \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* /usr/share/doc /usr/share/man /usr/share/info \
  && echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/usr/sbin/nologin' >> /etc/passwd \
  && echo 'nonroot:x:65532:' >> /etc/group \
@@ -81,11 +81,10 @@ COPY --from=unpack /x/opt/Wipter /opt/Wipter
 COPY --from=entry /wipter-entry /usr/local/bin/wipter-entry
 
 # Every library resolves, on both arches; on amd64 (native, so fast) the app
-# also starts headless and shows its sign-in form, with a throwaway profile.
+# also starts on Xvfb and shows its sign-in form, with a throwaway profile.
 FROM runtime AS check
 ARG TARGETARCH
-RUN ! ldd /opt/Wipter/wipter-app.bin | grep -F 'not found' \
- && ls -la /opt/Wipter/resources /opt/Wipter/resources/app && cat /opt/Wipter/resources/app/package.json
+RUN ! ldd /opt/Wipter/wipter-app.bin | grep -F 'not found'
 USER 65532:65532
 RUN if [ "$TARGETARCH" = amd64 ]; then WIPTER_DEBUG=1 timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
  && touch /tmp/check-ok
