@@ -134,9 +134,11 @@ while :; do
   remaining=$(( DEADLINE - $(date +%s) ))
   [ "$remaining" -gt 60 ] || break
   started=$(date +%s)
-  # A clean environment: nothing from the job reaches the client.
-  env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" GOMAXPROCS=1 GOMEMLIMIT=96MiB \
-    "${GRAFT[@]}" -- "$B/proxyrack" "${ARGS[@]}" \
+  # A clean environment: nothing from the job reaches the client. The Go limits are set
+  # inside graftcp, for the client only: graftcp is Go too, and with GOMAXPROCS=1 it lost
+  # track of the client (see the Dockerfile).
+  env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" \
+    "${GRAFT[@]}" -- /usr/bin/env GOMAXPROCS=1 GOMEMLIMIT=96MiB "$B/proxyrack" "${ARGS[@]}" \
     < <(exec sleep "$remaining") > >(mask_log) 2>&1 &
   CPID=$!
   PIDS+=("$CPID")

@@ -23,6 +23,13 @@ ARG GRAFTCP_REF=v0.8.3
 ARG GRAFTCP_COMMIT=825cf6d3b9ec043defe8e598eb218eccc1a3eaf3
 RUN git clone -q --depth 1 --branch "$GRAFTCP_REF" https://github.com/hmgle/graftcp.git /src/graftcp \
  && [ "$(git -C /src/graftcp rev-parse HEAD)" = "$GRAFTCP_COMMIT" ]
+# mgraftcp forks the program in one cgo call and traces it in the next, but Linux only takes
+# ptrace calls from the thread that forked it. If Go moves main to another thread in between,
+# ptrace fails ("No such process") and the program runs untraced under graftcp's seccomp
+# filter, where fcntl returns ENOSYS (Go: "cannot open standard fds"). Pin main to one thread.
+RUN cd /src/graftcp/local/cmd/mgraftcp \
+ && sed -i 's#^\t"path/filepath"$#&\n\t"runtime"#; s#^func init() {$#&\n\truntime.LockOSThread()#' main.go \
+ && grep -q 'runtime.LockOSThread()' main.go && grep -q '"runtime"' main.go
 # Static, so it runs on any runner image whatever its glibc. (The linker warns about
 # getpwnam in a static binary: only graftcp's -u option uses it, and run.sh doesn't.)
 RUN make -C /src/graftcp local/graftcp \
