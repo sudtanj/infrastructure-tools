@@ -8,6 +8,7 @@
 // app starts, so neither its page nor wipter-tunnel sees them);
 // WIPTER_SELFTEST=1 exits 0 once the sign-in form shows (1 after 4 minutes).
 'use strict';
+const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 
@@ -18,7 +19,9 @@ for (const k of ['WIPTER_EMAIL', 'WIPTER_PASSWORD', 'WIPTER_SELFTEST', 'VITE_DEV
     delete process.env[k];
 
 const debug = process.env.WIPTER_DEBUG === '1';
-const log = msg => process.stdout.write(`wipter-shim: ${msg}\n`);
+// Written straight to fd 1: unbuffered, and shown even if the main thread
+// stalls right after.
+const log = msg => { try { fs.writeSync(1, `wipter-shim: ${msg}\n`); } catch {} };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Runs a script in the page, giving up after 20 s.
@@ -30,6 +33,9 @@ function run(win, js) {
         sleep(20000).then(() => { throw new Error('the page did not answer in 20 s'); }),
     ]);
 }
+
+if (debug || selftest)
+    log('shim loaded');
 
 if (selftest) {
     setTimeout(() => {

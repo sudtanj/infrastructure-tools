@@ -63,7 +63,11 @@ func main() {
 	if err != nil {
 		fail(err.Error())
 	}
-	cmd := exec.Command(app, appArgs...)
+	args := appArgs
+	if debug {
+		args = append(args[:len(args):len(args)], "--enable-logging=stderr", "--log-level=0")
+	}
+	cmd := exec.Command(app, args...)
 	cmd.Stdout, cmd.Stderr = w, w
 	if err := cmd.Start(); err != nil {
 		fail("cannot start the app: " + err.Error())
