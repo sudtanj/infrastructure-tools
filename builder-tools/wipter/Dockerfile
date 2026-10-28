@@ -71,7 +71,7 @@ FROM runtime AS check
 ARG TARGETARCH
 RUN ! ldd /opt/Wipter/wipter-app.bin | grep -F 'not found'
 USER 65532:65532
-RUN if [ "$TARGETARCH" = amd64 ]; then HOME=/tmp timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
+RUN if [ "$TARGETARCH" = amd64 ]; then WIPTER_DEBUG=1 timeout 300 /usr/local/bin/wipter-entry -selftest; fi \
  && touch /tmp/check-ok
 
 FROM runtime
