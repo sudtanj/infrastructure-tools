@@ -18,7 +18,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   EARNAPP_UUID is optional: init-earnapp derives a stable one from TAILSCALE_OAUTH_CLIENT_SECRET
 #   (a new OAuth secret = a new device) and sends the link-device URL to TELEGRAM_TOKEN/TELEGRAM_CHAT_ID,
 #   never to the log.
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_, WORKFLOW_CRON_ (token: GH_TOKEN by default)
 #   opi-init-tailscale-docker.sh alone also gets every OPI_TS_ secret (OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS,
 #   OPI_TS_HOSTNAME, OPI_TS_TAILSCALED_EXTRA_ARGS, ...) and
 #   TAILSCALE_OAUTH_CLIENT_SECRET, its only credential (the OAuth client needs auth_keys
@@ -44,6 +44,7 @@ on:
           - init-dozzle
           - init-zilong-router
           - init-kongming
+          - init-workflow-cron
           - opi-init-tailscale-docker
           - reset-containers
           # add new script names here as you create them
@@ -83,9 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
-            # reset-*.sh are destructive and opi-init-tailscale-docker.sh swaps the device's own Tailscale:
+            # reset-*.sh are destructive, opi-init-tailscale-docker.sh swaps the device's own Tailscale, and
+            # init-workflow-cron.sh must run on one device only (on two, every workflow starts twice):
             # only run them when picked by name
-            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-init-tailscale-docker.sh' | sort)
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-init-tailscale-docker.sh' ! -name 'init-workflow-cron.sh' | sort)
           else
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
@@ -254,9 +256,11 @@ jobs:
           # Only these prefixes reach the device. Never add OPI_ or TAILSCALE_ here (opi-init-tailscale-docker.sh
           # alone gets OPI_TS_ and the TAILSCALE_ OAuth client, below).
           # MINI_ROUTER_ secrets are exported under the ZILONG_ROUTER_ names the script reads.
+          # WORKFLOW_CRON_ is the token init-workflow-cron.sh dispatches with (GH_TOKEN unless WORKFLOW_CRON_GITHUB_TOKEN
+          # is set) and its Telegram alert.
           # Secrets are named one by one below (not toJSON(secrets)) so the runner only ever holds
           # the ones the scripts read; a secret a script starts reading must be added to the list.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,DOZZLE_,MINI_ROUTER_,KONGMING_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,DOZZLE_,MINI_ROUTER_,KONGMING_,WORKFLOW_CRON_"
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
           BITPING_CPU_LIMIT: ${{ secrets.BITPING_CPU_LIMIT }}
           BITPING_DEVICE: ${{ secrets.BITPING_DEVICE }}
@@ -270,6 +274,9 @@ jobs:
           EARNAPP_UUID: ${{ secrets.EARNAPP_UUID }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORKFLOW_CRON_GITHUB_TOKEN: ${{ secrets.WORKFLOW_CRON_GITHUB_TOKEN || secrets.GH_TOKEN }}
+          WORKFLOW_CRON_TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WORKFLOW_CRON_TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DOZZLE_AUTH_PROVIDER: ${{ secrets.DOZZLE_AUTH_PROVIDER }}
           DOZZLE_AUTH_TTL: ${{ secrets.DOZZLE_AUTH_TTL }}
           DOZZLE_AUTO_UPDATE: ${{ secrets.DOZZLE_AUTO_UPDATE }}

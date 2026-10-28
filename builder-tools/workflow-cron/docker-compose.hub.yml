@@ -1,0 +1,32 @@
+# workflow-cron, pulled from Docker Hub (linux/amd64 + linux/arm64).
+# On the GCP VM, bash-scripts/init-workflow-cron.sh does the same with docker run.
+#
+#   export WORKFLOW_CRON_GITHUB_TOKEN=github_pat_...
+#   docker compose -f docker-compose.hub.yml up -d
+
+services:
+  workflow-cron:
+    image: sudtanj/workflow-cron:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      WORKFLOW_CRON_GITHUB_TOKEN: ${WORKFLOW_CRON_GITHUB_TOKEN:?set WORKFLOW_CRON_GITHUB_TOKEN}
+      WORKFLOW_CRON_TZ: Asia/Jakarta
+      WORKFLOW_CRON_JOBS: |
+        0 *    * * *  typescript-worker-run.yaml
+        0 7,17 * * *  android-emulator-session.yaml exit_node=true autoplay=true
+        0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
+    cpus: 0.10
+    mem_limit: 32m
+    memswap_limit: 32m
+    pids_limit: 32
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "2"

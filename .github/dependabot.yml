@@ -21,6 +21,7 @@ updates:
       - /builder-tools/repocket
       - /builder-tools/tailscale
       - /builder-tools/traffmonetizer
+      - /builder-tools/workflow-cron
       - /builder-tools/zilong-router
     schedule: { interval: weekly }
   # Actions used by the workflows. Not auto-merged: review these by hand.

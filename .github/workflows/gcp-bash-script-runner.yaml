@@ -16,6 +16,7 @@ on:
           - init-paseo-codex
           - init-paseo-lite
           - init-tailscale
+          - init-workflow-cron
           - test-codex-url
           - upsert-github-runner
           - optimize-vm
@@ -58,7 +59,8 @@ jobs:
           if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
             # reset-*.sh are destructive (they stop what the init scripts start): only run when picked by name.
             # opi-*.sh are for the Orange Pi only (see orangepi-bash-script-runner.yaml).
-            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-*.sh' | sort)
+            # init-workflow-cron.sh must run on one device only (on two, every workflow starts twice).
+            mapfile -t files < <(find bash-scripts -maxdepth 1 -type f -name '*.sh' ! -name 'reset-*.sh' ! -name 'opi-*.sh' ! -name 'init-workflow-cron.sh' | sort)
           else
             name="${REQUESTED%.sh}"
             files=("bash-scripts/${name}.sh")
@@ -254,9 +256,11 @@ jobs:
           # DOZZLE_ forwards DOZZLE_PASSWORD (and optional overrides) to init-dozzle.sh.
           # PASEO_PASSWORD protects direct (non-relay) connections to init-paseo-codex.sh and init-paseo-lite.sh
           # (:6767 / :6768) and unlocks paseo-lite's pairing page; relay clients still need the pairing key.
+          # WORKFLOW_CRON_ configures init-workflow-cron.sh: the token that dispatches the workflows (GH_TOKEN unless
+          # WORKFLOW_CRON_GITHUB_TOKEN is set; needs Actions: write here) and the Telegram alert (TELEGRAM_*). The job list is in the script.
           # PASEO_APP_BASE_URL (repository variable or secret) makes paseo-lite's pairing link open that web app,
           # e.g. https://sudtanj.github.io/paseo-lite (the GitHub Pages build in sudtanj/paseo-lite).
-          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL"
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,WORKFLOW_CRON_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -345,6 +349,9 @@ jobs:
           PASEO_PASSWORD: ${{ secrets.PASEO_PASSWORD }}
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
           TAILSCALE_PING_PEER: ${{ secrets.TAILSCALE_PING_PEER }}
+          WORKFLOW_CRON_GITHUB_TOKEN: ${{ secrets.WORKFLOW_CRON_GITHUB_TOKEN || secrets.GH_TOKEN }}
+          WORKFLOW_CRON_TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WORKFLOW_CRON_TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set +e
           # The private repo name shows up in the runner logs: mask it in the forms they print.

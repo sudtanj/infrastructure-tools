@@ -29,15 +29,15 @@ name: "Android emulator session over Tailscale"
 # app data and logins are never rolled back.
 #
 # PINEDRAMA AUTOPLAY
-#   Daily at 07:00 and 17:00 UTC+7 (GitHub can start a scheduled run late),
-#   or with `autoplay` on, the runner first launches EraSpace's rocket
+#   Daily at 07:00 and 17:00 UTC+7 (dispatched on time by workflow-cron on the
+#   GCP VM or Orange Pi, see below), or with `autoplay` on, the runner first launches EraSpace's rocket
 #   ("Luncurkan Roket") until it is out of tokens with
 #   .github/scripts/eraspace/eraspace.ts, then plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
 #   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
 #   balance reaches it, plays until the coin timer at the top left is gone or
 #   `autoplay_minutes` pass, then saves; no stop file needed.
-#   Also daily at 05:00 UTC+7 for the EraSpace rocket alone (no PineDrama).
+#   Also daily at 05:00 UTC+7 for the EraSpace rocket alone (`pinedrama` off).
 #   If a session is already running, the scheduled one waits for it.
 #   If EraSpace or PineDrama turns out to be logged out (or EraSpace's rocket
 #   can't be reached), a message goes to Telegram at the end of the run, once
@@ -67,12 +67,14 @@ name: "Android emulator session over Tailscale"
 # ---------------------------------------------------------------------------
 
 on:
-  # 07:00 and 17:00 UTC+7; 05:00 UTC+7 (22:00 UTC the day before) launches
-  # EraSpace's rocket only, see PLAY_PINEDRAMA.
-  schedule:
-    - cron: '0 0 * * *'
-    - cron: '0 10 * * *'
-    - cron: '0 22 * * *'
+  # 07:00 and 17:00 UTC+7 (exit_node + autoplay), and 05:00 UTC+7 for
+  # EraSpace's rocket only (+ pinedrama=false), are dispatched on time by
+  # workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron, deployed by
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late.
+  # Without that device, put back (a schedule always plays PineDrama):
+  #   schedule:
+  #     - cron: '0 0 * * *'
+  #     - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       max_minutes:
@@ -88,13 +90,17 @@ on:
         type: boolean
         default: true
       autoplay:
-        description: 'Play PineDrama until the coin is gone, then save (as the schedule does)'
+        description: 'Run the EraSpace rocket and play PineDrama until the coin is gone, then save (as the schedule does)'
         type: boolean
         default: false
       autoplay_minutes:
         description: 'With autoplay, stop after this many minutes even if the coin is still there'
         type: number
         default: 30
+      pinedrama:
+        description: 'With autoplay, also play PineDrama after the rocket (off: the rocket only)'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -119,7 +125,8 @@ jobs:
       USE_EXIT_NODE: ${{ github.event_name == 'schedule' || inputs.exit_node }}
       AUTOPLAY: ${{ github.event_name == 'schedule' || inputs.autoplay }}
       AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 30 }}
-      PLAY_PINEDRAMA: ${{ github.event.schedule != '0 22 * * *' }}
+      # A null input (a schedule) loosely equals false, so test the event.
+      PLAY_PINEDRAMA: ${{ github.event_name != 'workflow_dispatch' || inputs.pinedrama }}
       # The scripts queue alerts here (android-alert.ts); sent by "Send alerts".
       ALERT_FILE: /tmp/android-alerts.txt
 
