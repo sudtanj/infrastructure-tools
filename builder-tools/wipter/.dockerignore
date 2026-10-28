@@ -1,0 +1,4 @@
+# Only the Dockerfile and the launcher source reach the build context.
+*
+!Dockerfile
+!entry/

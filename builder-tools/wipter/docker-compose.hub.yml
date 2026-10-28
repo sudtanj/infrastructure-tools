@@ -1,0 +1,61 @@
+# Wipter, headless, pulled from Docker Hub (linux/amd64 + linux/arm64).
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f docker-compose.hub.yml up -d
+
+services:
+  wipter:
+    image: sudtanj/wipter:latest
+    pull_policy: always
+    restart: unless-stopped
+    # tini as PID 1 reaps the processes Chromium leaves behind.
+    init: true
+    # Shown in your Wipter dashboard as the device name.
+    hostname: wipter
+
+    # AdGuard Family Protection: blocks known malware, phishing and adult
+    # domains. init-wipter.sh also redirects every DNS query to it and blocks
+    # the LAN; compose cannot.
+    dns:
+      - 94.140.14.15 # AdGuard Family Protection IPv4 (Primary)
+      - 94.140.15.16 # AdGuard Family Protection IPv4
+
+    environment:
+      WIPTER_EMAIL: ${WIPTER_EMAIL:?set WIPTER_EMAIL in .env}
+      WIPTER_PASSWORD: ${WIPTER_PASSWORD:?set WIPTER_PASSWORD in .env}
+
+    volumes:
+      # The app's session and settings: no new sign-in on every restart.
+      - wipter-config:/home/nonroot/.config
+      # Optional, a stable device fingerprint (32 hex digits + newline):
+      # - ./machine-id:/etc/machine-id:ro
+
+    # Hard limits: no swap, low CPU priority, and the first container the
+    # kernel kills under memory pressure. Chromium counts every thread as a
+    # pid.
+    cpus: 0.5
+    cpu_shares: 256
+    mem_limit: 512m
+    memswap_limit: 512m
+    oom_score_adj: 500
+    pids_limit: 256
+    shm_size: 64m
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /home/nonroot:rw,noexec,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Small rotated logs, to spare an SD card.
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+volumes:
+  wipter-config:

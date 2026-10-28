@@ -18,7 +18,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   EARNAPP_UUID is optional: init-earnapp derives a stable one from TAILSCALE_OAUTH_CLIENT_SECRET
 #   (a new OAuth secret = a new device) and sends the link-device URL to TELEGRAM_TOKEN/TELEGRAM_CHAT_ID,
 #   never to the log.
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_, WORKFLOW_CRON_ (token: GH_TOKEN by default)
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, WIPTER_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_, WORKFLOW_CRON_ (token: GH_TOKEN by default)
 #   opi-init-tailscale-docker.sh alone also gets every OPI_TS_ secret (OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS,
 #   OPI_TS_HOSTNAME, OPI_TS_TAILSCALED_EXTRA_ARGS, ...) and
 #   TAILSCALE_OAUTH_CLIENT_SECRET, its only credential (the OAuth client needs auth_keys
@@ -41,6 +41,7 @@ on:
           - init-packetstream
           - init-bitping
           - init-earnapp
+          - init-wipter
           - init-dozzle
           - init-zilong-router
           - init-kongming
@@ -160,7 +161,7 @@ jobs:
             map { $ENV{$_} } qw(OPI_TAILSCALE_IP OPI_SSH_USER OPI_SSH_PASSWORD HONEYGAIN_EMAIL HONEYGAIN_PASSWORD HONEYGAIN_DEVICE
                      TRAFFMONETIZER_TOKEN TRAFFMONETIZER_DEVICE EARNFM_TOKEN EARNFM_DEVICE
                      REPOCKET_TOKEN REPOCKET_DEVICE PAWNS_EMAIL PAWNS_PASSWORD PAWNS_DEVICE
-                     PACKETSTREAM_CID PACKETSTREAM_DEVICE BITPING_API_KEY BITPING_DEVICE EARNAPP_UUID
+                     PACKETSTREAM_CID PACKETSTREAM_DEVICE BITPING_API_KEY BITPING_DEVICE EARNAPP_UUID WIPTER_EMAIL WIPTER_PASSWORD
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
                      MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
                      KONGMING_TURSO_AUTH_TOKEN KONGMING_TURSO_DATABASE_URL KONGMING_TURSO_TOKEN KONGMING_TURSO_URL
@@ -260,7 +261,7 @@ jobs:
           # is set) and its Telegram alert.
           # Secrets are named one by one below (not toJSON(secrets)) so the runner only ever holds
           # the ones the scripts read; a secret a script starts reading must be added to the list.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,DOZZLE_,MINI_ROUTER_,KONGMING_,WORKFLOW_CRON_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,WIPTER_,DOZZLE_,MINI_ROUTER_,KONGMING_,WORKFLOW_CRON_"
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
           BITPING_CPU_LIMIT: ${{ secrets.BITPING_CPU_LIMIT }}
           BITPING_DEVICE: ${{ secrets.BITPING_DEVICE }}
@@ -272,6 +273,11 @@ jobs:
           EARNAPP_IMAGE: ${{ secrets.EARNAPP_IMAGE }}
           EARNAPP_MEMORY_LIMIT: ${{ secrets.EARNAPP_MEMORY_LIMIT }}
           EARNAPP_UUID: ${{ secrets.EARNAPP_UUID }}
+          WIPTER_CPU_LIMIT: ${{ secrets.WIPTER_CPU_LIMIT }}
+          WIPTER_EMAIL: ${{ secrets.WIPTER_EMAIL }}
+          WIPTER_IMAGE: ${{ secrets.WIPTER_IMAGE }}
+          WIPTER_MEMORY_LIMIT: ${{ secrets.WIPTER_MEMORY_LIMIT }}
+          WIPTER_PASSWORD: ${{ secrets.WIPTER_PASSWORD }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WORKFLOW_CRON_GITHUB_TOKEN: ${{ secrets.WORKFLOW_CRON_GITHUB_TOKEN || secrets.GH_TOKEN }}
