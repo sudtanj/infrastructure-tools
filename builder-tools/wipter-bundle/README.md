@@ -74,6 +74,13 @@ app's and tailscaled's SOCKS5 servers included. Only the tailnet ACL stands
 in the way, so it should let your devices reach the runner's tag on port
 5900 alone, e.g. `{"action":"accept","src":["you@example.com"],"dst":["tag:runner:5900"]}`.
 
+To keep the IP too, give run.sh `TS_FIXED_IP` and `TS_API_TOKEN` (a
+Tailscale API token with Devices Core write): right after joining, before the
+app starts, it moves the node to that IP through the API, deleting a leftover
+`wipter-instabox` node that still holds it (any other holder is left alone,
+with a warning). Without them, or if the API refuses, the run goes on with the
+IP Tailscale gave it.
+
 The reverse connection needs no open port: nothing listens for the tailnet, so
 `--shields-up` stays on. Userspace tailscaled forwards every inbound tailnet
 connection to `127.0.0.1` on the same port, which here would include the

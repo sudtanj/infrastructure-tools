@@ -41,6 +41,11 @@
 #                        node (tailnet name wipter-instabox) for a viewer to
 #                        connect in. Either one needs:
 #   WIPTER_VNC_PASSWORD  the password the viewer must give
+#   TS_FIXED_IP          optional: the tailnet IPv4 this node takes after joining,
+#                        so it stays the same from run to run. Needs:
+#   TS_API_TOKEN         a Tailscale API token allowed to write devices. A
+#                        leftover wipter-instabox node holding the IP is deleted;
+#                        any other device holding it is left alone.
 #
 # The node is always named wipter-instabox, so its MagicDNS name stays the same
 # from run to run (its IP doesn't: each run is a new ephemeral node).
@@ -135,6 +140,41 @@ done
 unset TS_AUTHKEY
 [ "$joined" = 1 ] || fail "could not join the tailnet (key rejected or expired?)"
 ok "joined the tailnet as $(ts status --json 2>/dev/null | jq -r '.Self.HostName // "?"')"
+
+# Fixed tailnet IP: each run is a new ephemeral node with a fresh IP, so the
+# API moves it to TS_FIXED_IP (done before the app starts, so nothing breaks).
+tsapi() { curl -fsS --max-time 20 -H "Authorization: Bearer $TS_API_TOKEN" "$@"; }
+fixed_ip() {
+  local api=https://api.tailscale.com/api/v2 self devs holder hname
+  self="$(ts status --json 2>/dev/null | jq -r '.Self.ID // empty')"
+  [ -n "$self" ] || { warn "fixed IP: this node's ID is unknown"; return 1; }
+  devs="$(tsapi "$api/tailnet/-/devices")" \
+    || { warn "fixed IP: could not list devices (the OAuth client needs the Devices Core write scope)"; return 1; }
+  while IFS=$'\t' read -r holder hname; do
+    [ -n "$holder" ] && [ "$holder" != "$self" ] || continue
+    case "$hname" in
+      wipter-instabox*) tsapi -X DELETE "$api/device/$holder" >/dev/null \
+          || { warn "fixed IP: could not remove the previous run's node holding it"; return 1; }
+        ok "fixed IP: removed the previous run's node holding it" ;;
+      *) warn "fixed IP: another device of the tailnet holds it; not taken"; return 1 ;;
+    esac
+  done < <(jq -r --arg ip "$TS_FIXED_IP" '.devices[]? | select((.addresses // []) | index($ip)) | [.nodeId, .hostname] | @tsv' <<< "$devs")
+  tsapi -X POST -H 'Content-Type: application/json' -d "{\"ipv4\":\"$TS_FIXED_IP\"}" "$api/device/$self/ip" >/dev/null \
+    || { warn "fixed IP: Tailscale refused to set it (the OAuth client needs the Devices Core write scope)"; return 1; }
+  for _ in $(seq 1 30); do
+    [ "$(ts ip -4 2>/dev/null)" = "$TS_FIXED_IP" ] && { ok "fixed IP: this node has its usual tailnet IP"; return 0; }
+    sleep 2
+  done
+  warn "fixed IP: set, but this node hasn't picked it up yet"
+}
+if [ -n "${TS_FIXED_IP:-}" ] && [ -n "${TS_API_TOKEN:-}" ]; then
+  if [[ "$TS_FIXED_IP" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fixed_ip || warn "fixed IP: keeping the IP Tailscale gave this run"
+  else
+    warn "TS_FIXED_IP must be a tailnet IPv4 (100.x.y.z); ignored"
+  fi
+fi
+unset TS_API_TOKEN
 
 # 2. Exit node. tag:name resolves to an online peer with that tag that offers one.
 TARGET="$EXIT_NODE"
