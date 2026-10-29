@@ -33,6 +33,11 @@
 #   TS_TAGS              tags to advertise (needed with an OAuth-minted key)
 #   TS_EXIT_NODE         tag:name, a MagicDNS name or a Tailscale IPv4 (required)
 #   RUN_SECONDS          how long to run (default 3600)
+#   WIPTER_OPEN_NETWORK=1  no guard: graftcp sends the app straight to tailscaled's
+#                        SOCKS5 port, so IPv6, UDP, private and tailnet addresses
+#                        and every port are allowed, and DNS goes to 1.1.1.1;
+#                        loopback is dialed directly. Internet traffic still
+#                        leaves only through the exit node (checked below).
 #   WIPTER_DEBUG=1       show the app's own output and the guard's refused
 #                        connections (port and kind only; IPs and emails masked)
 #   RUN_DIR              scratch dir: sockets, logs, the app's profile (default: a mktemp dir)
@@ -199,6 +204,11 @@ exit_node_ok || fail "the exit node is not online"
 ok "exit node in use"
 
 # 3. The guard, then a test through the app's exact path.
+if [ "${WIPTER_OPEN_NETWORK:-}" = 1 ]; then
+  warn "open network: no guard; the app reaches IPv6, UDP, private and tailnet addresses and every port (internet still only via the exit node)"
+  GRAFT=("$B/graftcp" --select_proxy_mode only_socks5 --socks5 "$SOCKS_TS"
+         --enable-dns --dns-server 1.1.1.1:53 --enable-udp)
+else
 gv=()
 [ "${WIPTER_DEBUG:-}" != 1 ] || gv=(-v)
 "$B/wipter-guard" "${gv[@]}" -listen "$SOCKS_GUARD" -upstream "$SOCKS_TS" -dns "$DNS_SERVER" \
@@ -213,16 +223,21 @@ fi
 
 GRAFT=("$B/graftcp" --not-ignore-local --select_proxy_mode only_socks5 --socks5 "$SOCKS_GUARD"
        --enable-dns --dns-server "$DNS_SERVER" --enable-udp)
+fi
 direct_ip="$(curl -fsS --max-time 15 https://api.ipify.org 2>/dev/null || true)"
 tunnel_ip="$("${GRAFT[@]}" -- curl -fsS --max-time 30 https://api.ipify.org 2>/dev/null || true)"
 for ip in "$direct_ip" "$tunnel_ip"; do [ -z "$ip" ] || echo "::add-mask::$ip"; done
 [[ "$tunnel_ip" =~ ^[0-9.]+$ ]] || fail "nothing gets out through graftcp -> guard -> exit node (ptrace blocked, or DNS/exit node down)"
 [ "$tunnel_ip" != "$direct_ip" ] || fail "traffic leaves from this machine's IP, not the exit node"
+if [ "${WIPTER_OPEN_NETWORK:-}" = 1 ]; then
+  ok "app path leaves through the exit node (IPs not printed)"
+else
 # Loopback must hit the guard too: going straight to tailscaled's SOCKS5 port would skip it.
 if "${GRAFT[@]}" -- curl -fsS --max-time 15 --socks5 "$SOCKS_TS" -o /dev/null https://api.ipify.org 2>/dev/null; then
   fail "a loopback connection got past the guard"
 fi
 ok "app path leaves through the exit node; loopback refused (IPs not printed)"
+fi
 
 # 4. The app, until the deadline (timeout runs inside graftcp and stops it with
 # SIGTERM, which the launcher passes on). Restarted if it stops early, except
