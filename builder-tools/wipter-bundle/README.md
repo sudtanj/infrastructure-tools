@@ -6,7 +6,7 @@
 Not a runnable container (`FROM scratch`): a set of prebuilt files for running
 the [Wipter](../wipter) app inside an ephemeral GitHub Actions job on a
 self-hosted runner that has no Docker, no TUN device, no `NET_ADMIN` and no X
-server, with all of its traffic leaving through a Tailscale exit node, the
+server (it brings its own Xvfb), with all of its traffic leaving through a Tailscale exit node, the
 same way as [proxyrack-bundle](../proxyrack-bundle). The job downloads the
 image's layers from Docker Hub with `curl` and runs `run.sh`; nothing is
 compiled or installed during the job. **`linux/amd64` only.**
@@ -29,8 +29,11 @@ compiled or installed during the job. **`linux/amd64` only.**
   programs the app starts (`sh`, `cat`, ...) keep the host's libraries. The
   build checks this on Alpine, which has no glibc at all: every library
   resolves inside the bundle and the app starts and shows its sign-in form.
-- **No display**: Chromium's headless display backend (`WIPTER_HEADLESS=1` in
-  the launcher). Everything is drawn in software in the app's own process.
+- **Display**: the bundle's own Xvfb, from the same Debian release, relocated
+  the same way (Chromium's headless backend hangs Electron). It runs
+  `xkbcomp` from a compiled-in dir, so its `/usr/bin` string is patched to
+  `/tmp/wxb` (same length), which `run.sh` links to `rt/bin`; the keyboard
+  data is passed with `-xkbdir`. GTK's settings schemas are in `rt/share`.
 - **Fonts**: the bundle's, through `rt/fonts.conf`.
 - **Device ID**: the app fingerprints the device with `/etc/machine-id`, or
   `hostname` without one; `run.sh` puts a `hostname` that prints

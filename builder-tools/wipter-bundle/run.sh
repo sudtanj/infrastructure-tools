@@ -20,7 +20,7 @@
 #     and tailscaled picks a free UDP port.
 #
 # The app runs from rt/, linked to /tmp/wipter-rt (the path its loader and
-# libraries were relocated to), with Chromium's headless display backend. The
+# libraries were relocated to), on the bundle's own Xvfb (no window manager). The
 # shim inside it signs in, accepts the consent prompt and keeps sharing on. Its
 # status lines are shown; the app's own output, the login, auth key, exit node
 # and IPs are not.
@@ -59,12 +59,16 @@ EXIT_NODE="${TS_EXIT_NODE:-}"
 [ "$(uname -m)" = x86_64 ] || fail "x86_64 only"
 for t in curl jq timeout; do command -v "$t" >/dev/null || fail "$t is required"; done
 
-# Wipter: the relocated app must sit at /tmp/wipter-rt.
-if [ -e "$RT" ] || [ -L "$RT" ]; then
-  [ "$(readlink "$RT" 2>/dev/null)" = "$B/rt" ] || fail "$RT exists and is not this bundle"
-else
-  ln -s "$B/rt" "$RT"
-fi
+# Wipter: the relocated app must sit at /tmp/wipter-rt, and Xvfb finds xkbcomp in /tmp/wxb.
+link() {
+  if [ -e "$2" ] || [ -L "$2" ]; then
+    [ "$(readlink "$2" 2>/dev/null)" = "$1" ] || fail "$2 exists and is not this bundle's"
+  else
+    ln -s "$1" "$2"
+  fi
+}
+link "$B/rt" "$RT"
+link "$RT/bin" /tmp/wxb
 [ -x "$RT/app/wipter-app.bin" ] && [ -x "$RT/wipter-entry" ] || fail "the bundle is incomplete"
 # Wipter: the app's SOCKS5 server must get the one port the guard lets through.
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -159,7 +163,7 @@ start_app() {
   done
   export PATH="$d/bin:/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" \
     LANG=C.UTF-8 FONTCONFIG_FILE="$r/fonts.conf" XDG_DATA_DIRS="$r/share" GIO_MODULE_DIR="$r/gio-modules" \
-    WIPTER_APP="$r/app/wipter-app.bin" WIPTER_HEADLESS=1
+    WIPTER_APP="$r/app/wipter-app.bin" WIPTER_XVFB="$r/bin/Xvfb" WIPTER_XKB_DIR="$r/share/X11/xkb"
   exec "${GRAFT[@]}" -- timeout -k 30 "$1" "$r/wipter-entry"
 }
 show() {

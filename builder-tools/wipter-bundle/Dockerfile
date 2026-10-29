@@ -13,7 +13,7 @@
 #   run.sh        wires them together, see its header
 
 # The app, shim and launcher as published from builder-tools/wipter: bump with it.
-FROM sudtanj/wipter:v0.1.13 AS app
+FROM sudtanj/wipter:v0.1.14 AS app
 
 # Relocation, as NixOS does for Electron: every executable gets the bundle's own
 # dynamic loader at a fixed path, and every ELF file a forced DT_RPATH (searched
@@ -21,12 +21,16 @@ FROM sudtanj/wipter:v0.1.13 AS app
 # the bundle. Nothing uses LD_LIBRARY_PATH, so programs the app starts (sh,
 # cat, ...) keep the host's own libraries. glibc's loader and libc are not
 # patched. The GPU libraries Chromium dlopens stay next to the app ($ORIGIN).
-# GTK's settings schemas (it looks one up even without a display) go in
-# rt/share, the bundle's only XDG data dir; GIO loads no modules (an empty
-# dir), so none of the host's are mixed in.
+# GTK's settings schemas go in rt/share, the bundle's only XDG data dir; GIO
+# loads no modules (an empty dir), so none of the host's are mixed in.
+# Xvfb (Chromium's headless backend hangs Electron) comes from the same Debian
+# release, with xkbcomp, which it runs from a compiled-in dir: the string
+# "/usr/bin" in Xvfb becomes "/tmp/wxb" (same length), which run.sh links to
+# rt/bin. Its keyboard data goes in rt/share/X11/xkb (passed with -xkbdir).
 FROM debian:trixie-slim AS relocate
 RUN apt-get update \
  && apt-get install -y --no-install-recommends patchelf libglib2.0-bin gsettings-desktop-schemas \
+      xvfb x11-xkb-utils xkb-data \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=app /opt/Wipter /out/app
 COPY --from=app /usr/lib/x86_64-linux-gnu /src/lib
@@ -40,7 +44,13 @@ RUN set -eu; R=/tmp/wipter-rt; mkdir -p /out/lib \
  && mkdir -p /out/share/glib-2.0/schemas /out/gio-modules \
  && cp /usr/share/glib-2.0/schemas/*.xml /out/share/glib-2.0/schemas/ \
  && glib-compile-schemas /out/share/glib-2.0/schemas \
- && n=0; for f in $(find /out/app /out/lib -type f); do \
+ && mkdir -p /out/bin /out/share/X11 \
+ && cp /usr/bin/Xvfb /usr/bin/xkbcomp /out/bin/ \
+ && cp -a /usr/share/X11/xkb /out/share/X11/xkb \
+ && for l in $(ldd /usr/bin/Xvfb /usr/bin/xkbcomp | awk '$2 == "=>" { print $3 }' | sort -u); do \
+      [ -e "/out/lib/${l##*/}" ] || cp -L "$l" /out/lib/; done \
+ && perl -0777 -pi -e '$n = s{/usr/bin\0}{/tmp/wxb\0}g; END { print STDERR "Xvfb: /usr/bin -> /tmp/wxb ($n)\n"; exit($n ? 0 : 1) }' /out/bin/Xvfb \
+ && n=0; for f in $(find /out/app /out/lib /out/bin -type f); do \
       case "${f##*/}" in ld-linux-x86-64.so.2|libc.so.6) continue ;; esac; \
       patchelf --print-rpath "$f" >/dev/null 2>&1 || continue; \
       if patchelf --print-interpreter "$f" >/dev/null 2>&1; then \
@@ -57,21 +67,22 @@ RUN set -eu; R=/tmp/wipter-rt; mkdir -p /out/lib \
 # Stands in for the runner: Alpine has no glibc, so a library that resolved
 # outside the bundle would fail here. Same layout as run.sh (files in a work
 # dir, linked from /tmp/wipter-rt), as a non-root user: every library
-# resolves inside the bundle, then the app starts with Chromium's headless
-# display backend (no Xvfb) and shows its sign-in form, and reports its memory.
+# resolves inside the bundle, then the app starts on the bundle's Xvfb and
+# shows its sign-in form, and reports its memory.
 FROM alpine:3.22 AS check
 RUN adduser -D -u 1001 runner
 COPY --from=relocate --chown=1001:1001 /out /home/runner/w/rt
 USER 1001
-RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt \
- && /tmp/wipter-rt/ld-linux-x86-64.so.2 --list /tmp/wipter-rt/app/wipter-app.bin > /tmp/libs \
+RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt && ln -s /tmp/wipter-rt/bin /tmp/wxb \
+ && for e in app/wipter-app.bin bin/Xvfb bin/xkbcomp; do \
+      /tmp/wipter-rt/ld-linux-x86-64.so.2 --list /tmp/wipter-rt/$e; done > /tmp/libs \
  && ! grep -F 'not found' /tmp/libs \
  && ! grep '=>' /tmp/libs | grep -v '=> /tmp/wipter-rt/' \
  && echo "$(grep -c '=>' /tmp/libs) libraries, all in the bundle" \
  && mkdir /tmp/h \
  && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
       XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
-      WIPTER_HEADLESS=1 WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
+      WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
 
 FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 # graftcp: the same pin and patch as proxyrack-bundle/Dockerfile (see there); bump both together.
