@@ -104,13 +104,15 @@ RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt && ln -s /tmp/wipter-rt/bin 
       WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
 # (Links from the step before; the killed Xvfb's socket and lock are removed.)
 RUN set -eu; rm -rf /tmp/h /tmp/.X99-lock /tmp/.X11-unix/X99 && mkdir /tmp/h \
- && (wipter-guard -listen 127.0.0.1:1083 -upstream 127.0.0.1:1 -local 127.0.0.1:2000 &) && sleep 1 \
+ && { wipter-guard -listen 127.0.0.1:1083 -upstream 127.0.0.1:1 -local 127.0.0.1:2000 >/dev/null 2>&1 & } \
+ && g=$! && sleep 1 \
  && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
       XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
       WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb \
       graftcp --not-ignore-local --select_proxy_mode only_socks5 --socks5 127.0.0.1:1083 \
         --enable-dns --dns-server 94.140.14.15:53 --enable-udp -- \
-      timeout 300 /tmp/wipter-rt/wipter-entry -selftest
+      timeout 300 /tmp/wipter-rt/wipter-entry -selftest \
+ && kill $g
 
 FROM tailscale/tailscale:v1.104.1 AS tailscale
 
