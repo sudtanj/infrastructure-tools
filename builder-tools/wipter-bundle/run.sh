@@ -38,6 +38,9 @@
 #                        and every port are allowed, and DNS goes to 1.1.1.1;
 #                        loopback is dialed directly. Internet traffic still
 #                        leaves only through the exit node (checked below).
+#   WIPTER_DIRECT=1      no exit node, no graftcp: the app goes out straight from
+#                        this machine's own IP. Tailscale still joins, for VNC
+#                        and the fixed name; TS_EXIT_NODE is then not needed.
 #   WIPTER_DEBUG=1       show the app's own output and the guard's refused
 #                        connections (port and kind only; IPs and emails masked)
 #   RUN_DIR              scratch dir: sockets, logs, the app's profile (default: a mktemp dir)
@@ -84,7 +87,7 @@ fail() { printf '%s\n' "[x] $*" >&2; exit 1; }
 [ -z "${WIPTER_MACHINE_ID:-}" ] || [[ "$WIPTER_MACHINE_ID" =~ ^[0-9a-f]{32}$ ]] || fail "WIPTER_MACHINE_ID must be 32 hex digits"
 [ -n "${TS_AUTHKEY:-}" ] || fail "TS_AUTHKEY is required"
 EXIT_NODE="${TS_EXIT_NODE:-}"
-[[ "$EXIT_NODE" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*$ || "$EXIT_NODE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+[ "${WIPTER_DIRECT:-}" = 1 ] || [[ "$EXIT_NODE" =~ ^tag:[A-Za-z0-9][A-Za-z0-9_-]*$ || "$EXIT_NODE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
   || fail "TS_EXIT_NODE must be tag:name, a MagicDNS name or a Tailscale IPv4"
 [[ "$RUN_SECONDS" =~ ^[0-9]+$ ]] || fail "RUN_SECONDS must be a number"
 [ "$(uname -m)" = x86_64 ] || fail "x86_64 only"
@@ -189,6 +192,9 @@ fi
 unset TS_API_TOKEN
 
 # 2. Exit node. tag:name resolves to an online peer with that tag that offers one.
+if [ "${WIPTER_DIRECT:-}" = 1 ]; then
+  warn "direct: no exit node; the app goes out from this machine's own IP"
+else
 TARGET="$EXIT_NODE"
 if [ "${EXIT_NODE#tag:}" != "$EXIT_NODE" ]; then
   TARGET="$(ts status --json | jq -r --arg t "$EXIT_NODE" \
@@ -202,9 +208,12 @@ exit_node_ok() { ts status --json 2>/dev/null | jq -e '.ExitNodeStatus.Online ==
 for _ in $(seq 1 30); do exit_node_ok && break; sleep 2; done
 exit_node_ok || fail "the exit node is not online"
 ok "exit node in use"
+fi
 
 # 3. The guard, then a test through the app's exact path.
-if [ "${WIPTER_OPEN_NETWORK:-}" = 1 ]; then
+if [ "${WIPTER_DIRECT:-}" = 1 ]; then
+  GRAFT=(env)   # no graftcp: `env -- cmd` just runs it
+elif [ "${WIPTER_OPEN_NETWORK:-}" = 1 ]; then
   warn "open network: no guard; the app reaches IPv6, UDP, private and tailnet addresses and every port (internet still only via the exit node)"
   GRAFT=("$B/graftcp" --select_proxy_mode only_socks5 --socks5 "$SOCKS_TS"
          --enable-dns --dns-server 1.1.1.1:53 --enable-udp)
@@ -224,6 +233,7 @@ fi
 GRAFT=("$B/graftcp" --not-ignore-local --select_proxy_mode only_socks5 --socks5 "$SOCKS_GUARD"
        --enable-dns --dns-server "$DNS_SERVER" --enable-udp)
 fi
+if [ "${WIPTER_DIRECT:-}" != 1 ]; then
 direct_ip="$(curl -fsS --max-time 15 https://api.ipify.org 2>/dev/null || true)"
 tunnel_ip="$("${GRAFT[@]}" -- curl -fsS --max-time 30 https://api.ipify.org 2>/dev/null || true)"
 for ip in "$direct_ip" "$tunnel_ip"; do [ -z "$ip" ] || echo "::add-mask::$ip"; done
@@ -237,6 +247,7 @@ if "${GRAFT[@]}" -- curl -fsS --max-time 15 --socks5 "$SOCKS_TS" -o /dev/null ht
   fail "a loopback connection got past the guard"
 fi
 ok "app path leaves through the exit node; loopback refused (IPs not printed)"
+fi
 fi
 
 # 4. The app, until the deadline (timeout runs inside graftcp and stops it with
