@@ -17,6 +17,7 @@ compiled or installed during the job. **`linux/amd64` only.**
 | `graftcp` | [graftcp](https://github.com/hmgle/graftcp) v0.8.3, the same build as proxyrack-bundle's: redirects the connections of the app and all its child processes to a SOCKS5 proxy by tracing their syscalls |
 | `wipter-guard` | SOCKS5 filter (`guard/main.go`): proxyrack-bundle's guard plus one loopback address let through |
 | `tailscale`, `tailscaled` | from `tailscale/tailscale:v1.104.1`, run in userspace mode |
+| `rt/bin/x11vnc` | optional VNC view of the app's screen, relocated like the rest |
 | `run.sh` | joins the tailnet, sets the exit node, checks the path, runs the app |
 
 ## Running the app without its image
@@ -53,6 +54,23 @@ process connects to, so the guard dials exactly that address directly
 (`-local`). `run.sh` checks the port is free first, so the app gets it. Any
 other loopback connection, tailscaled's port included, is refused. The ports
 differ from proxyrack-bundle's, since the jobs share the host network.
+
+## Watching the app over VNC (optional)
+
+With `VNC_VIEWER=<tailnet device>[:port]` (default port 5500) and
+`WIPTER_VNC_PASSWORD`, x11vnc connects **out** to a VNC viewer listening on
+that tailnet device (for example TigerVNC `vncviewer -listen 5500`, or
+RealVNC/Remmina in listening mode), every 30 s until one takes the session,
+and again after it ends. The viewer asks for the password. The screen is
+1024x800, enough for the whole window, with no window manager.
+
+It is a reverse connection on purpose: nothing listens for the tailnet, so
+`--shields-up` stays on. Userspace tailscaled forwards every inbound tailnet
+connection to `127.0.0.1` on the same port, which here would include the
+app's SOCKS5 server and tailscaled's own, leaving only the tailnet ACL in
+the way. x11vnc reaches the viewer through tailscaled's SOCKS5 port under
+graftcp (tailnet addresses only) and listens on no port. The tailnet ACL must
+let the runner's tag reach the viewer's device on that port.
 
 ## Requirements on the runner
 

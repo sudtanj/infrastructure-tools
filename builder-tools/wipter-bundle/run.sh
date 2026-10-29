@@ -34,6 +34,18 @@
 #   TS_EXIT_NODE         tag:name, a MagicDNS name or a Tailscale IPv4 (required)
 #   RUN_SECONDS          how long to run (default 3600)
 #   RUN_DIR              scratch dir: sockets, logs, the app's profile (default: a mktemp dir)
+#   VNC_VIEWER           optional: <tailnet device>[:port] (default port 5500)
+#                        running a VNC viewer in listen mode; x11vnc connects
+#                        out to it with the app's screen. Needs:
+#   WIPTER_VNC_PASSWORD  the password the viewer must give
+#
+# VNC is a reverse (outgoing) connection on purpose: nothing listens for the
+# tailnet, so --shields-up stays on. (Without shields-up, userspace tailscaled
+# forwards every inbound tailnet connection to 127.0.0.1 on the same port, which
+# here would include the app's SOCKS5 server and tailscaled's own, so only the
+# tailnet ACL would stand in the way.) x11vnc reaches the viewer through
+# tailscaled's SOCKS5 port under graftcp, so only tailnet addresses, not the exit
+# node's internet; it listens on no port at all.
 set -euo pipefail
 
 B="$(cd "$(dirname "$0")" && pwd)"
@@ -57,6 +69,11 @@ EXIT_NODE="${TS_EXIT_NODE:-}"
   || fail "TS_EXIT_NODE must be tag:name, a MagicDNS name or a Tailscale IPv4"
 [[ "$RUN_SECONDS" =~ ^[0-9]+$ ]] || fail "RUN_SECONDS must be a number"
 [ "$(uname -m)" = x86_64 ] || fail "x86_64 only"
+VNC_VIEWER="${VNC_VIEWER:-}"
+if [ -n "$VNC_VIEWER" ]; then
+  [[ "$VNC_VIEWER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$ ]] || fail "VNC_VIEWER must be <tailnet device>[:port]"
+  [ -n "${WIPTER_VNC_PASSWORD:-}" ] || fail "VNC_VIEWER is set but WIPTER_VNC_PASSWORD is not"
+fi
 for t in curl jq timeout; do command -v "$t" >/dev/null || fail "$t is required"; done
 
 # Wipter: the relocated app must sit at /tmp/wipter-rt, and Xvfb finds xkbcomp in /tmp/wxb.
@@ -154,6 +171,31 @@ if [ -n "${WIPTER_MACHINE_ID:-}" ]; then
   chmod 0755 "$RUN_DIR/bin/hostname"
 fi
 unset WIPTER_MACHINE_ID
+
+# Optional VNC view: x11vnc connects out to the viewer every 30 s until one
+# session takes, and again after it ends. Its output (addresses) is dropped.
+if [ -n "$VNC_VIEWER" ]; then
+  vhost="${VNC_VIEWER%%:*}"; vport=5500
+  [ "$vhost" = "$VNC_VIEWER" ] || vport="${VNC_VIEWER##*:}"
+  vip="$(ts ip -4 "$vhost" 2>/dev/null | head -n 1 || true)"
+  [[ "$vip" =~ ^100\.[0-9.]+$ ]] || fail "VNC_VIEWER: no tailnet device by that name (or it is offline)"
+  echo "::add-mask::$vip"
+  ( umask 077; printf '%s\n' "$WIPTER_VNC_PASSWORD" > "$RUN_DIR/vncpass" )
+  unset WIPTER_VNC_PASSWORD
+  ok "VNC: connecting out to $vhost:$vport every 30 s (a viewer listening there gets the app's screen)"
+  ( while :; do
+      if [ -S /tmp/.X11-unix/X99 ]; then
+        env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" DISPLAY=:99 \
+          "$B/graftcp" --not-ignore-local --select_proxy_mode only_socks5 --socks5 "$SOCKS_TS" -- \
+          "$RT/bin/x11vnc" -display :99 -rfbport 0 -connect_or_exit "$vip:$vport" \
+            -passwdfile "$RUN_DIR/vncpass" -nolookup -quiet >/dev/null 2>&1 || true
+      fi
+      sleep 30
+    done ) &
+  PIDS+=("$!")
+else
+  unset WIPTER_VNC_PASSWORD
+fi
 # A clean environment: nothing from the job reaches the app but the login, which
 # stays in the environment (not on a command line, where ps would show it).
 start_app() {
@@ -163,7 +205,8 @@ start_app() {
   done
   export PATH="$d/bin:/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" \
     LANG=C.UTF-8 FONTCONFIG_FILE="$r/fonts.conf" XDG_DATA_DIRS="$r/share" GIO_MODULE_DIR="$r/gio-modules" \
-    WIPTER_APP="$r/app/wipter-app.bin" WIPTER_XVFB="$r/bin/Xvfb" WIPTER_XKB_DIR="$r/share/X11/xkb"
+    WIPTER_APP="$r/app/wipter-app.bin" WIPTER_XVFB="$r/bin/Xvfb" WIPTER_XKB_DIR="$r/share/X11/xkb" \
+    WIPTER_SCREEN=1024x800x16
   exec "${GRAFT[@]}" -- timeout -k 30 "$1" "$r/wipter-entry"
 }
 show() {

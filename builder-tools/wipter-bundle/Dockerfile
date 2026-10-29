@@ -10,10 +10,11 @@
 #                 syscalls (same build as proxyrack-bundle; keep in sync)
 #   wipter-guard  SOCKS5 filter in front of tailscaled (guard/main.go)
 #   tailscale(d)  userspace Tailscale, from the official image
+#   rt/bin/x11vnc optional VNC view of the app's screen (run.sh: VNC_VIEWER)
 #   run.sh        wires them together, see its header
 
 # The app, shim and launcher as published from builder-tools/wipter: bump with it.
-FROM sudtanj/wipter:v0.1.14 AS app
+FROM sudtanj/wipter:v0.1.15 AS app
 
 # Relocation, as NixOS does for Electron: every executable gets the bundle's own
 # dynamic loader at a fixed path, and every ELF file a forced DT_RPATH (searched
@@ -27,10 +28,11 @@ FROM sudtanj/wipter:v0.1.14 AS app
 # release, with xkbcomp, which it runs from a compiled-in dir: the string
 # "/usr/bin" in Xvfb becomes "/tmp/wxb" (same length), which run.sh links to
 # rt/bin. Its keyboard data goes in rt/share/X11/xkb (passed with -xkbdir).
+# x11vnc, for the optional VNC view, is relocated the same way.
 FROM debian:trixie-slim AS relocate
 RUN apt-get update \
  && apt-get install -y --no-install-recommends patchelf libglib2.0-bin gsettings-desktop-schemas \
-      xvfb x11-xkb-utils xkb-data \
+      xvfb x11-xkb-utils xkb-data x11vnc \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=app /opt/Wipter /out/app
 COPY --from=app /usr/lib/x86_64-linux-gnu /src/lib
@@ -45,9 +47,9 @@ RUN set -eu; R=/tmp/wipter-rt; mkdir -p /out/lib \
  && cp /usr/share/glib-2.0/schemas/*.xml /out/share/glib-2.0/schemas/ \
  && glib-compile-schemas /out/share/glib-2.0/schemas \
  && mkdir -p /out/bin /out/share/X11 \
- && cp /usr/bin/Xvfb /usr/bin/xkbcomp /out/bin/ \
+ && cp /usr/bin/Xvfb /usr/bin/xkbcomp /usr/bin/x11vnc /out/bin/ \
  && cp -a /usr/share/X11/xkb /out/share/X11/xkb \
- && for l in $(ldd /usr/bin/Xvfb /usr/bin/xkbcomp | awk '$2 == "=>" { print $3 }' | sort -u); do \
+ && for l in $(ldd /usr/bin/Xvfb /usr/bin/xkbcomp /usr/bin/x11vnc | awk '$2 == "=>" { print $3 }' | sort -u); do \
       [ -e "/out/lib/${l##*/}" ] || cp -L "$l" /out/lib/; done \
  && perl -0777 -pi -e '$n = s{/usr/bin\0}{/tmp/wxb\0}g; END { print STDERR "Xvfb: /usr/bin -> /tmp/wxb ($n)\n"; exit($n ? 0 : 1) }' /out/bin/Xvfb \
  && n=0; for f in $(find /out/app /out/lib /out/bin -type f); do \
@@ -93,7 +95,7 @@ COPY --from=relocate --chown=1001:1001 /out /home/runner/w/rt
 COPY --from=build /src/graftcp/local/graftcp /wipter-guard /usr/local/bin/
 USER 1001
 RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt && ln -s /tmp/wipter-rt/bin /tmp/wxb \
- && for e in app/wipter-app.bin bin/Xvfb bin/xkbcomp; do \
+ && for e in app/wipter-app.bin bin/Xvfb bin/xkbcomp bin/x11vnc; do \
       /tmp/wipter-rt/ld-linux-x86-64.so.2 --list /tmp/wipter-rt/$e; done > /tmp/libs \
  && ! grep -F 'not found' /tmp/libs \
  && ! grep '=>' /tmp/libs | grep -v '=> /tmp/wipter-rt/' \
@@ -113,6 +115,16 @@ RUN set -eu; rm -rf /tmp/h /tmp/.X99-lock /tmp/.X11-unix/X99 && mkdir /tmp/h \
         --enable-dns --dns-server 94.140.14.15:53 --enable-udp -- \
       timeout 300 /tmp/wipter-rt/wipter-entry -selftest \
  && kill $g
+# x11vnc serves the bundle's Xvfb and asks for the password (the RFB greeting).
+RUN set -eu; rm -f /tmp/.X98-lock /tmp/.X11-unix/X98; printf 'test\n' > /tmp/vp \
+ && { /tmp/wipter-rt/bin/Xvfb :98 -screen 0 1024x800x16 -nolisten tcp -extension GLX \
+        -xkbdir /tmp/wipter-rt/share/X11/xkb >/dev/null 2>&1 & } && x=$! \
+ && for i in $(seq 50); do [ -S /tmp/.X11-unix/X98 ] && break; sleep 0.2; done \
+ && { /tmp/wipter-rt/bin/x11vnc -display :98 -localhost -rfbport 5999 -passwdfile /tmp/vp \
+        -nolookup -quiet -once >/dev/null 2>&1 & } && v=$! \
+ && sleep 3 && banner="$(timeout 5 nc 127.0.0.1 5999 </dev/null | head -c 12 || true)" \
+ && echo "x11vnc greeting: $banner" && { kill $v $x 2>/dev/null || true; } \
+ && case "$banner" in "RFB 003.00"*) ;; *) exit 1 ;; esac
 
 FROM tailscale/tailscale:v1.104.1 AS tailscale
 
