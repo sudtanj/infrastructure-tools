@@ -8,6 +8,7 @@ updates:
       - /builder-tools/earnapp
       - /builder-tools/earnfm
       - /builder-tools/github-runner
+      - /builder-tools/grass-bundle
       - /builder-tools/honeygain
       - /builder-tools/kongming
       - /builder-tools/oci-freetier-creator

@@ -1,0 +1,5 @@
+# Platforms published to Docker Hub for this image (read by
+# .github/workflows/builder-tools-docker-publish.yml). amd64 only: the Instabox
+# runner it is made for is x86-64, Google ships Chrome for Linux on amd64 only,
+# and the relocation in the Dockerfile is x86-64 too.
+linux/amd64
