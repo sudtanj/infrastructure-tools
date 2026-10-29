@@ -204,6 +204,17 @@ jobs:
           # The team slug ("Linked to <team>/<project>") is account detail; mask it for every later step.
           team=$(grep -oE "Linked to [A-Za-z0-9._-]+/" /tmp/vercel.log | head -1 | sed -E 's#Linked to (.*)/#\1#') || true
           if [ -n "$team" ]; then echo "::add-mask::$team"; fi
+          # This workflow is the only deployer. A connected Git repository would deploy the repo root to
+          # production on every push, which has none of the folder's settings and answers 404 everywhere.
+          org=$(jq -r .orgId .vercel/project.json); project=$(jq -r .projectId .vercel/project.json)
+          link=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com/v9/projects/$project?teamId=$org" | jq -r '.link.type // empty') || link=''
+          if [ -n "$link" ]; then
+            if curl -fsS -o /dev/null -X DELETE -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com/v9/projects/$project/link?teamId=$org"; then
+              echo "Disconnected the project's Git repository."
+            else
+              echo "::warning::Could not disconnect the project's Git repository; pushes will keep replacing this deployment."
+            fi
+          fi
 
       # Secrets APP_KEY, CRON_SECRET (or CRON_KEY) and DATABASE_URL from the project's environment
       # (see SETUP) are the source of truth and replace

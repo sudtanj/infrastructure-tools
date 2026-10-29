@@ -62,6 +62,7 @@ jobs:
           else echo "<name>.vercel.app alias: another project"; fi
 
           d=$(api /v6/deployments "projectId=$id&target=production&limit=10")
+          # Should be no: vercel-private-deploy disconnects it, since Git deploys of the repo root answer 404.
           echo "git repository connected: $(jq -r 'if .link then "yes (\(.link.type // "unknown"))" else "no" end' <<<"$p")"
           echo "root directory set: $(jq -r 'if .rootDirectory then "yes" else "no" end' <<<"$p")"
           echo "recent production deployments (state, source, age):"
