@@ -360,13 +360,14 @@ while :; do
   while kill -0 "$CPID" 2>/dev/null; do
     sleep 60
     n=$((n + 1))
-    # Never let the app run without the exit node set.
-    if ! ts status --json 2>/dev/null | jq -e '.ExitNodeStatus != null' >/dev/null; then
+    # Never let the app run without the exit node set (unless it goes direct).
+    if [ "${WIPTER_DIRECT:-}" != 1 ] && ! ts status --json 2>/dev/null | jq -e '.ExitNodeStatus != null' >/dev/null; then
       kill "$CPID" 2>/dev/null || true
       fail "the exit node is no longer set; app stopped"
     fi
     if [ $((n % 60)) -eq 0 ]; then
-      if exit_node_ok; then s="online"; else s="OFFLINE (app traffic blocked)"; fi
+      if [ "${WIPTER_DIRECT:-}" = 1 ]; then s="not used"
+      elif exit_node_ok; then s="online"; else s="OFFLINE (app traffic blocked)"; fi
       printf '[*] %s app up, exit node %s, %s min left\n' "$(date -u +%H:%M)" "$s" $(( (DEADLINE - $(date +%s)) / 60 ))
     fi
   done
