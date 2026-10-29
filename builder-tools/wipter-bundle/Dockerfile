@@ -121,10 +121,10 @@ RUN set -eu; rm -f /tmp/.X98-lock /tmp/.X11-unix/X98; printf 'test\n' > /tmp/vp 
         -xkbdir /tmp/wipter-rt/share/X11/xkb >/dev/null 2>&1 & } && x=$! \
  && for i in $(seq 50); do [ -S /tmp/.X11-unix/X98 ] && break; sleep 0.2; done \
  && { /tmp/wipter-rt/bin/x11vnc -display :98 -localhost -rfbport 5999 -passwdfile /tmp/vp \
-        -nolookup -quiet -once >/dev/null 2>&1 & } && v=$! \
- && sleep 3 && banner="$(timeout 5 nc 127.0.0.1 5999 </dev/null | head -c 12 || true)" \
+        -nolookup -once >/tmp/vnc.log 2>&1 & } && v=$! \
+ && sleep 3 && banner="$( (sleep 2) | timeout 5 nc 127.0.0.1 5999 | head -c 12 || true)" \
  && echo "x11vnc greeting: $banner" && { kill $v $x 2>/dev/null || true; } \
- && case "$banner" in "RFB 003.00"*) ;; *) exit 1 ;; esac
+ && case "$banner" in "RFB 003.00"*) ;; *) tail -n 30 /tmp/vnc.log; exit 1 ;; esac
 
 FROM tailscale/tailscale:v1.104.1 AS tailscale
 
