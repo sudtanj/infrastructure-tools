@@ -43,6 +43,15 @@ if (debug || selftest) {
     const t0 = Date.now();
     setInterval(() => log(`heartbeat ${Math.round((Date.now()-t0)/1000)} s`), 10000).unref();
     app.on('ready', () => log('app ready'));
+    // Which server a failed request was for (host only; the path can carry tokens).
+    app.on('ready', () => {
+        const { session } = require('electron');
+        session.defaultSession.webRequest.onErrorOccurred(d => {
+            let host = '?';
+            try { host = new URL(d.url).host; } catch {}
+            log(`request failed: ${d.method} ${host} ${d.error}`);
+        });
+    });
 }
 
 if (selftest) {
