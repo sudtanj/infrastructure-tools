@@ -1,0 +1,70 @@
+name: "Vercel project status"
+
+# Read-only check of one Vercel project: its production deployment, who owns <name>.vercel.app,
+# and what the public domain answers. Changes nothing.
+#
+# Logs are public: only fixed labels with states, yes/no, ages and HTTP codes are printed,
+# never hosts, URLs, ids or account details.
+#
+# SETUP: the same VERCEL_TOKEN and optional VERCEL_SCOPE secrets as vercel-private-deploy.yaml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Vercel project name (the vercel/<name> folder)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      SCOPE: ${{ secrets.VERCEL_SCOPE }}
+      NAME: ${{ inputs.project }}
+    steps:
+      - name: Status
+        run: |
+          set -uo pipefail
+          if ! printf '%s' "$NAME" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,99}$'; then echo "::error::Not a valid project name."; exit 1; fi
+          api() { curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com$1?${SCOPE:+slug=$SCOPE&}${2:-}"; }
+          ago() { if [ -n "$1" ] && [ "$1" != null ]; then echo "$(( ($(date +%s) - $1 / 1000) / 3600 ))h ago"; else echo "-"; fi; }
+          code() { s=$(curl -s -o /dev/null -D /tmp/h -w '%{http_code}' "https://$1/"); e=$(grep -i '^x-vercel-error:' /tmp/h | tr -d '\r' | cut -d' ' -f2); echo "$s ${e:-}"; }
+
+          p=$(api "/v9/projects/$NAME")
+          id=$(jq -r '.id // empty' <<<"$p")
+          if [ -z "$id" ]; then echo "project found: no ($(jq -r '.error.code // "unknown"' <<<"$p"))"; exit 0; fi
+          echo "project found: yes"
+          echo "production deployment state: $(jq -r '.targets.production.readyState // "none"' <<<"$p")"
+          echo "production deployment created: $(ago "$(jq -r '.targets.production.createdAt // empty' <<<"$p")")"
+          echo "production aliases: $(jq -r '[.targets.production.alias[]?] | length' <<<"$p")"
+          if jq -e --arg h "$NAME.vercel.app" '[.targets.production.alias[]?] | index($h)' <<<"$p" > /dev/null; then
+            echo "<name>.vercel.app in production aliases: yes"
+          else
+            echo "<name>.vercel.app in production aliases: no"
+          fi
+
+          a=$(api "/v4/aliases/$NAME.vercel.app")
+          aproj=$(jq -r '.projectId // empty' <<<"$a")
+          if [ -z "$aproj" ]; then echo "<name>.vercel.app alias: not found ($(jq -r '.error.code // "unknown"' <<<"$a"))"
+          elif [ "$aproj" = "$id" ]; then
+            echo "<name>.vercel.app alias: this project"
+            if [ "$(jq -r '.deploymentId // empty' <<<"$a")" = "$(jq -r '.targets.production.id // empty' <<<"$p")" ]; then
+              echo "alias points at the production deployment: yes"
+            else
+              echo "alias points at the production deployment: no"
+            fi
+          else echo "<name>.vercel.app alias: another project"; fi
+
+          d=$(api /v6/deployments "projectId=$id&target=production&limit=10")
+          echo "recent production deployments (state, age):"
+          jq -r '.deployments[]? | "\(.state // .readyState) \(.created)"' <<<"$d" | while read -r s c; do echo "  $s $(ago "$c")"; done
+
+          echo "public domain answers: $(code "$NAME.vercel.app")"
+          dep=$(jq -r '.targets.production.url // empty' <<<"$p")
+          if [ -n "$dep" ]; then echo "::add-mask::$dep"; echo "deployment URL answers: $(code "$dep")"; fi
