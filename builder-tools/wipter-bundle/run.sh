@@ -37,15 +37,21 @@
 #   VNC_VIEWER           optional: <tailnet device>[:port] (default port 5500)
 #                        running a VNC viewer in listen mode; x11vnc connects
 #                        out to it with the app's screen. Needs:
+#   VNC_LISTEN=1         optional instead: x11vnc listens on port 5900 of this
+#                        node (tailnet name wipter-instabox) for a viewer to
+#                        connect in. Either one needs:
 #   WIPTER_VNC_PASSWORD  the password the viewer must give
 #
-# VNC is a reverse (outgoing) connection on purpose: nothing listens for the
-# tailnet, so --shields-up stays on. (Without shields-up, userspace tailscaled
-# forwards every inbound tailnet connection to 127.0.0.1 on the same port, which
-# here would include the app's SOCKS5 server and tailscaled's own, so only the
-# tailnet ACL would stand in the way.) x11vnc reaches the viewer through
-# tailscaled's SOCKS5 port under graftcp, so only tailnet addresses, not the exit
-# node's internet; it listens on no port at all.
+# The node is always named wipter-instabox, so its MagicDNS name stays the same
+# from run to run (its IP doesn't: each run is a new ephemeral node).
+#
+# VNC_VIEWER is a reverse (outgoing) connection: nothing listens for the tailnet,
+# so --shields-up stays on. x11vnc reaches the viewer through tailscaled's SOCKS5
+# port under graftcp, so only tailnet addresses, not the exit node's internet.
+# VNC_LISTEN drops --shields-up, and userspace tailscaled then forwards every
+# inbound tailnet connection to 127.0.0.1 on the same port, which includes the
+# app's SOCKS5 server and tailscaled's own: only the tailnet ACL stands in the
+# way, so it should let peers reach this node's tag on port 5900 alone.
 set -euo pipefail
 
 B="$(cd "$(dirname "$0")" && pwd)"
@@ -74,6 +80,8 @@ if [ -n "$VNC_VIEWER" ]; then
   [[ "$VNC_VIEWER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$ ]] || fail "VNC_VIEWER must be <tailnet device>[:port]"
   [ -n "${WIPTER_VNC_PASSWORD:-}" ] || fail "VNC_VIEWER is set but WIPTER_VNC_PASSWORD is not"
 fi
+VNC_LISTEN="${VNC_LISTEN:-}"
+[ "$VNC_LISTEN" != 1 ] || [ -n "${WIPTER_VNC_PASSWORD:-}" ] || fail "VNC_LISTEN is set but WIPTER_VNC_PASSWORD is not"
 for t in curl jq timeout; do command -v "$t" >/dev/null || fail "$t is required"; done
 
 # Wipter: the relocated app must sit at /tmp/wipter-rt, and Xvfb finds xkbcomp in /tmp/wxb.
@@ -114,17 +122,19 @@ step "starting tailscaled (userspace)"
 PIDS+=("$!")
 tag_args=()
 [ -z "${TS_TAGS:-}" ] || tag_args=(--advertise-tags="$TS_TAGS")
+shields=--shields-up
+[ "$VNC_LISTEN" != 1 ] || shields=--shields-up=false
 joined=0
 for attempt in 1 2 3; do
-  if ts up --authkey="$TS_AUTHKEY" "${tag_args[@]}" --hostname="wipter-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')" \
-       --accept-dns=false --accept-routes=false --shields-up --timeout=90s >/dev/null 2>&1; then
+  if ts up --authkey="$TS_AUTHKEY" "${tag_args[@]}" --hostname=wipter-instabox \
+       --accept-dns=false --accept-routes=false "$shields" --timeout=90s >/dev/null 2>&1; then
     joined=1; break
   fi
   sleep 5
 done
 unset TS_AUTHKEY
 [ "$joined" = 1 ] || fail "could not join the tailnet (key rejected or expired?)"
-ok "joined the tailnet"
+ok "joined the tailnet as $(ts status --json 2>/dev/null | jq -r '.Self.HostName // "?"')"
 
 # 2. Exit node. tag:name resolves to an online peer with that tag that offers one.
 TARGET="$EXIT_NODE"
@@ -208,6 +218,26 @@ if [ -n "$VNC_VIEWER" ]; then
           if [ "$n" -le 3 ] || [ $((n % 20)) -eq 0 ]; then
             warn "VNC: could not reach the viewer (try $n): $(grep -iE 'refused|timed out|unreach|fail|error' "$RUN_DIR/x11vnc.log" | tail -n 1 | sed -E 's/[0-9]+(\.[0-9]+){3}/<ip>/g' | cut -c1-160)"
           fi
+        fi
+      fi
+      sleep 30
+    done ) &
+  PIDS+=("$!")
+elif [ "$VNC_LISTEN" = 1 ]; then
+  ( umask 077; printf '%s\n' "$WIPTER_VNC_PASSWORD" > "$RUN_DIR/vncpass" )
+  unset WIPTER_VNC_PASSWORD
+  ok "VNC: listening on port 5900; connect a viewer to $(ts status --json 2>/dev/null | jq -r '.Self.HostName // "this node"'):5900 over the tailnet"
+  # tailscaled hands inbound tailnet connections to 127.0.0.1, so x11vnc
+  # listens there only. Restarted if it exits; failures reported as above.
+  ( n=0
+    while :; do
+      if [ -S /tmp/.X11-unix/X99 ]; then
+        env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" DISPLAY=:99 \
+          "$RT/bin/x11vnc" -display :99 -localhost -rfbport 5900 -forever -shared \
+            -passwdfile "$RUN_DIR/vncpass" -nolookup -quiet > "$RUN_DIR/x11vnc.log" 2>&1 || true
+        n=$((n + 1))
+        if [ "$n" -le 3 ] || [ $((n % 20)) -eq 0 ]; then
+          warn "VNC: x11vnc stopped (try $n): $(grep -iE 'in use|fail|error|refused' "$RUN_DIR/x11vnc.log" | tail -n 1 | sed -E 's/[0-9]+(\.[0-9]+){3}/<ip>/g' | cut -c1-160)"
         fi
       fi
       sleep 30

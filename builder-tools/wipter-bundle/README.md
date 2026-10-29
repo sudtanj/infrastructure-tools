@@ -64,7 +64,17 @@ RealVNC/Remmina in listening mode), every 30 s until one takes the session,
 and again after it ends. The viewer asks for the password. The screen is
 1024x800, enough for the whole window, with no window manager.
 
-It is a reverse connection on purpose: nothing listens for the tailnet, so
+Or, with `VNC_LISTEN=1` and the same password, x11vnc **listens** on port
+5900 and a viewer connects in to `wipter-instabox:5900`. The node always
+joins the tailnet as `wipter-instabox`, so that name (MagicDNS) stays the
+same from run to run, though the IP changes: each run is a new ephemeral node.
+For this mode `--shields-up` is off, and userspace tailscaled then forwards
+*every* inbound tailnet connection to `127.0.0.1` on the same port, the
+app's and tailscaled's SOCKS5 servers included. Only the tailnet ACL stands
+in the way, so it should let your devices reach the runner's tag on port
+5900 alone, e.g. `{"action":"accept","src":["you@example.com"],"dst":["tag:runner:5900"]}`.
+
+The reverse connection needs no open port: nothing listens for the tailnet, so
 `--shields-up` stays on. Userspace tailscaled forwards every inbound tailnet
 connection to `127.0.0.1` on the same port, which here would include the
 app's SOCKS5 server and tailscaled's own, leaving only the tailnet ACL in
