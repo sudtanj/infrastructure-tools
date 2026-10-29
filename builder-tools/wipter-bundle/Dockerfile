@@ -21,9 +21,12 @@ FROM sudtanj/wipter:v0.1.13 AS app
 # the bundle. Nothing uses LD_LIBRARY_PATH, so programs the app starts (sh,
 # cat, ...) keep the host's own libraries. glibc's loader and libc are not
 # patched. The GPU libraries Chromium dlopens stay next to the app ($ORIGIN).
+# GTK's settings schemas (it looks one up even without a display) go in
+# rt/share, the bundle's only XDG data dir; GIO loads no modules (an empty
+# dir), so none of the host's are mixed in.
 FROM debian:trixie-slim AS relocate
 RUN apt-get update \
- && apt-get install -y --no-install-recommends patchelf \
+ && apt-get install -y --no-install-recommends patchelf libglib2.0-bin gsettings-desktop-schemas \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=app /opt/Wipter /out/app
 COPY --from=app /usr/lib/x86_64-linux-gnu /src/lib
@@ -34,6 +37,9 @@ RUN set -eu; R=/tmp/wipter-rt; mkdir -p /out/lib \
  # (gio, gdk-pixbuf, perl, ...) aren't used.
  && find /src/lib -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} /out/lib/ \; \
  && cp -L /src/lib/ld-linux-x86-64.so.2 /out/ld-linux-x86-64.so.2 \
+ && mkdir -p /out/share/glib-2.0/schemas /out/gio-modules \
+ && cp /usr/share/glib-2.0/schemas/*.xml /out/share/glib-2.0/schemas/ \
+ && glib-compile-schemas /out/share/glib-2.0/schemas \
  && n=0; for f in $(find /out/app /out/lib -type f); do \
       case "${f##*/}" in ld-linux-x86-64.so.2|libc.so.6) continue ;; esac; \
       patchelf --print-rpath "$f" >/dev/null 2>&1 || continue; \
@@ -64,6 +70,7 @@ RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt \
  && echo "$(grep -c '=>' /tmp/libs) libraries, all in the bundle" \
  && mkdir /tmp/h \
  && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
+      XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
       WIPTER_HEADLESS=1 WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
 
 FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build

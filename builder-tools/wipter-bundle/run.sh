@@ -158,7 +158,8 @@ start_app() {
     case "$v" in WIPTER_EMAIL|WIPTER_PASSWORD) ;; *) unset "$v" 2>/dev/null || true ;; esac
   done
   export PATH="$d/bin:/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" \
-    LANG=C.UTF-8 FONTCONFIG_FILE="$r/fonts.conf" WIPTER_APP="$r/app/wipter-app.bin" WIPTER_HEADLESS=1
+    LANG=C.UTF-8 FONTCONFIG_FILE="$r/fonts.conf" XDG_DATA_DIRS="$r/share" GIO_MODULE_DIR="$r/gio-modules" \
+    WIPTER_APP="$r/app/wipter-app.bin" WIPTER_HEADLESS=1
   exec "${GRAFT[@]}" -- timeout -k 30 "$1" "$r/wipter-entry"
 }
 show() {
