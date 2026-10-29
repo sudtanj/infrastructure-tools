@@ -14,7 +14,7 @@
 #   run.sh        wires them together, see its header
 
 # The app, shim and launcher as published from builder-tools/wipter: bump with it.
-FROM sudtanj/wipter:v0.1.15 AS app
+FROM sudtanj/wipter:v0.1.16 AS app
 
 # Relocation, as NixOS does for Electron: every executable gets the bundle's own
 # dynamic loader at a fixed path, and every ELF file a forced DT_RPATH (searched

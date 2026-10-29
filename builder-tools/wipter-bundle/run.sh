@@ -177,18 +177,38 @@ unset WIPTER_MACHINE_ID
 if [ -n "$VNC_VIEWER" ]; then
   vhost="${VNC_VIEWER%%:*}"; vport=5500
   [ "$vhost" = "$VNC_VIEWER" ] || vport="${VNC_VIEWER##*:}"
-  vip="$(ts ip -4 "$vhost" 2>/dev/null | head -n 1 || true)"
-  [[ "$vip" =~ ^100\.[0-9.]+$ ]] || fail "VNC_VIEWER: no tailnet device by that name (or it is offline)"
+  # A tailnet IP is used as is; a name is looked up among the peers this node can see.
+  if [[ "$vhost" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then vip="$vhost"
+  else vip="$(ts ip -4 "$vhost" 2>/dev/null | head -n 1 || true)"; fi
+  if ! [[ "$vip" =~ ^100\.[0-9.]+$ ]]; then
+    warn "VNC: no tailnet device '$vhost' visible from here (offline, or the ACL doesn't let this node's tag reach it); no VNC this run"
+    VNC_VIEWER=""
+  fi
+fi
+if [ -n "$VNC_VIEWER" ]; then
   echo "::add-mask::$vip"
+  ts status --json 2>/dev/null | jq -e --arg ip "$vip" '[.Peer[]? | .TailscaleIPs[]?] | index($ip)' >/dev/null \
+    || warn "VNC: the viewer's device isn't among the peers this node can see: the ACL probably doesn't let this node's tag reach it"
   ( umask 077; printf '%s\n' "$WIPTER_VNC_PASSWORD" > "$RUN_DIR/vncpass" )
   unset WIPTER_VNC_PASSWORD
   ok "VNC: connecting out to $vhost:$vport every 30 s (a viewer listening there gets the app's screen)"
-  ( while :; do
+  # Reports the first failures, then every 20th, and each session (addresses masked).
+  ( n=0
+    while :; do
       if [ -S /tmp/.X11-unix/X99 ]; then
-        env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" DISPLAY=:99 \
+        t0=$(date +%s)
+        if env -i PATH=/usr/bin:/bin HOME="$RUN_DIR" DISPLAY=:99 \
           "$B/graftcp" --not-ignore-local --select_proxy_mode only_socks5 --socks5 "$SOCKS_TS" -- \
           "$RT/bin/x11vnc" -display :99 -rfbport 0 -connect_or_exit "$vip:$vport" \
-            -passwdfile "$RUN_DIR/vncpass" -nolookup -quiet >/dev/null 2>&1 || true
+            -passwdfile "$RUN_DIR/vncpass" -nolookup -quiet > "$RUN_DIR/x11vnc.log" 2>&1 \
+          && [ $(( $(date +%s) - t0 )) -gt 20 ]; then
+          ok "VNC: a session ended ($(( ($(date +%s) - t0) / 60 )) min)"; n=0
+        else
+          n=$((n + 1))
+          if [ "$n" -le 3 ] || [ $((n % 20)) -eq 0 ]; then
+            warn "VNC: could not reach the viewer (try $n): $(grep -iE 'refused|timed out|unreach|fail|error' "$RUN_DIR/x11vnc.log" | tail -n 1 | sed -E 's/[0-9]+(\.[0-9]+){3}/<ip>/g' | cut -c1-160)"
+          fi
+        fi
       fi
       sleep 30
     done ) &
