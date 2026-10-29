@@ -13,7 +13,8 @@
 //
 // For builder-tools/wipter-bundle (the app and Xvfb outside this image):
 // WIPTER_APP and WIPTER_XVFB are their paths, WIPTER_XKB_DIR Xvfb's keyboard
-// data. (Chromium's headless display backend instead of Xvfb hangs Electron
+// data, WIPTER_SCREEN the virtual screen (default 800x600x16; the bundle makes
+// it big enough to watch the whole window over VNC). (Chromium's headless display backend instead of Xvfb hangs Electron
 // before its window opens, even with the GPU in-process.)
 package main
 
@@ -67,7 +68,11 @@ func startX(debug bool) *exec.Cmd {
 	if xvfb == "" {
 		xvfb = "/usr/bin/Xvfb"
 	}
-	args := []string{display, "-screen", "0", "800x600x16",
+	screen := os.Getenv("WIPTER_SCREEN")
+	if screen == "" {
+		screen = "800x600x16"
+	}
+	args := []string{display, "-screen", "0", screen,
 		"-nolisten", "tcp", "-noreset", "-nocursor", "-extension", "GLX"}
 	if dir := os.Getenv("WIPTER_XKB_DIR"); dir != "" {
 		args = append(args, "-xkbdir", dir)
