@@ -64,6 +64,9 @@ const probeJS = `(() => {
     consent: !!q('consent-agree-button'),
     status: s ? s.textContent.trim() : '',
     toggle: !!q('switch-status-button'),
+    // What a screen this shim doesn't know says (headings and buttons), for the log.
+    text: [...document.querySelectorAll('h1,h2,h3,button,[role=dialog] p')]
+      .map(e => e.textContent.trim()).filter(Boolean).join(' | ').slice(0, 300),
   };
 })()`;
 
@@ -177,6 +180,7 @@ async function signIn(win) {
 
 async function supervise(win) {
     let signedIn = false, lastStatus = '', offlineSince = 0, lastToggle = 0, failures = 0;
+    let unknownSince = 0, unknownLogged = 0;
     setTimeout(() => log(`memory after 5 minutes: ${memory()}`), 5*60*1000).unref();
     for (;;) {
         const s = await probe(win).catch(() => ({}));
@@ -184,6 +188,16 @@ async function supervise(win) {
             await sleep(3000);
             continue;
         }
+        // A screen with none of the elements below: report it after 2 minutes, then
+        // every 30 (emails masked), instead of waiting silently.
+        if (!s.consent && !s.signin && !s.status) {
+            unknownSince = unknownSince || Date.now();
+            if (Date.now()-unknownSince > 2*60*1000 && Date.now()-unknownLogged > 30*60*1000) {
+                log(`waiting on a screen this shim doesn't handle: ${(s.text || '(no text)').replace(/[^\s|@]+@[^\s|]+/g, '<email>')}`);
+                unknownLogged = Date.now();
+            }
+        } else
+            unknownSince = 0;
         if (s.consent) {
             // The app shares nothing until its data-sharing consent is
             // accepted; running this image is that choice.
