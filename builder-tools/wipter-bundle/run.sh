@@ -313,7 +313,10 @@ start_app() {
   exec "${GRAFT[@]}" -- timeout -k 30 "$1" "$r/wipter-entry"
 }
 show() {
-  awk '{ gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<ip>"); gsub(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+/, "<email>"); gsub(/eyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*/, "<token>"); print "    " $0; fflush() }' | tee -a "$RUN_DIR/app.log"
+  # sed -u, not awk: the runner's mawk buffers its input, so the app's few status
+  # lines sat unseen until 4 KB had built up.
+  sed -u -E 's/[0-9]+(\.[0-9]+){3}/<ip>/g; s/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+/<email>/g;
+    s/eyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*/<token>/g; s/^/    /' | tee -a "$RUN_DIR/app.log"
 }
 quick_exits=0
 while :; do
