@@ -99,7 +99,9 @@ app.on('browser-window-created', (_e, win) => {
     wc.on('unresponsive', () => log('the page is not responding'));
     if (debug)
         wc.on('console-message', (e, _level, message) => log(`page console: ${e.message || message}`));
-    wc.once('did-finish-load', () => {
+    // Every load, not just the first: the app may show another page (a splash,
+    // an update screen) before index.html, and the shim must still start then.
+    wc.on('did-finish-load', () => {
         if (debug || selftest)
             log(`page loaded: ${path.basename(wc.getURL().split('#')[0])}`);
         if (watching || !win.webContents.getURL().includes('index.html'))

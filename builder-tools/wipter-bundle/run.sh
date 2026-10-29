@@ -33,6 +33,8 @@
 #   TS_TAGS              tags to advertise (needed with an OAuth-minted key)
 #   TS_EXIT_NODE         tag:name, a MagicDNS name or a Tailscale IPv4 (required)
 #   RUN_SECONDS          how long to run (default 3600)
+#   WIPTER_DEBUG=1       show the app's own output and the guard's refused
+#                        connections (port and kind only; IPs and emails masked)
 #   RUN_DIR              scratch dir: sockets, logs, the app's profile (default: a mktemp dir)
 #   VNC_VIEWER           optional: <tailnet device>[:port] (default port 5500)
 #                        running a VNC viewer in listen mode; x11vnc connects
@@ -197,11 +199,17 @@ exit_node_ok || fail "the exit node is not online"
 ok "exit node in use"
 
 # 3. The guard, then a test through the app's exact path.
-"$B/wipter-guard" -listen "$SOCKS_GUARD" -upstream "$SOCKS_TS" -dns "$DNS_SERVER" \
+gv=()
+[ "${WIPTER_DEBUG:-}" != 1 ] || gv=(-v)
+"$B/wipter-guard" "${gv[@]}" -listen "$SOCKS_GUARD" -upstream "$SOCKS_TS" -dns "$DNS_SERVER" \
   -local "127.0.0.1:$APP_SOCKS_PORT" > "$RUN_DIR/guard.log" 2>&1 &
 PIDS+=("$!")
 sleep 1
 kill -0 "${PIDS[-1]}" 2>/dev/null || fail "wipter-guard did not start"
+if [ "${WIPTER_DEBUG:-}" = 1 ]; then
+  tail -n +1 -F "$RUN_DIR/guard.log" 2>/dev/null | sed -u 's/^/    guard: /' &
+  PIDS+=("$!")
+fi
 
 GRAFT=("$B/graftcp" --not-ignore-local --select_proxy_mode only_socks5 --socks5 "$SOCKS_GUARD"
        --enable-dns --dns-server "$DNS_SERVER" --enable-udp)
@@ -296,7 +304,7 @@ fi
 start_app() {
   local v d="$RUN_DIR" r="$RT"   # RUN_DIR may be exported: keep it before the unset
   for v in $(compgen -e); do
-    case "$v" in WIPTER_EMAIL|WIPTER_PASSWORD) ;; *) unset "$v" 2>/dev/null || true ;; esac
+    case "$v" in WIPTER_EMAIL|WIPTER_PASSWORD|WIPTER_DEBUG) ;; *) unset "$v" 2>/dev/null || true ;; esac
   done
   export PATH="$d/bin:/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" \
     LANG=C.UTF-8 FONTCONFIG_FILE="$r/fonts.conf" XDG_DATA_DIRS="$r/share" GIO_MODULE_DIR="$r/gio-modules" \
@@ -305,7 +313,7 @@ start_app() {
   exec "${GRAFT[@]}" -- timeout -k 30 "$1" "$r/wipter-entry"
 }
 show() {
-  awk '{ gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<ip>"); print "    " $0; fflush() }' | tee -a "$RUN_DIR/app.log"
+  awk '{ gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<ip>"); gsub(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+/, "<email>"); gsub(/eyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*/, "<token>"); print "    " $0; fflush() }' | tee -a "$RUN_DIR/app.log"
 }
 quick_exits=0
 while :; do

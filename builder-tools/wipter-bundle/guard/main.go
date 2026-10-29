@@ -7,7 +7,8 @@
 // ranges, the tailnet, loopback, IPv6 and mail/DoT ports are refused, and port
 // 53 always goes to the configured DNS server. UDP ASSOCIATE is refused, so
 // with graftcp's only_socks5 mode the client's UDP is dropped, never sent
-// directly. Nothing is logged per connection.
+// directly. Nothing is logged per connection, unless -v: then each refused or
+// failed connection is (its port and kind, never the address).
 package main
 
 import (
@@ -27,6 +28,7 @@ var (
 	upstream = flag.String("upstream", "127.0.0.1:1055", "tailscaled SOCKS5 server")
 	dns      = flag.String("dns", "94.140.14.15:53", "where every port-53 connection goes")
 	local    = flag.String("local", "", "comma-separated loopback ip:port dialed directly, nothing else local")
+	verbose  = flag.Bool("v", false, "log refused and failed connections (port and kind only)")
 )
 
 var localAddrs = map[netip.AddrPort]bool{}
@@ -62,6 +64,30 @@ func allowed(ip netip.Addr, port uint16) bool {
 		}
 	}
 	return true
+}
+
+func note(format string, a ...any) {
+	if *verbose {
+		log.Printf(format, a...)
+	}
+}
+
+// kind names an address's range without giving the address.
+func kind(ip netip.Addr) string {
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case !ip.Is4():
+		return "IPv6"
+	case ip.IsPrivate() || !ip.IsGlobalUnicast():
+		return "private/reserved"
+	}
+	for _, p := range blocked {
+		if p.Contains(ip) {
+			return "blocked range"
+		}
+	}
+	return "public"
 }
 
 func main() {
@@ -103,6 +129,7 @@ func serve(c net.Conn, dnsAddr netip.AddrPort) {
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	dst, code := handshake(c)
 	if code != repOK {
+		note("refused at the handshake (SOCKS reply %d)", code)
 		reply(c, code)
 		return
 	}
@@ -110,6 +137,7 @@ func serve(c net.Conn, dnsAddr netip.AddrPort) {
 	if localAddrs[dst] {
 		u, err := net.DialTimeout("tcp", dst.String(), 10*time.Second)
 		if err != nil {
+			note("local port %d: nothing answers", dst.Port())
 			reply(c, 5) // connection refused
 			return
 		}
@@ -118,12 +146,14 @@ func serve(c net.Conn, dnsAddr netip.AddrPort) {
 		if dst.Port() == 53 {
 			dst = dnsAddr
 		} else if !allowed(dst.Addr(), dst.Port()) {
+			note("refused: %s port %d", kind(dst.Addr()), dst.Port())
 			reply(c, repNotAllowed)
 			return
 		}
 		up, code = dialUpstream(dst)
 	}
 	if code != repOK {
+		note("upstream failed (SOCKS reply %d): %s port %d", code, kind(dst.Addr()), dst.Port())
 		reply(c, code)
 		return
 	}
