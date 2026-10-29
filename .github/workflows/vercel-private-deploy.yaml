@@ -41,11 +41,14 @@ name: "Deploy Vercel Projects (private repo)"
 #                                same name, saved to Vercel as DATABASE_URL.
 #   secret NEON_ORG_ID           optional; needed when the key belongs to an org
 #
-#   secret <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or <PREFIX>_CRON_KEY),
-#          <PREFIX>_DATABASE_URL  optional, per project (PREFIX = folder name upper-cased);
-#                                copied to Vercel on every deploy, e.g. PAYMENTER_APP_KEY.
-#                                A one-line vercel/<name>/.secrets-prefix file overrides PREFIX.
-#   secret <PREFIX>_USER, <PREFIX>_PASSWORD  optional; admin email and password
+#   Per-project secrets live in a GitHub Environment named PREFIX (folder name upper-cased,
+#   '-' and '.' as '_'; a one-line vercel/<name>/.secrets-prefix file overrides it), e.g.
+#   environment PAYMENTER. Each deploy job runs in its project's environment (GitHub creates
+#   it on first use). Fixed secret names keep every other repository secret off the runner,
+#   which a computed secrets[...] name would not.
+#   env secret APP_KEY, CRON_SECRET (or CRON_KEY), DATABASE_URL
+#                                optional; copied to Vercel on every deploy.
+#   env secret USER, PASSWORD    optional; admin email and password
 #                                passed to `deno task migrate`, which creates that
 #                                user once if missing (never overwrites it).
 #
@@ -144,6 +147,8 @@ jobs:
     if: ${{ needs.poll.outputs.projects != '' && needs.poll.outputs.projects != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The project's own secrets (see SETUP).
+    environment: ${{ matrix.project.prefix }}
     strategy:
       fail-fast: false
       matrix:
@@ -200,8 +205,8 @@ jobs:
           team=$(grep -oE "Linked to [A-Za-z0-9._-]+/" /tmp/vercel.log | head -1 | sed -E 's#Linked to (.*)/#\1#') || true
           if [ -n "$team" ]; then echo "::add-mask::$team"; fi
 
-      # GitHub secrets <PREFIX>_APP_KEY, <PREFIX>_CRON_SECRET (or _CRON_KEY) and <PREFIX>_DATABASE_URL
-      # (PREFIX = folder name upper-cased, '-' and '.' as '_', or .secrets-prefix) are the source of truth and replace
+      # Secrets APP_KEY, CRON_SECRET (or CRON_KEY) and DATABASE_URL from the project's environment
+      # (see SETUP) are the source of truth and replace
       # the Vercel value on every deploy. Anything still missing is then filled in, never replaced:
       # a new APP_KEY would make stored secrets unreadable.
       - name: Provision env (project secrets, Neon database, APP_KEY, CRON_SECRET)
@@ -209,11 +214,11 @@ jobs:
         env:
           NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
           NEON_ORG_ID: ${{ secrets.NEON_ORG_ID }}
-          # Named lookups only: passing every secret (toJSON(secrets)) gets the workflow flagged as malicious.
-          P_APP_KEY: ${{ secrets[format('{0}_APP_KEY', matrix.project.prefix)] }}
+          # Fixed names only: toJSON(secrets) or a computed secrets[...] name sends every secret to the runner.
+          P_APP_KEY: ${{ secrets.APP_KEY }}
           # Vercel's cron sends only an env var named CRON_SECRET as its bearer token.
-          P_CRON_SECRET: ${{ secrets[format('{0}_CRON_SECRET', matrix.project.prefix)] || secrets[format('{0}_CRON_KEY', matrix.project.prefix)] }}
-          P_DATABASE_URL: ${{ secrets[format('{0}_DATABASE_URL', matrix.project.prefix)] }}
+          P_CRON_SECRET: ${{ secrets.CRON_SECRET || secrets.CRON_KEY }}
+          P_DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           set -euo pipefail
           vc() { npx --yes vercel@latest "$@" --token "$VERCEL_TOKEN" ${SCOPE:+--scope "$SCOPE"}; }
@@ -277,8 +282,8 @@ jobs:
         working-directory: private/vercel/${{ matrix.project.name }}
         env:
           # Read by the project's migrate (when it supports them): the admin to create if missing. Not stored in Vercel.
-          ADMIN_EMAIL: ${{ secrets[format('{0}_USER', matrix.project.prefix)] }}
-          ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
+          ADMIN_EMAIL: ${{ secrets.USER }}
+          ADMIN_PASSWORD: ${{ secrets.PASSWORD }}
         run: |
           set -euo pipefail
           if ! grep -q '"migrate"' deno.json 2>/dev/null; then exit 0; fi
@@ -325,8 +330,8 @@ jobs:
       - name: Smoke test
         working-directory: private/vercel/${{ matrix.project.name }}
         env:
-          ADMIN_EMAIL: ${{ secrets[format('{0}_USER', matrix.project.prefix)] }}
-          ADMIN_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.project.prefix)] }}
+          ADMIN_EMAIL: ${{ secrets.USER }}
+          ADMIN_PASSWORD: ${{ secrets.PASSWORD }}
         run: |
           set -euo pipefail
           if [ ! -x smoke.sh ]; then exit 0; fi
