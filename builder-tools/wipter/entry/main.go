@@ -11,9 +11,10 @@
 // `wipter-entry -selftest` only checks that the app starts and shows its
 // sign-in form, with a throwaway profile; the image build runs it.
 //
-// For builder-tools/wipter-bundle (the app outside this image): WIPTER_APP is
-// the app's path, and WIPTER_HEADLESS=1 uses Chromium's headless display
-// backend instead of Xvfb.
+// For builder-tools/wipter-bundle (the app and Xvfb outside this image):
+// WIPTER_APP and WIPTER_XVFB are their paths, WIPTER_XKB_DIR Xvfb's keyboard
+// data. (Chromium's headless display backend instead of Xvfb hangs Electron
+// before its window opens, even with the GPU in-process.)
 package main
 
 import (
@@ -62,8 +63,20 @@ const display = ":99"
 // startX starts Xvfb on display :99, local socket only, without GLX (the
 // app draws in software; the build drops Mesa), and waits for it.
 func startX(debug bool) *exec.Cmd {
-	x := exec.Command("/usr/bin/Xvfb", display, "-screen", "0", "800x600x16",
-		"-nolisten", "tcp", "-noreset", "-nocursor", "-extension", "GLX")
+	xvfb := os.Getenv("WIPTER_XVFB")
+	if xvfb == "" {
+		xvfb = "/usr/bin/Xvfb"
+	}
+	args := []string{display, "-screen", "0", "800x600x16",
+		"-nolisten", "tcp", "-noreset", "-nocursor", "-extension", "GLX"}
+	if dir := os.Getenv("WIPTER_XKB_DIR"); dir != "" {
+		args = append(args, "-xkbdir", dir)
+	}
+	// Xvfb only creates its socket dir as root.
+	if os.Mkdir("/tmp/.X11-unix", 0o755) == nil {
+		os.Chmod("/tmp/.X11-unix", 0o777|os.ModeSticky)
+	}
+	x := exec.Command(xvfb, args...)
 	if debug {
 		x.Stdout, x.Stderr = os.Stdout, os.Stderr
 	}
@@ -109,17 +122,10 @@ func main() {
 	if app == "" {
 		app = defaultApp
 	}
-	headless := os.Getenv("WIPTER_HEADLESS") == "1"
-	var x *exec.Cmd
-	if !headless {
-		x = startX(debug)
-		defer x.Process.Kill()
-		os.Setenv("DISPLAY", display)
-	}
+	x := startX(debug)
+	defer x.Process.Kill()
+	os.Setenv("DISPLAY", display)
 	args := append(appArgs[:len(appArgs):len(appArgs)], strings.Fields(os.Getenv("WIPTER_CHROMIUM_FLAGS"))...)
-	if headless {
-		args = append(args, "--ozone-platform=headless") // the last one counts
-	}
 	if debug {
 		args = append(args, "--enable-logging=stderr", "--log-level=0")
 	}
@@ -152,9 +158,7 @@ func main() {
 	case <-copied:
 	case <-time.After(2 * time.Second):
 	}
-	if x != nil {
-		x.Process.Kill()
-	}
+	x.Process.Kill()
 	code := cmd.ProcessState.ExitCode()
 	if code != 0 {
 		fmt.Printf("wipter-entry: the app exited (%v)\n", err)
