@@ -64,26 +64,6 @@ RUN set -eu; R=/tmp/wipter-rt; mkdir -p /out/lib \
       '<fontconfig>' "  <dir>$R/fonts</dir>" '  <cachedir prefix="xdg">fontconfig</cachedir>' '</fontconfig>' \
       > /out/fonts.conf
 
-# Stands in for the runner: Alpine has no glibc, so a library that resolved
-# outside the bundle would fail here. Same layout as run.sh (files in a work
-# dir, linked from /tmp/wipter-rt), as a non-root user: every library
-# resolves inside the bundle, then the app starts on the bundle's Xvfb and
-# shows its sign-in form, and reports its memory.
-FROM alpine:3.22 AS check
-RUN adduser -D -u 1001 runner
-COPY --from=relocate --chown=1001:1001 /out /home/runner/w/rt
-USER 1001
-RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt && ln -s /tmp/wipter-rt/bin /tmp/wxb \
- && for e in app/wipter-app.bin bin/Xvfb bin/xkbcomp; do \
-      /tmp/wipter-rt/ld-linux-x86-64.so.2 --list /tmp/wipter-rt/$e; done > /tmp/libs \
- && ! grep -F 'not found' /tmp/libs \
- && ! grep '=>' /tmp/libs | grep -v '=> /tmp/wipter-rt/' \
- && echo "$(grep -c '=>' /tmp/libs) libraries, all in the bundle" \
- && mkdir /tmp/h \
- && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
-      XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
-      WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
-
 FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 # graftcp: the same pin and patch as proxyrack-bundle/Dockerfile (see there); bump both together.
 ARG GRAFTCP_REF=v0.8.3
@@ -98,6 +78,39 @@ RUN make -C /src/graftcp local/graftcp \
  && ! ldd /src/graftcp/local/graftcp 2>/dev/null | grep -q '=>'
 COPY guard/ /src/guard/
 RUN cd /src/guard && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /wipter-guard .
+
+# Stands in for the runner: Alpine has no glibc, so a library that resolved
+# outside the bundle would fail here. Same layout as run.sh (files in a work
+# dir, linked from /tmp/wipter-rt), as a non-root user: every library
+# resolves inside the bundle, then the app starts on the bundle's Xvfb and
+# shows its sign-in form, and reports its memory. Then the same under graftcp
+# and the guard, as run.sh starts it (no upstream here, so every connection
+# fails, which the self-test doesn't need): Chromium and all its helpers run
+# traced.
+FROM alpine:3.22 AS check
+RUN adduser -D -u 1001 runner
+COPY --from=relocate --chown=1001:1001 /out /home/runner/w/rt
+COPY --from=build /src/graftcp/local/graftcp /wipter-guard /usr/local/bin/
+USER 1001
+RUN set -eu; ln -s /home/runner/w/rt /tmp/wipter-rt && ln -s /tmp/wipter-rt/bin /tmp/wxb \
+ && for e in app/wipter-app.bin bin/Xvfb bin/xkbcomp; do \
+      /tmp/wipter-rt/ld-linux-x86-64.so.2 --list /tmp/wipter-rt/$e; done > /tmp/libs \
+ && ! grep -F 'not found' /tmp/libs \
+ && ! grep '=>' /tmp/libs | grep -v '=> /tmp/wipter-rt/' \
+ && echo "$(grep -c '=>' /tmp/libs) libraries, all in the bundle" \
+ && mkdir /tmp/h \
+ && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
+      XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
+      WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb WIPTER_DEBUG=1 timeout 300 /tmp/wipter-rt/wipter-entry -selftest
+# (Links from the step before; the killed Xvfb's socket and lock are removed.)
+RUN set -eu; rm -rf /tmp/h /tmp/.X99-lock /tmp/.X11-unix/X99 && mkdir /tmp/h \
+ && (wipter-guard -listen 127.0.0.1:1083 -upstream 127.0.0.1:1 -local 127.0.0.1:2000 &) && sleep 1 \
+ && HOME=/tmp/h FONTCONFIG_FILE=/tmp/wipter-rt/fonts.conf WIPTER_APP=/tmp/wipter-rt/app/wipter-app.bin \
+      XDG_DATA_DIRS=/tmp/wipter-rt/share GIO_MODULE_DIR=/tmp/wipter-rt/gio-modules \
+      WIPTER_XVFB=/tmp/wipter-rt/bin/Xvfb WIPTER_XKB_DIR=/tmp/wipter-rt/share/X11/xkb \
+      graftcp --not-ignore-local --select_proxy_mode only_socks5 --socks5 127.0.0.1:1083 \
+        --enable-dns --dns-server 94.140.14.15:53 --enable-udp -- \
+      timeout 300 /tmp/wipter-rt/wipter-entry -selftest
 
 FROM tailscale/tailscale:v1.104.1 AS tailscale
 

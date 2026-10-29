@@ -175,6 +175,8 @@ while :; do
   [ "$remaining" -gt 60 ] || break
   ! port_busy "$APP_SOCKS_PORT" || fail "port $APP_SOCKS_PORT on 127.0.0.1 was taken"
   started=$(date +%s)
+  # A previous run's Xvfb was killed: its socket would look like a running one.
+  rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
   ( start_app "$remaining" ) < /dev/null > >(show) 2>&1 &
   CPID=$!
   PIDS+=("$CPID")
