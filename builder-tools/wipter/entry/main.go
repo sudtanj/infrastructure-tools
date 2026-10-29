@@ -10,6 +10,10 @@
 //
 // `wipter-entry -selftest` only checks that the app starts and shows its
 // sign-in form, with a throwaway profile; the image build runs it.
+//
+// For builder-tools/wipter-bundle (the app outside this image): WIPTER_APP is
+// the app's path, and WIPTER_HEADLESS=1 uses Chromium's headless display
+// backend instead of Xvfb.
 package main
 
 import (
@@ -25,7 +29,7 @@ import (
 	"time"
 )
 
-const app = "/opt/Wipter/wipter-app.bin"
+const defaultApp = "/opt/Wipter/wipter-app.bin"
 
 // Chromium switches: X11 on the virtual display, no GPU (software
 // compositing, done in the main process: no GPU process, and the build drops
@@ -101,10 +105,21 @@ func main() {
 	if err != nil {
 		fail(err.Error())
 	}
-	x := startX(debug)
-	defer x.Process.Kill()
-	os.Setenv("DISPLAY", display)
+	app := os.Getenv("WIPTER_APP")
+	if app == "" {
+		app = defaultApp
+	}
+	headless := os.Getenv("WIPTER_HEADLESS") == "1"
+	var x *exec.Cmd
+	if !headless {
+		x = startX(debug)
+		defer x.Process.Kill()
+		os.Setenv("DISPLAY", display)
+	}
 	args := append(appArgs[:len(appArgs):len(appArgs)], strings.Fields(os.Getenv("WIPTER_CHROMIUM_FLAGS"))...)
+	if headless {
+		args = append(args, "--ozone-platform=headless") // the last one counts
+	}
 	if debug {
 		args = append(args, "--enable-logging=stderr", "--log-level=0")
 	}
@@ -137,7 +152,9 @@ func main() {
 	case <-copied:
 	case <-time.After(2 * time.Second):
 	}
-	x.Process.Kill()
+	if x != nil {
+		x.Process.Kill()
+	}
 	code := cmd.ProcessState.ExitCode()
 	if code != 0 {
 		fmt.Printf("wipter-entry: the app exited (%v)\n", err)
