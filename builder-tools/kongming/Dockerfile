@@ -63,15 +63,18 @@ RUN set -eux; \
     install -m755 "target/${target}/release/kongming" /usr/local/bin/kongming
 
 # Static BusyBox for kongming's `shell` tool: one ~1 MB binary plus applet links,
-# so the distroless runtime gets sh, ls, grep, sed, awk, wget, nc, tar, ... and
+# so the distroless runtime gets sh, ls, grep, sed, awk, nc, tar, ... and
 # nothing else (kongming lets it read and use the network, not write files);
-# `cdp` is kongming itself (its Chrome DevTools client, for a browser on the tailnet).
+# `cdp`, `curl` and `wget` are kongming itself (its Chrome DevTools client and an
+# HTTP client with real TLS that prints to stdout; BusyBox wget's TLS fails on many sites).
 FROM busybox:1.37-musl AS busybox
 RUN set -eux; \
     mkdir -p /opt/busybox/bin; \
     cp /bin/busybox /opt/busybox/busybox; \
     for applet in $(/bin/busybox --list); do ln -s ../busybox "/opt/busybox/bin/${applet}"; done; \
     ln -s /usr/local/bin/kongming /opt/busybox/bin/cdp; \
+    ln -sf /usr/local/bin/kongming /opt/busybox/bin/wget; \
+    ln -s /usr/local/bin/kongming /opt/busybox/bin/curl; \
     /opt/busybox/bin/sh -c 'echo busybox ok'
 
 FROM ${RUNTIME_IMAGE}
