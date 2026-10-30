@@ -23,6 +23,8 @@ name: "Deploy GitHub runner on Instabox"
 # SECRETS (all already used by other workflows)
 #   INSTABOX_API_KEY                   create/start the machine, SSH
 #   PRIVATE_REPO                       the repo the runners serve
+#   PRIVATE_MIRROR_REPO (optional)     a second repo (OWNER/REPO or its link) given 1 of the
+#                                      4 runners; GH_RUNNER_PAT then needs it too
 #   GH_RUNNER_PAT                      dedicated fine-grained token: only that repo,
 #                                      Administration: Read and write, nothing else.
 #                                      Falls back to PRIVATE_REPO_TOKEN when unset.
@@ -31,7 +33,8 @@ name: "Deploy GitHub runner on Instabox"
 # REPO VARIABLES (optional)
 #   INSTABOX_RUNNER_MACHINE      machine name (default gh-runner)
 #   INSTABOX_RUNNER_LABELS       default self-hosted,linux,x64,instabox
-#   INSTABOX_RUNNER_COUNT        runners (that many jobs at once), default 4; with several
+#   INSTABOX_RUNNER_COUNT        runners (that many jobs at once), default 4, or 3,1 with
+#                                PRIVATE_MIRROR_REPO; with several
 #                                repos, one number per repo ("3,1")
 #   INSTABOX_RUNNER_CPUS / _MEMORY / _WORK_SIZE   per-job caps, default 1 / 1536m / 1g
 #
@@ -205,7 +208,7 @@ jobs:
       - name: Show runner status
         if: inputs.mode == 'status'
         env:
-          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          GH_RUNNER_REPO: ${{ format('{0},{1}', secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO, secrets.PRIVATE_MIRROR_REPO) }}
         run: |
           set -euo pipefail
           IFS=',' read -ra repos <<< "$GH_RUNNER_REPO"
@@ -239,16 +242,17 @@ jobs:
         env:
           SCRIPT_PATH: bash-scripts/upsert-github-runner.sh
           # Dedicated GH_RUNNER_* secrets when set, else the private repo secrets other workflows use.
-          GH_RUNNER_REPO: ${{ secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO }}
+          # Plus PRIVATE_MIRROR_REPO when set; the script skips the empty entry otherwise.
+          GH_RUNNER_REPO: ${{ format('{0},{1}', secrets.GH_RUNNER_REPO || secrets.PRIVATE_REPO, secrets.PRIVATE_MIRROR_REPO) }}
           GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
           GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
           GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT || secrets.PRIVATE_REPO_TOKEN }}
           GH_RUNNER_NO_SUDO: ${{ secrets.GH_RUNNER_NO_SUDO }}
           GH_RUNNER_NAME: ${{ inputs.machine_name || vars.INSTABOX_RUNNER_MACHINE || 'gh-runner' }}
           GH_RUNNER_LABELS: ${{ vars.INSTABOX_RUNNER_LABELS || 'self-hosted,linux,x64,instabox' }}
-          # 4 runners on the 4 vCPU / 8 GB machine: 1 vCPU and 1.5 GB each (RAM work dir
+          # 4 runners in all on the 4 vCPU / 8 GB machine: 1 vCPU and 1.5 GB each (RAM work dir
           # included), leaving ~2 GB for the supervisors, Docker and the OS.
-          GH_RUNNER_COUNT: ${{ vars.INSTABOX_RUNNER_COUNT || '4' }}
+          GH_RUNNER_COUNT: ${{ vars.INSTABOX_RUNNER_COUNT || secrets.PRIVATE_MIRROR_REPO != '' && '3,1' || '4' }}
           GH_RUNNER_CPUS: ${{ vars.INSTABOX_RUNNER_CPUS || '1' }}
           GH_RUNNER_MEMORY: ${{ vars.INSTABOX_RUNNER_MEMORY || '1536m' }}
           GH_RUNNER_WORK_SIZE: ${{ vars.INSTABOX_RUNNER_WORK_SIZE || '1g' }}
