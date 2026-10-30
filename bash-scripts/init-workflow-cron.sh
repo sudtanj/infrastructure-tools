@@ -47,7 +47,7 @@ JOBS='
 17 11 * * 1   builder-tools-docker-publish.yml no_cache=true
 41 12 * * 1   builder-tools-opi-zero3-armbian.yml only_if_updated=true
 23 9  * * 1   search-engine-register.yaml
-# Twice a day; it posts only when the last post is 40+ hours old, so a failed run is retried.
+# Twice a day: it posts only when the last post is 40+ hours old, so a failed run is retried.
 17 8,20 * * *  tanoitcorp-blog.yaml only_if_due=true
 '
 
