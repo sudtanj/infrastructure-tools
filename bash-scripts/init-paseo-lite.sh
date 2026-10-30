@@ -79,6 +79,9 @@ PASEO_PORT="6768"
 PASEO_PASSWORD="${PASEO_PASSWORD:-}"
 # Where the pairing QR/link opens the app (default https://app.paseo.sh), e.g. a GitHub Pages copy.
 PASEO_APP_BASE_URL="${PASEO_APP_BASE_URL:-}"
+# zilong-router MCP gateway for every Claude Code and Codex agent (http://<router>:20128/mcp).
+# Its API key is CODEX_API_KEY, the same router key Codex's custom base URL uses.
+PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
 # The daemon itself needs a few MB; the cap is for the agent CLIs it runs.
@@ -176,7 +179,7 @@ host_snapshot
 dbg "config: image=${IMAGE} container=${CONTAINER_NAME} port=${PASEO_PORT} rev=${CONFIG_REV}"
 dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
 dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD")"
-dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL")"
+dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL") PASEO_ZILONG_MCP_URL host=$(url_host "$PASEO_ZILONG_MCP_URL")"
 
 # --- DNS64: only on IPv6-only VMs ---
 # DNS64 resolvers (nat64.net) let an IPv6-only host reach IPv4-only services like github.com.
@@ -311,7 +314,7 @@ dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(do
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$CLAUDE_MAX_OUTPUT_TOKENS" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
-  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
   "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
@@ -360,9 +363,12 @@ dbg "volumes ready: ${HOME_VOLUME}, ${WORKSPACE_VOLUME}"
 opt_env=()
 opt_names=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD PASEO_APP_BASE_URL CODEX_MODEL; do
+         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD PASEO_APP_BASE_URL PASEO_ZILONG_MCP_URL CODEX_MODEL; do
   if [ -n "${!v:-}" ]; then opt_env+=(-e "$v=${!v}"); opt_names+=("$v"); fi
 done
+if [ -n "$PASEO_ZILONG_MCP_URL" ]; then
+  opt_env+=(-e "PASEO_ZILONG_API_KEY=$CODEX_API_KEY"); opt_names+=(PASEO_ZILONG_API_KEY)
+fi
 dbg "optional env forwarded to container: ${opt_names[*]:-none}"
 
 # CODEX_BASE_URL is deliberately NOT passed into the container: this script

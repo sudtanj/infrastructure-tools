@@ -260,7 +260,9 @@ jobs:
           # WORKFLOW_CRON_GITHUB_TOKEN is set; needs Actions: write here) and the Telegram alert (TELEGRAM_*). The job list is in the script.
           # PASEO_APP_BASE_URL (repository variable or secret) makes paseo-lite's pairing link open that web app,
           # e.g. https://sudtanj.github.io/paseo-lite (the GitHub Pages build in sudtanj/paseo-lite).
-          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,WORKFLOW_CRON_"
+          # PASEO_ZILONG_MCP_URL gives every paseo-lite agent the zilong-router MCP gateway (http://<router>:20128/mcp);
+          # init-paseo-lite.sh sends CODEX_API_KEY as its key.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,PASEO_ZILONG_MCP_URL,WORKFLOW_CRON_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -347,6 +349,7 @@ jobs:
           N8N_VOLUME_NAME: ${{ secrets.N8N_VOLUME_NAME }}
           PASEO_APP_BASE_URL: ${{ vars.PASEO_APP_BASE_URL || secrets.PASEO_APP_BASE_URL }}
           PASEO_PASSWORD: ${{ secrets.PASEO_PASSWORD }}
+          PASEO_ZILONG_MCP_URL: ${{ secrets.PASEO_ZILONG_MCP_URL }}
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
           TAILSCALE_PING_PEER: ${{ secrets.TAILSCALE_PING_PEER }}
           WORKFLOW_CRON_GITHUB_TOKEN: ${{ secrets.WORKFLOW_CRON_GITHUB_TOKEN || secrets.GH_TOKEN }}
