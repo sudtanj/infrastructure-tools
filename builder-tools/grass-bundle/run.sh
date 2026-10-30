@@ -36,6 +36,8 @@
 #   TS_EXIT_NODE         tag:name, a MagicDNS name or a Tailscale IPv4 (required)
 #   RUN_SECONDS          how long to run (default 3600)
 #   RUN_DIR              scratch dir: sockets, logs, Chrome's profile (default: a mktemp dir)
+#   GRASS_CACHE_DIR      Chrome's HTTP cache, capped at 64 MB (default: $RUN_DIR/cache);
+#                        point it off a RAM tmpfs to keep it out of the memory cap
 #   GRASS_URL            page Chrome opens on start (default https://app.grass.io/)
 #   GRASS_DEBUG=1        show Chrome's own output (IPs, emails and tokens masked)
 #   GRASS_SANDBOX=1      try Chrome's sandbox (see above)
@@ -104,6 +106,7 @@ mkdir -p "$RUN_DIR"
 cd "$RUN_DIR"
 SOCK="$RUN_DIR/tailscaled.sock"
 PROFILE="$RUN_DIR/home/chrome-profile"
+CACHE_DIR="${GRASS_CACHE_DIR:-$RUN_DIR/cache}"
 ts() { "$B/tailscale" --socket="$SOCK" "$@"; }
 DEADLINE=$(( $(date +%s) + RUN_SECONDS ))
 
@@ -217,7 +220,7 @@ if [ "${GRASS_SANDBOX:-}" = 1 ]; then
 fi
 
 # 5. The display, kept up for the whole run (Chrome restarts reuse it).
-mkdir -p "$RUN_DIR/home" "$RUN_DIR/tmp" "$PROFILE"
+mkdir -p "$RUN_DIR/home" "$RUN_DIR/tmp" "$PROFILE" "$CACHE_DIR"
 if [ ! -d /tmp/.X11-unix ]; then mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix 2>/dev/null || true; fi
 XPID=""
 start_x() {
@@ -275,6 +278,15 @@ CHROME_ARGS=(
   --hide-crash-restore-bubble
   --window-position=0,0
   --window-size=1280,800
+  # Memory: the Instabox job is capped at 1.5 GB, tmpfs included. One small
+  # cache, fewer renderer processes (site isolation off: Chrome only opens Grass
+  # pages and the Web Store), and no background downloads of components and models.
+  --disk-cache-dir="$CACHE_DIR"
+  --disk-cache-size=67108864
+  --renderer-process-limit=3
+  --disable-site-isolation-trials
+  --disable-component-update
+  --disable-features=Translate,MediaRouter,OptimizationHints,OptimizationGuideModelDownloading,OptimizationHintsFetching
 )
 if [ "${GRASS_DEBUG:-}" = 1 ]; then CHROME_ARGS+=(--enable-logging=stderr); else CHROME_ARGS+=(--log-level=3); fi
 start_chrome() {

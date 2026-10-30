@@ -48,7 +48,7 @@ saves (`$RUN_DIR/home`).
 
 `TS_AUTHKEY`, `TS_TAGS`, `TS_EXIT_NODE`, `RUN_SECONDS`, `RUN_DIR`,
 `VNC_LISTEN` + `GRASS_VNC_PASSWORD`, `TS_API_TOKEN` + `TS_FIXED_IP`,
-`GRASS_URL`, `GRASS_DEBUG=1` (Chrome's output, masked), `GRASS_SANDBOX=1`.
+`GRASS_URL`, `GRASS_CACHE_DIR` (Chrome's 64 MB HTTP cache; the workflow puts it on disk), `GRASS_DEBUG=1` (Chrome's output, masked), `GRASS_SANDBOX=1`.
 Details in `run.sh`.
 
 ## One client per connection
