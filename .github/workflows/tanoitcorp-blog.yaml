@@ -34,6 +34,11 @@ on:
   #   # 01:17 UTC on odd days of the month: every two days (twice in a row at a month's end).
   #   - cron: '17 1 */2 * *'
   workflow_dispatch:
+    inputs:
+      only_if_due:
+        description: Write only when the newest post is at least 40 hours old (workflow-cron passes true)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -179,6 +184,7 @@ jobs:
           CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
           CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
           CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          BLOG_ONLY_IF_DUE: ${{ inputs.only_if_due }}
         run: node private/cloudflare-projects/tanoitcorp/blog/generate.ts
 
       - name: Commit and push the posts
