@@ -237,6 +237,13 @@ else
   warn "writable in the container: ${WRITABLE}"
 fi
 
+# The agents' curl and wget (kongming's own HTTP client) must reach the web over HTTPS.
+FETCH="$("${DOCKER[@]}" exec "$CONTAINER_NAME" /opt/busybox/bin/sh -c 'exec 2>&1; curl -sS -o /dev/null -m 20 -w "%{http_code}" https://example.com; echo " curl=$?"; wget -q -O /dev/null -T 20 https://example.com; echo "wget=$?"' 2>&1 | tr '\n' ' ' | cut -c1-300 || true)"
+case "$FETCH" in
+  "200 curl=0 wget=0 ") ok "agents' curl and wget fetch over HTTPS" ;;
+  *) warn "agents' curl/wget check failed: ${FETCH:-no output}" ;;
+esac
+
 MEM="$("${DOCKER[@]}" stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 echo "[>] summary"
 echo "[*] image: ${IMAGE}"
