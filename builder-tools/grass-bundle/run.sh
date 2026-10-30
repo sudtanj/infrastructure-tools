@@ -39,6 +39,7 @@
 #   GRASS_CACHE_DIR      Chrome's HTTP cache, capped at 64 MB (default: $RUN_DIR/cache);
 #                        point it off a RAM tmpfs to keep it out of the memory cap
 #   GRASS_URL            page Chrome opens on start (default https://app.grass.io/)
+#   GRASS_TZ             Chrome's timezone, to match the exit node (default Asia/Jakarta)
 #   GRASS_DEBUG=1        show Chrome's own output (IPs, emails and tokens masked)
 #   GRASS_SANDBOX=1      try Chrome's sandbox (see above)
 #   VNC_LISTEN=1         x11vnc serves Chrome's screen on port 5900 of this node
@@ -65,6 +66,7 @@ VNC_PORT=5900
 VNC_LOCAL_PORT=5901
 NODE_NAME=grass-instabox
 GRASS_URL="${GRASS_URL:-https://app.grass.io/}"
+GRASS_TZ="${GRASS_TZ:-Asia/Jakarta}"
 RT=/tmp/grass-rt
 
 step() { printf '%s\n' "[>] $*"; }
@@ -225,7 +227,7 @@ if [ ! -d /tmp/.X11-unix ]; then mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11
 XPID=""
 start_x() {
   rm -f "/tmp/.X$DISP-lock" "/tmp/.X11-unix/X$DISP"
-  env -i PATH=/usr/bin:/bin HOME="$RUN_DIR/home" "$RT/bin/Xvfb" ":$DISP" -screen 0 1280x800x24 \
+  env -i PATH=/usr/bin:/bin HOME="$RUN_DIR/home" "$RT/bin/Xvfb" ":$DISP" -screen 0 1920x1080x24 \
     -nolisten tcp -noreset -extension GLX -xkbdir "$RT/share/X11/xkb" > "$RUN_DIR/xvfb.log" 2>&1 &
   XPID=$!; PIDS+=("$XPID")
   for _ in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$DISP" ] && return 0; sleep 0.2; done
@@ -271,28 +273,32 @@ CHROME_ARGS=(
   --force-webrtc-ip-handling-policy=disable_non_proxied_udp
   --password-store=basic
   --ozone-platform=x11
-  --disable-gpu
+  # Look like an ordinary desktop Chrome to bot checks (Cloudflare Turnstile on
+  # the Grass sign-in fails without these): WebGL through Chrome's own software
+  # renderer instead of no GPU at all, a full-HD screen with a maximized window,
+  # and a language to match. The timezone is set in start_chrome.
+  --use-angle=swiftshader
+  --enable-unsafe-swiftshader
+  --start-maximized
+  --lang=en-US
   --disable-dev-shm-usage
   --no-first-run
   --no-default-browser-check
   --hide-crash-restore-bubble
-  --window-position=0,0
-  --window-size=1280,800
   # Memory: the Instabox job is capped at 1.5 GB, tmpfs included. One small
-  # cache, fewer renderer processes (site isolation off: Chrome only opens Grass
-  # pages and the Web Store), and no background downloads of components and models.
+  # cache, fewer renderer processes, and no background downloads of components
+  # and models.
   --disk-cache-dir="$CACHE_DIR"
   --disk-cache-size=67108864
   --renderer-process-limit=3
-  --disable-site-isolation-trials
   --disable-component-update
   --disable-features=Translate,MediaRouter,OptimizationHints,OptimizationGuideModelDownloading,OptimizationHintsFetching
 )
 if [ "${GRASS_DEBUG:-}" = 1 ]; then CHROME_ARGS+=(--enable-logging=stderr); else CHROME_ARGS+=(--log-level=3); fi
 start_chrome() {
-  local v d="$RUN_DIR" r="$RT" url="$GRASS_URL"   # these may be exported: kept before the unset
+  local v d="$RUN_DIR" r="$RT" url="$GRASS_URL" tz="$GRASS_TZ"   # these may be exported: kept before the unset
   for v in $(compgen -e); do unset "$v" 2>/dev/null || true; done
-  export PATH="/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" LANG=C.UTF-8 DISPLAY=":$DISP" \
+  export PATH="/usr/local/bin:/usr/bin:/bin" HOME="$d/home" TMPDIR="$d/tmp" LANG=C.UTF-8 DISPLAY=":$DISP" TZ="$tz" \
     FONTCONFIG_FILE="$r/fonts.conf" XDG_DATA_DIRS="$r/share" GIO_MODULE_DIR="$r/gio-modules" \
     GDK_PIXBUF_MODULE_FILE="$r/gdk-pixbuf-loaders.cache" GTK_IM_MODULE_FILE="$r/gtk-immodules.cache" \
     GSETTINGS_BACKEND=memory
