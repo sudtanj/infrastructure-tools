@@ -91,19 +91,48 @@ PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
 # machine stays calm. So the container is sized from the host: everything
 # but a reserve for the host itself (sshd, tailscale, docker), never less
 # than the 1 GB VM's 640 MB / 0.75 CPU.
-# Container swap disabled (memory-swap == memory): a clean OOM-kill of the
-# container + auto-restart beats thrashing. Host gets its own swap below.
+# Container swap goes to zram only (see CONTAINER_SWAP_MB): a clean
+# OOM-kill of the container + auto-restart still beats thrashing on disk.
+# Host gets its own disk swapfile below.
 HOST_MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
 HOST_CPUS=$(nproc 2>/dev/null || echo 1)
-HOST_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 ))
+# The VM is dedicated to paseo-lite: on a small host (<= 2 GB) the host
+# keeps 256 MB (kernel, sshd, tailscale, docker; its cold pages go to zram),
+# the container gets the rest (~710 MB on an e2-micro). HOST_RESERVE_MB overrides.
+if [ "$HOST_MEM_MB" -le 2048 ]; then AUTO_RESERVE_MB=256; else AUTO_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 )); fi
+HOST_RESERVE_MB="${HOST_RESERVE_MB:-$AUTO_RESERVE_MB}"
 AUTO_MEM_MB=$(( HOST_MEM_MB - HOST_RESERVE_MB > 640 ? HOST_MEM_MB - HOST_RESERVE_MB : 640 ))
-if [ "$HOST_CPUS" -gt 2 ]; then AUTO_CPU_LIMIT="$(( HOST_CPUS - 1 ))"; else AUTO_CPU_LIMIT="0.75"; fi
+# Both shared vCPUs minus a quarter: --cpu-shares 128 below already lets the
+# host win any contention, so bursts (the e2-micro's CPU credits) aren't wasted.
+if [ "$HOST_CPUS" -gt 2 ]; then AUTO_CPU_LIMIT="$(( HOST_CPUS - 1 ))"; else AUTO_CPU_LIMIT="$(awk -v c="$HOST_CPUS" 'BEGIN{print (c > 1 ? c - 0.25 : 0.75)}')"; fi
 CPU_LIMIT="${CPU_LIMIT:-$AUTO_CPU_LIMIT}"
 MEM_MB="${MEM_MB:-$AUTO_MEM_MB}"
+# Container swap, sized to the host's zram (compressed RAM, fast, used before
+# the slow disk swapfile): an idle agent's cold heap compresses
+# ~3x, which is what lets a second agent run on 1 GB. Auto = the zram size
+# up to 512 MB; 0 without zram (then container swap stays off).
+# zram (lz4, half the RAM, used before the disk swapfile) if the host has
+# none yet: best-effort, idempotent.
+if ! grep -q '^/dev/zram' /proc/swaps 2>/dev/null; then
+  if sudo -n sh -c "modprobe zram 2>/dev/null; [ -e /sys/block/zram0 ] && echo 1 > /sys/block/zram0/reset && (echo lz4 > /sys/block/zram0/comp_algorithm || true) && echo $(( HOST_MEM_MB / 2 ))M > /sys/block/zram0/disksize && mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0" 2>/dev/null; then
+    echo "[+] zram swap enabled ($(( HOST_MEM_MB / 2 )) MB, lz4)"
+  else
+    echo "[!] could not enable zram; container swap stays off" >&2
+  fi
+fi
+ZRAM_MB=$(awk '/^\/dev\/zram/{s+=$3} END{print int(s/1024)}' /proc/swaps 2>/dev/null || echo 0)
+AUTO_SWAP_MB=$(( ZRAM_MB > 512 ? 512 : ZRAM_MB ))
+CONTAINER_SWAP_MB="${CONTAINER_SWAP_MB:-$AUTO_SWAP_MB}"
 # Each agent runs git, rg, shells: room for ~256 processes per 640 MB.
 AUTO_PIDS_LIMIT=$(( MEM_MB * 256 / 640 ))
 PIDS_LIMIT="${PIDS_LIMIT:-$AUTO_PIDS_LIMIT}"
 CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
+# Memory budget per agent for the auto capacity (a Claude Code process
+# measures ~220-260 MB here): with ~710 MB that allows two at once.
+AGENT_MB="${PASEO_AGENT_MB:-256}"
+# Sub-agents run inside their agent's process (little memory, mostly
+# waiting on the API): the cheap way to get more work done at once.
+CLAUDE_MAX_SUBAGENTS="${PASEO_CLAUDE_MAX_SUBAGENTS:-4}"
 CLAUDE_IDLE_SECS="${PASEO_CLAUDE_IDLE_SECS:-60}"
 CODEX_IDLE_SECS="${PASEO_CODEX_IDLE_SECS:-300}"
 
@@ -129,7 +158,7 @@ fi
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="5"
+CONFIG_REV="6"
 DNS64_MODE="${DNS64_MODE:-auto}"
 DNS1="${DNS1:-2a00:1098:2b::1}"
 DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
@@ -177,7 +206,7 @@ host_snapshot
 
 # ---------- config summary (debug only; never prints secret values) ----------
 dbg "config: image=${IMAGE} container=${CONTAINER_NAME} port=${PASEO_PORT} rev=${CONFIG_REV}"
-dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
+dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m swap=${CONTAINER_SWAP_MB}m (zram ${ZRAM_MB}m) host_reserve=${HOST_RESERVE_MB}m agent_mb=${AGENT_MB} subagents=${CLAUDE_MAX_SUBAGENTS} pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
 dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD")"
 dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL") PASEO_ZILONG_MCP_URL host=$(url_host "$PASEO_ZILONG_MCP_URL")"
 
@@ -314,7 +343,7 @@ dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(do
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$CLAUDE_MAX_OUTPUT_TOKENS" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
-  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$PIDS_LIMIT" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$CONTAINER_SWAP_MB" "$AGENT_MB" "$CLAUDE_MAX_SUBAGENTS" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
   "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
@@ -392,7 +421,7 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   --cpu-shares 128 \
   --memory "${MEM_MB}m" \
   --memory-reservation "$(( MEM_MB * 80 / 100 ))m" \
-  --memory-swap "${MEM_MB}m" \
+  --memory-swap "$(( MEM_MB + CONTAINER_SWAP_MB ))m" \
   --pids-limit "$PIDS_LIMIT" \
   --ulimit nproc=$(( PIDS_LIMIT * 2 )):$(( PIDS_LIMIT * 2 )) \
   --ulimit core=0 \
@@ -409,6 +438,8 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   -e PASEO_RELAY_ENABLED=true \
   -e PASEO_LOG_CONSOLE_LEVEL=warn \
   -e PASEO_CLAUDE_MAX_LIVE="$CLAUDE_MAX_LIVE" \
+  -e PASEO_AGENT_MB="$AGENT_MB" \
+  -e PASEO_CLAUDE_MAX_SUBAGENTS="$CLAUDE_MAX_SUBAGENTS" \
   -e PASEO_CLAUDE_IDLE_SECS="$CLAUDE_IDLE_SECS" \
   -e PASEO_CODEX_IDLE_SECS="$CODEX_IDLE_SECS" \
   -e CODEX_API_KEY="$CODEX_API_KEY" \
