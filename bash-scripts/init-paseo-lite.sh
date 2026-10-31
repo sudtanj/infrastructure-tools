@@ -97,9 +97,10 @@ PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
 HOST_MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
 HOST_CPUS=$(nproc 2>/dev/null || echo 1)
 # The VM is dedicated to paseo-lite: on a small host (<= 2 GB) the host
-# keeps 256 MB (kernel, sshd, tailscale, docker; its cold pages go to zram),
-# the container gets the rest (~710 MB on an e2-micro). HOST_RESERVE_MB overrides.
-if [ "$HOST_MEM_MB" -le 2048 ]; then AUTO_RESERVE_MB=256; else AUTO_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 )); fi
+# keeps 320 MB (kernel, sshd, tailscale, docker, with headroom so the host
+# never runs out), the container the rest (~647 MB on an e2-micro, two agents
+# with zram swap). HOST_RESERVE_MB overrides.
+if [ "$HOST_MEM_MB" -le 2048 ]; then AUTO_RESERVE_MB=320; else AUTO_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 )); fi
 HOST_RESERVE_MB="${HOST_RESERVE_MB:-$AUTO_RESERVE_MB}"
 AUTO_MEM_MB=$(( HOST_MEM_MB - HOST_RESERVE_MB > 640 ? HOST_MEM_MB - HOST_RESERVE_MB : 640 ))
 # Both shared vCPUs minus a quarter: --cpu-shares 128 below already lets the
