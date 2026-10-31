@@ -45,6 +45,11 @@
 #   VNC_LISTEN=1         x11vnc serves Chrome's screen on port 5900 of this node
 #                        (tailnet name grass-instabox). Needs:
 #   GRASS_VNC_PASSWORD   the password the viewer must give
+#   GRASS_CDP=1          Chrome's DevTools port (CDP) on port 9222 of this node, to
+#                        check the Grass tab and extension from the tailnet. Full
+#                        control of the signed-in browser: let the ACL allow only
+#                        your own devices to this port. Connect by the node's 100.x
+#                        IP (Chrome rejects other Host names).
 #   TS_API_TOKEN         optional: a Tailscale API token allowed to write devices:
 #                        earlier runs' grass-instabox nodes are removed and this
 #                        node takes the name grass-instabox. With it:
@@ -64,6 +69,8 @@ SOCKS_TS="127.0.0.1:1058"
 DISP=97
 VNC_PORT=5900
 VNC_LOCAL_PORT=5901
+CDP_PORT=9222
+CDP_LOCAL_PORT=9223
 NODE_NAME=grass-instabox
 GRASS_URL="${GRASS_URL:-https://app.grass.io/}"
 GRASS_TZ="${GRASS_TZ:-Asia/Jakarta}"
@@ -129,7 +136,7 @@ PIDS+=("$!")
 tag_args=()
 [ -z "${TS_TAGS:-}" ] || tag_args=(--advertise-tags="$TS_TAGS")
 shields=--shields-up
-[ "$VNC_LISTEN" != 1 ] || shields=--shields-up=false
+[ "$VNC_LISTEN" != 1 ] && [ "${GRASS_CDP:-}" != 1 ] || shields=--shields-up=false
 joined=0
 for attempt in 1 2 3; do
   if ts up --authkey="$TS_AUTHKEY" "${tag_args[@]}" --hostname="$NODE_NAME" \
@@ -295,6 +302,15 @@ CHROME_ARGS=(
   --disable-features=Translate,MediaRouter,OptimizationHints,OptimizationGuideModelDownloading,OptimizationHintsFetching
 )
 if [ "${GRASS_DEBUG:-}" = 1 ]; then CHROME_ARGS+=(--enable-logging=stderr); else CHROME_ARGS+=(--log-level=3); fi
+# Optional CDP: Chrome's DevTools on 127.0.0.1:9223, tailnet port 9222 mapped to it.
+if [ "${GRASS_CDP:-}" = 1 ]; then
+  CHROME_ARGS+=(--remote-debugging-port="$CDP_LOCAL_PORT")
+  if timeout 30 "$B/tailscale" --socket="$SOCK" serve --bg --tcp "$CDP_PORT" "tcp://127.0.0.1:$CDP_LOCAL_PORT" >/dev/null 2>&1; then
+    ok "CDP: Chrome's DevTools on port $CDP_PORT of $NODE_NAME (by its tailnet IP)"
+  else
+    warn "CDP: tailscale serve refused the port mapping; reach this node on port $CDP_LOCAL_PORT instead"
+  fi
+fi
 start_chrome() {
   local v d="$RUN_DIR" r="$RT" url="$GRASS_URL" tz="$GRASS_TZ"   # these may be exported: kept before the unset
   for v in $(compgen -e); do unset "$v" 2>/dev/null || true; done
