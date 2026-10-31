@@ -124,20 +124,23 @@ fi
 ZRAM_MB=$(awk '/^\/dev\/zram/{s+=$3} END{print int(s/1024)}' /proc/swaps 2>/dev/null || echo 0)
 AUTO_SWAP_MB=$(( ZRAM_MB > 512 ? 512 : ZRAM_MB ))
 CONTAINER_SWAP_MB="${CONTAINER_SWAP_MB:-$AUTO_SWAP_MB}"
-# Each agent runs git, rg, shells: room for ~256 processes per 640 MB.
-AUTO_PIDS_LIMIT=$(( MEM_MB * 256 / 640 ))
+# Each agent runs git, rg, shells: room for ~320 processes per 640 MB, so the
+# pids limit (64 per agent) allows as many agents as the memory does.
+AUTO_PIDS_LIMIT=$(( MEM_MB * 320 / 640 ))
 PIDS_LIMIT="${PIDS_LIMIT:-$AUTO_PIDS_LIMIT}"
 CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
 # Memory budget per agent for the auto capacity (a Claude Code process
-# measures ~220 MB resident, ~135 MB of it its own): see below.
-AGENT_MB="${PASEO_AGENT_MB:-180}"
-# Claude Code is a Bun executable: ~135 MB of its own per process (its ~85 MB
-# program file is shared between processes), so 180 MB per agent fits three
-# at once in the container. Low-memory runtime settings, all overridable:
+# measures ~160-270 MB resident, ~115-160 MB of it its own): see below.
+AGENT_MB="${PASEO_AGENT_MB:-135}"
+# Claude Code is a Bun executable: ~115-160 MB of its own per process (its ~85 MB
+# program file is shared between processes), so 135 MB per agent fits four
+# at once in the container, zram swap taking the peaks (the daemon drops back
+# to three under memory pressure). Low-memory runtime settings, all overridable:
 # Bun's small-heap mode (GCs more often), JavaScriptCore sizing its heap for
-# 512 MB instead of the host's RAM, and mimalloc returning freed memory at once.
+# 256 MB instead of the host's RAM (collects earlier), and mimalloc returning
+# freed memory at once.
 BUN_OPTIONS="${BUN_OPTIONS:---smol}"
-BUN_JSC_FORCE_RAM="${BUN_JSC_forceRAMSize:-536870912}"
+BUN_JSC_FORCE_RAM="${BUN_JSC_forceRAMSize:-268435456}"
 MIMALLOC_PURGE_DELAY="${MIMALLOC_PURGE_DELAY:-0}"
 # Sub-agents run inside their agent's process (little memory, mostly
 # waiting on the API): the cheap way to get more work done at once.
