@@ -129,8 +129,16 @@ AUTO_PIDS_LIMIT=$(( MEM_MB * 256 / 640 ))
 PIDS_LIMIT="${PIDS_LIMIT:-$AUTO_PIDS_LIMIT}"
 CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
 # Memory budget per agent for the auto capacity (a Claude Code process
-# measures ~220-260 MB here): with ~710 MB that allows two at once.
-AGENT_MB="${PASEO_AGENT_MB:-256}"
+# measures ~220 MB resident, ~135 MB of it its own): see below.
+AGENT_MB="${PASEO_AGENT_MB:-180}"
+# Claude Code is a Bun executable: ~135 MB of its own per process (its ~85 MB
+# program file is shared between processes), so 180 MB per agent fits three
+# at once in the container. Low-memory runtime settings, all overridable:
+# Bun's small-heap mode (GCs more often), JavaScriptCore sizing its heap for
+# 512 MB instead of the host's RAM, and mimalloc returning freed memory at once.
+BUN_OPTIONS="${BUN_OPTIONS:---smol}"
+BUN_JSC_FORCE_RAM="${BUN_JSC_forceRAMSize:-536870912}"
+MIMALLOC_PURGE_DELAY="${MIMALLOC_PURGE_DELAY:-0}"
 # Sub-agents run inside their agent's process (little memory, mostly
 # waiting on the API): the cheap way to get more work done at once.
 CLAUDE_MAX_SUBAGENTS="${PASEO_CLAUDE_MAX_SUBAGENTS:-4}"
@@ -159,7 +167,7 @@ fi
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="6"
+CONFIG_REV="7"
 DNS64_MODE="${DNS64_MODE:-auto}"
 DNS1="${DNS1:-2a00:1098:2b::1}"
 DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
@@ -207,7 +215,7 @@ host_snapshot
 
 # ---------- config summary (debug only; never prints secret values) ----------
 dbg "config: image=${IMAGE} container=${CONTAINER_NAME} port=${PASEO_PORT} rev=${CONFIG_REV}"
-dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m swap=${CONTAINER_SWAP_MB}m (zram ${ZRAM_MB}m) host_reserve=${HOST_RESERVE_MB}m agent_mb=${AGENT_MB} subagents=${CLAUDE_MAX_SUBAGENTS} pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
+dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m swap=${CONTAINER_SWAP_MB}m (zram ${ZRAM_MB}m) host_reserve=${HOST_RESERVE_MB}m agent_mb=${AGENT_MB} bun=${BUN_OPTIONS} jsc_ram=${BUN_JSC_FORCE_RAM} mimalloc_purge=${MIMALLOC_PURGE_DELAY} subagents=${CLAUDE_MAX_SUBAGENTS} pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
 dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD")"
 dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL") PASEO_ZILONG_MCP_URL host=$(url_host "$PASEO_ZILONG_MCP_URL")"
 
@@ -344,7 +352,7 @@ dbg "pull ok in $(since "$T_PULL"): image ${NEW_ID:0:19} (${IMG_NOTE}) size=$(do
 CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX_MODEL" \
   "$CODEX_MAX_TOKEN" "$CLAUDE_MAX_OUTPUT_TOKENS" "$GH_TOKEN" "$GH_USERNAME" "$GH_EMAIL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
-  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$CONTAINER_SWAP_MB" "$AGENT_MB" "$CLAUDE_MAX_SUBAGENTS" "$PIDS_LIMIT" \
+  "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$CONTAINER_SWAP_MB" "$AGENT_MB" "$BUN_OPTIONS" "$BUN_JSC_FORCE_RAM" "$MIMALLOC_PURGE_DELAY" "$CLAUDE_MAX_SUBAGENTS" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
   "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
@@ -440,6 +448,9 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   -e PASEO_LOG_CONSOLE_LEVEL=warn \
   -e PASEO_CLAUDE_MAX_LIVE="$CLAUDE_MAX_LIVE" \
   -e PASEO_AGENT_MB="$AGENT_MB" \
+  -e BUN_OPTIONS="$BUN_OPTIONS" \
+  -e BUN_JSC_forceRAMSize="$BUN_JSC_FORCE_RAM" \
+  -e MIMALLOC_PURGE_DELAY="$MIMALLOC_PURGE_DELAY" \
   -e PASEO_CLAUDE_MAX_SUBAGENTS="$CLAUDE_MAX_SUBAGENTS" \
   -e PASEO_CLAUDE_IDLE_SECS="$CLAUDE_IDLE_SECS" \
   -e PASEO_CODEX_IDLE_SECS="$CODEX_IDLE_SECS" \
