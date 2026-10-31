@@ -361,6 +361,12 @@ jobs:
       - name: Build web app and sync Android project
         working-directory: private/${{ matrix.app.dir }}
         shell: bash
+        # Build-time values for apps that read VITE_* variables (see each app README).
+        # Unset secrets are empty; apps without such settings ignore them.
+        env:
+          VITE_TELEGRAM_API_ID: ${{ secrets.TELEFLIX_TELEGRAM_API_ID }}
+          VITE_TELEGRAM_API_HASH: ${{ secrets.TELEFLIX_TELEGRAM_API_HASH }}
+          VITE_TELEFLIX_INVITE_LINK: ${{ secrets.TELEFLIX_INVITE_LINK }}
         run: |
           set -euo pipefail
           run_quiet() {
