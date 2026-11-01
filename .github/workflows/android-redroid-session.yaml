@@ -57,9 +57,10 @@ concurrency:
 env:
   STATE_TAG: android-redroid-state
   # 64-bit only: the runner's Arm CPUs may not run 32-bit Arm code, and a
-  # 32-bit zygote would then crash-loop. Pinned to a major version: moving up
-  # upgrades the saved /data like an OTA; moving down can't (use `fresh`).
-  REDROID_IMAGE: redroid/redroid:16.0.0_64only-latest
+  # 32-bit zygote would then crash-loop. Pinned to a major version: a new one
+  # may not boot on the saved /data. Not 16: its surfaceflinger aborts ("output
+  # buffer not gpu writeable") without a real GPU, so it never boots here.
+  REDROID_IMAGE: redroid/redroid:14.0.0_64only-latest
   # Ubuntu's scrcpy is 1.25 (2022) and there is no Linux arm64 release build,
   # so the client is built once (with SDL3, which Ubuntu 24.04 lacks) and cached.
   SCRCPY_VERSION: v5.0.1
