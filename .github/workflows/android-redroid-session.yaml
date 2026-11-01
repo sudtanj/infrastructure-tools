@@ -22,12 +22,19 @@ name: "Android (Redroid, arm64) session over Tailscale"
 # Every run in which Android started saves, however it ends (stop file,
 # `max_minutes`, a failure, Cancel).
 #
+# LAZADA CHECK-IN
+#   With `checkin` on (workflow-cron dispatches it daily at 06:00 UTC+7), the
+#   runner taps "Ambil Koin" and "Check-in" in Lazada with
+#   .github/scripts/lazada/lazada.ts, then ends the session and saves. If
+#   Lazada is logged out or the check-in can't be done, a message goes to
+#   Telegram (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID); log in again over VNC.
+#
 # Needs the host kernel's binder driver (binder_linux); the first step fails
 # with the kernel's details if the runner image lacks it.
 #
 # Secrets: the emulator's (PRIVATE_REPO, PRIVATE_REPO_TOKEN,
 # TAILSCALE_OAUTH_CLIENT_SECRET, TAILSCALE_TAGS, STATE_KEY, VNC_PASSWORD,
-# TAILSCALE_EXIT_NODE).
+# TAILSCALE_EXIT_NODE; TELEGRAM_TOKEN, TELEGRAM_CHAT_ID optional).
 # ---------------------------------------------------------------------------
 
 on:
@@ -45,6 +52,10 @@ on:
         description: 'Send internet traffic through the TAILSCALE_EXIT_NODE exit node'
         type: boolean
         default: true
+      checkin:
+        description: "Do Lazada's daily coin check-in, then save and end (as the schedule does)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -85,6 +96,9 @@ jobs:
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
       USE_EXIT_NODE: ${{ inputs.exit_node }}
+      CHECKIN: ${{ inputs.checkin }}
+      # lazada.ts queues alerts here (android-alert.ts); sent by "Send alerts".
+      ALERT_FILE: /tmp/android-alerts.txt
 
     steps:
       - uses: actions/checkout@v4
@@ -295,6 +309,12 @@ jobs:
           sudo tailscale serve --bg --tcp 5555 tcp://localhost:5555 >/dev/null
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
 
+      # Before the exit node goes on, so the download is direct.
+      - uses: actions/setup-node@v4
+        if: ${{ env.CHECKIN == 'true' }}
+        with:
+          node-version: 24
+
       - name: Use the exit node
         env:
           TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
@@ -413,6 +433,12 @@ jobs:
           max="$MAX_MINUTES"
           if [ "$max" -gt 320 ]; then max=320; fi
           adb="adb -s 127.0.0.1:5555"
+          if [ "$CHECKIN" = true ]; then
+            DEVICE=127.0.0.1:5555 timeout 10m node .github/scripts/lazada/lazada.ts \
+              || echo "::warning::The Lazada script ended with an error."
+            $adb shell sync || true
+            exit 0
+          fi
           deadline=$((SECONDS + max * 60))
           while [ "$SECONDS" -lt "$deadline" ]; do
             if [ "$(docker inspect -f '{{.State.Running}}' redroid 2>/dev/null)" != true ]; then
@@ -432,6 +458,25 @@ jobs:
       - name: Leave the exit node
         if: ${{ always() && env.USE_EXIT_NODE == 'true' }}
         run: sudo tailscale set --exit-node= || true
+
+      # After the exit node: Telegram times out through it.
+      - name: Send alerts to Telegram
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          [ -s "$ALERT_FILE" ] || exit 0
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_TOKEN or TELEGRAM_CHAT_ID is not set; alerts not sent."
+            exit 0
+          fi
+          text="$(printf 'Android Redroid (%s):\n' "$(TZ=Asia/Jakarta date '+%d %b %H:%M WIB')"; awk '!seen[$0]++ { print "- " $0 }' "$ALERT_FILE")"
+          curl -fsS -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            || echo "::warning::Telegram sendMessage failed."
 
       - name: Save state
         # Whenever Android started, however the run ended: /data may hold work

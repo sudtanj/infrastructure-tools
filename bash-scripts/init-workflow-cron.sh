@@ -35,6 +35,7 @@ JOBS='
 0 *    * * *  typescript-worker-run.yaml
 0 7,17 * * *  android-emulator-session.yaml exit_node=true autoplay=true
 0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
+0 6    * * *  android-redroid-session.yaml exit_node=true checkin=true
 0 8,11,17,18 * * 1-5  commute-traffic.yaml skip_off_days=true
 # Every 5-30 minutes.
 */15 * * * *  cloudflare-private-deploy.yaml
