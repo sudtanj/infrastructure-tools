@@ -1,0 +1,317 @@
+name: "Android (Redroid, arm64) session over Tailscale"
+
+# ---------------------------------------------------------------------------
+# Experimental ARM counterpart of android-emulator-session: Android runs as a
+# Redroid container (redroid/redroid) natively on GitHub's free arm64 runner,
+# so arm64-only apps run without translation and no KVM is needed. Reachable
+# on the tailnet as `android-redroid`:
+#   adb      android-redroid:5555   (no "Allow USB debugging?" prompt: Redroid's
+#                                    adb is open, so the tailnet ACLs are the gate)
+#   VNC      android-redroid:5900   (scrcpy's mirror of the screen)
+#
+# Redroid has no Google Play: install apps over adb, e.g. the split APKs
+# pulled from the emulator (`adb shell pm path <package>`, then
+# `adb install-multiple`).
+#
+# Android's /data (apps, logins) is encrypted and stored as release assets on
+# the PRIVATE repo under `android-redroid-state`, with the Tailscale identity,
+# and restored on the next run, like the emulator's AVD.
+#
+# STOP IT WITH THE STOP FILE
+#   adb -s android-redroid:5555 shell touch /data/local/tmp/stop-session
+# Every run in which Android started saves, however it ends (stop file,
+# `max_minutes`, a failure, Cancel).
+#
+# Needs the host kernel's binder driver (binder_linux); the first step fails
+# with the kernel's details if the runner image lacks it.
+#
+# Secrets: the emulator's (PRIVATE_REPO, PRIVATE_REPO_TOKEN,
+# TAILSCALE_OAUTH_CLIENT_SECRET, TAILSCALE_TAGS, STATE_KEY, VNC_PASSWORD,
+# TAILSCALE_EXIT_NODE).
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_minutes:
+        description: 'Stop and save after this many minutes if nobody stops it (max 320)'
+        type: number
+        default: 120
+      fresh:
+        description: 'Ignore the saved state; the next save replaces it'
+        type: boolean
+        default: false
+      exit_node:
+        description: 'Send internet traffic through the TAILSCALE_EXIT_NODE exit node'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Two runs would race to save over each other's state.
+concurrency:
+  group: android-redroid-session
+  cancel-in-progress: false
+
+env:
+  STATE_TAG: android-redroid-state
+  # 64-bit only: the runner's Arm CPUs may not run 32-bit Arm code, and a
+  # 32-bit zygote would then crash-loop. Pinned to a major version: a new one
+  # may not boot on the saved /data.
+  REDROID_IMAGE: redroid/redroid:14.0.0_64only-latest
+  DATA_DIR: /var/lib/redroid-data
+
+jobs:
+  session:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      USE_EXIT_NODE: ${{ inputs.exit_node }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in PRIVATE_REPO GH_TOKEN TAILSCALE_OAUTH_CLIENT_SECRET TAILSCALE_TAGS STATE_KEY VNC_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error title=Missing secrets::Not set: ${missing[*]}"
+            exit 1
+          fi
+          echo "::add-mask::${PRIVATE_REPO}"
+
+      # First, so a runner without binder fails in seconds.
+      - name: Load the binder driver
+        run: |
+          set -euo pipefail
+          load() { sudo modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; }
+          if ! load; then
+            sudo apt-get update -qq >/dev/null
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
+            if ! load; then
+              echo "::error title=No binder::Kernel $(uname -r) has no binder_linux module; Redroid can't run on this runner."
+              grep -i binder "/boot/config-$(uname -r)" 2>/dev/null || echo "(no binder options in the kernel config)"
+              exit 1
+            fi
+          fi
+          grep binder /proc/filesystems || true
+
+      - name: Prepare state release
+        run: |
+          set -euo pipefail
+          if ! gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1; then
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Android Redroid state" \
+              --notes "Encrypted /data saved by infrastructure-tools android-redroid-session." >/dev/null
+          fi
+          # Not `|| true`: a failed listing must stop the run, or a clean
+          # Android would later be saved over the good state.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' > /tmp/state-assets.txt
+
+      # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`; the
+      # manifest is uploaded last, so only sets with one are complete.
+      - name: Restore saved state
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$DATA_DIR"
+          if [ "${{ inputs.fresh }}" = true ]; then exit 0; fi
+          id="$(sed -n 's/^state-\([0-9]*\)\.sha256$/\1/p' /tmp/state-assets.txt | sort -n | tail -1)"
+          if [ -z "$id" ]; then exit 0; fi
+          mkdir -p /tmp/state
+          cd /tmp/state
+          for attempt in 1 2 3; do
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p "state-${id}.*" --clobber && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            echo "::warning::State download failed (try ${attempt}); retrying."
+            sleep 15
+          done
+          sha256sum -c --quiet "state-${id}.sha256"
+          # Android's own uids and xattrs, as saved.
+          cat state-"${id}".part-* \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | sudo tar -x --zstd --numeric-owner --xattrs --xattrs-include='*' -C "$DATA_DIR"
+          rm -rf /tmp/state
+
+      # Before the exit node, so the image download is direct.
+      - name: Pull Redroid and install tools
+        run: |
+          set -euo pipefail
+          docker pull -q "$REDROID_IMAGE" >/dev/null
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq adb scrcpy xvfb x11vnc >/dev/null
+
+      - name: Join the tailnet
+        env:
+          TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
+          # Same machine identity as last run means the same tailnet IP.
+          if grep -qx 'tailscaled.state.enc' /tmp/state-assets.txt; then
+            gh release download "$STATE_TAG" -R "$PRIVATE_REPO" -p tailscaled.state.enc -D /tmp
+            sudo systemctl stop tailscaled
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -in /tmp/tailscaled.state.enc \
+              | sudo tee /var/lib/tailscale/tailscaled.state >/dev/null
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            sudo systemctl start tailscaled
+            rm /tmp/tailscaled.state.enc
+          fi
+          secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+          out="$(mktemp)"
+          if ! sudo tailscale up --authkey="${secret}?ephemeral=false&preauthorized=true" \
+            --advertise-tags="$TAILSCALE_TAGS" --hostname=android-redroid >"$out" 2>&1; then
+            echo "::error::tailscale up failed."
+            tail -n 20 "$out"
+            exit 1
+          fi
+          rm -f "$out"
+          # Saved straight away, so a cancelled run still keeps the identity.
+          sudo cat /var/lib/tailscale/tailscaled.state \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY -out /tmp/tailscaled.state.enc
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" /tmp/tailscaled.state.enc --clobber
+          rm /tmp/tailscaled.state.enc
+          # Tailnet only: neither port is published on the runner's public interface.
+          sudo tailscale serve --bg --tcp 5555 tcp://localhost:5555 >/dev/null
+          sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
+
+      - name: Use the exit node
+        env:
+          TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/android-emulator-exit-node.sh
+          if [ "$USE_EXIT_NODE" != true ]; then exit 0; fi
+          # Containers are forwarded, not local, traffic; check they leave
+          # through the exit node too, before Android starts.
+          host="$(curl -fsS --max-time 10 https://api.ipify.org)"
+          box="$(docker run --rm curlimages/curl:latest -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+          echo "::add-mask::${host}"
+          [ -z "$box" ] || echo "::add-mask::${box}"
+          if [ "$box" != "$host" ]; then
+            echo "::error title=Exit node not used by containers::A container's egress IP differs from the host's."
+            exit 1
+          fi
+
+      - name: Start Android
+        id: android
+        run: |
+          set -euo pipefail
+          # 720x1280 at 320 dpi, like the emulator, so taps and layouts match.
+          # Software rendering (the runner has no GPU). Public DNS: the host's
+          # resolver is Tailscale's MagicDNS, which a container can't reach.
+          docker run -d --name redroid --privileged \
+            -v "$DATA_DIR:/data" -p 127.0.0.1:5555:5555 \
+            "$REDROID_IMAGE" \
+            androidboot.redroid_width=720 androidboot.redroid_height=1280 androidboot.redroid_dpi=320 \
+            androidboot.redroid_gpu_mode=guest androidboot.use_memfd=1 \
+            androidboot.redroid_net_ndns=2 androidboot.redroid_net_dns1=1.1.1.1 androidboot.redroid_net_dns2=8.8.8.8 \
+            >/dev/null
+          touch /tmp/android-started
+          for _ in $(seq 1 90); do
+            adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
+            if [ "$(adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
+              echo "Booted: Android $(adb -s 127.0.0.1:5555 shell getprop ro.build.version.release | tr -d '\r'), $(adb -s 127.0.0.1:5555 shell getprop ro.product.cpu.abilist | tr -d '\r')"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' redroid)" != true ]; then break; fi
+            sleep 5
+          done
+          echo "::error title=Android did not boot::See the container log below."
+          docker logs --tail 50 redroid 2>&1 || true
+          exit 1
+
+      - name: Start virtual display and VNC
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          setsid nohup Xvfb :99 -screen 0 720x1280x24 >/dev/null 2>&1 &
+          sleep 2
+          mkdir -p ~/.vnc
+          x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
+          # localhost only; Tailscale serve is the sole way in.
+          x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log >/dev/null
+          # scrcpy mirrors the screen into the display and forwards clicks and
+          # keys; restarted if it exits (e.g. Android restarts its UI).
+          setsid nohup bash -c 'while true; do
+            DISPLAY=:99 scrcpy -s 127.0.0.1:5555 --render-driver=software --window-borderless \
+              --window-x 0 --window-y 0 --window-width 720 --window-height 1280 --max-fps 15 \
+              >>/tmp/scrcpy.log 2>&1
+            sleep 3
+          done' >/dev/null 2>&1 &
+
+      - name: Session
+        env:
+          MAX_MINUTES: ${{ inputs.max_minutes || 120 }}
+        run: |
+          set -euo pipefail
+          max="$MAX_MINUTES"
+          if [ "$max" -gt 320 ]; then max=320; fi
+          adb="adb -s 127.0.0.1:5555"
+          deadline=$((SECONDS + max * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ "$(docker inspect -f '{{.State.Running}}' redroid 2>/dev/null)" != true ]; then
+              echo "::error title=Android exited::The Redroid container stopped."
+              docker logs --tail 50 redroid 2>&1 || true
+              exit 1
+            fi
+            if $adb shell test -e /data/local/tmp/stop-session 2>/dev/null; then
+              break
+            fi
+            sleep 15
+          done
+          $adb shell rm -f /data/local/tmp/stop-session || true
+          $adb shell sync || true
+
+      # Before Save state, so the upload goes straight to GitHub.
+      - name: Leave the exit node
+        if: ${{ always() && env.USE_EXIT_NODE == 'true' }}
+        run: sudo tailscale set --exit-node= || true
+
+      - name: Save state
+        # Whenever Android started, however the run ended: /data may hold work
+        # done over VNC. Not when it never started (it may be half restored).
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -e /tmp/android-started ]; then exit 0; fi
+          id="${{ github.run_id }}"
+          # A clean shutdown, so /data is consistent.
+          timeout 30 adb -s 127.0.0.1:5555 shell sync >/dev/null 2>&1 || true
+          docker stop -t 60 redroid >/dev/null 2>&1 || true
+          mkdir -p /tmp/save
+          cd /tmp/save
+          # Release assets cap at 2 GiB each.
+          sudo tar -C "$DATA_DIR" -c --zstd --numeric-owner --xattrs --xattrs-include='*' . \
+            | openssl enc -aes-256-cbc -pbkdf2 -pass env:STATE_KEY \
+            | split -b 1900M -d -a 3 - "state-${id}.part-"
+          sha256sum state-"${id}".part-* > "state-${id}.sha256"
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" state-"${id}".part-*
+          gh release upload "$STATE_TAG" -R "$PRIVATE_REPO" "state-${id}.sha256"
+          # Old sets go only after the new manifest is up, so a failed upload
+          # never loses the last good save.
+          gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' \
+            | { grep '^state-' || true; } \
+            | { grep -v "^state-${id}\." || true; } \
+            | while read -r name; do
+                gh release delete-asset "$STATE_TAG" "$name" -R "$PRIVATE_REPO" -y >/dev/null
+              done
+
+      # `down`, not `logout`: logout would expire the saved identity.
+      - name: Disconnect from the tailnet
+        if: always()
+        run: sudo tailscale down >/dev/null 2>&1 || true
