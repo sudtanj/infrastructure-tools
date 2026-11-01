@@ -7,6 +7,7 @@ name: "Chrome CDP session over Tailscale"
 #   CDP      <tailnet IP>:9222   (Playwright connectOverCDP, Puppeteer,
 #                                 chrome-devtools-mcp, browser-use, ...)
 #   VNC      chrome-cdp:5900     (watch or click the browser window)
+#   Web VNC  http://<tailnet IP>:6080/vnc.html  (same, in a browser: noVNC)
 #
 # Use the 100.x IP for CDP, not the MagicDNS name: Chrome's DevTools HTTP
 # endpoint rejects requests whose Host header is not an IP or `localhost`.
@@ -216,7 +217,7 @@ jobs:
             return 1
           }
           phase="installing Chrome and the display packages"
-          apt_install /tmp/chrome.deb xvfb x11vnc openbox \
+          apt_install /tmp/chrome.deb xvfb x11vnc novnc openbox \
             libgl1-mesa-dri libegl1 libgles2 pulseaudio \
             fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
           # The Microsoft core fonts download from SourceForge; nice to have, not worth failing over.
@@ -240,6 +241,8 @@ jobs:
           x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
           # localhost only; Tailscale serve is the sole way in.
           x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -bg -quiet -o /tmp/x11vnc.log >/dev/null 2>&1
+          # noVNC: the same VNC (and password) in a web page, so no viewer to install.
+          websockify -D --web /usr/share/novnc 127.0.0.1:6080 localhost:5900 >/dev/null 2>&1
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Join the tailnet
@@ -295,6 +298,7 @@ jobs:
           # Tailnet only: neither port is published on the runner's public interface.
           sudo tailscale serve --bg --tcp 9222 tcp://localhost:9222 >/dev/null
           sudo tailscale serve --bg --tcp 5900 tcp://localhost:5900 >/dev/null
+          sudo tailscale serve --bg --tcp 6080 tcp://localhost:6080 >/dev/null
           rm -f "$out"
 
       - name: Run Chrome until stopped
