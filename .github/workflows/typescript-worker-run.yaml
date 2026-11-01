@@ -228,8 +228,8 @@ on:
         required: false
         default: ""
         type: string
-      upwork_live:
-        description: "upwork_bid really submits proposals (otherwise dry run)"
+      upwork_dry:
+        description: "upwork_bid stops before Submit (dry run); scheduled runs submit for real"
         required: false
         default: false
         type: boolean
@@ -1094,7 +1094,7 @@ jobs:
           ZILONG_ROUTER_API_KEY: ${{ secrets.ZILONG_ROUTER_API_KEY }}
           ZILONG_ROUTER_BASE_URL: ${{ secrets.ZILONG_ROUTER_BASE_URL }}
           ZILONG_ROUTER_MODEL: ${{ secrets.ZILONG_ROUTER_MODEL }}
-          UPWORK_BID_DRY_RUN: ${{ inputs.upwork_live && '0' || '' }}
+          UPWORK_BID_DRY_RUN: ${{ inputs.upwork_dry && '1' || '' }}
           # steam_gifts signs in with the site's cookie string.
           STEAMGIFTS_COOKIE: ${{ secrets.STEAMGIFTS_COOKIE }}
           # gcp_billing sends its summary to Telegram.
