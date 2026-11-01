@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# paseo-lite: Rust Paseo daemon + native Claude Code CLI + native Codex CLI
+# feiyi: Rust Paseo daemon + native Claude Code CLI + native Codex CLI
 # on Alpine. No Node.js anywhere in the final image. The daemon is a prebuilt
 # static binary (no Rust toolchain in the build), so the image builds fast.
 
@@ -14,9 +14,9 @@ ARG CLAUDE_CODE_VERSION=latest
 # "latest" or an exact Codex release (e.g. 0.46.0 -> tag rust-v0.46.0).
 ARG CODEX_VERSION=latest
 ARG GH_VERSION=2.63.2
-# paseo-lite release asset (built by sudtanj/paseo-code-rust CI, static musl).
+# feiyi release asset (built by sudtanj/feiyi CI, static musl).
 # "latest" is a rolling release of main; pin with a release tag if one exists.
-ARG PASEO_LITE_RELEASE=latest
+ARG FEIYI_RELEASE=latest
 # Set to "" to leave an agent CLI out of the image (saves disk + build time).
 ARG INSTALL_CLAUDE=1
 ARG INSTALL_CODEX=1
@@ -25,11 +25,11 @@ RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ ripgrep
 # The download URL below never changes for a rolling release, so the layer
 # cache would keep an old daemon forever. ADD re-fetches this checksum on
 # every build: a new release changes it and invalidates the download.
-ADD https://github.com/sudtanj/paseo-code-rust/releases/download/${PASEO_LITE_RELEASE}/paseo-lite-x86_64-linux-musl.sha256 /tmp/paseo-lite.sha256
+ADD https://github.com/sudtanj/feiyi/releases/download/${FEIYI_RELEASE}/feiyi-x86_64-linux-musl.sha256 /tmp/feiyi.sha256
 RUN mkdir -p /out \
- && curl -fsSL -o /out/paseo-lite "https://github.com/sudtanj/paseo-code-rust/releases/download/${PASEO_LITE_RELEASE}/paseo-lite-x86_64-linux-musl" \
- && echo "$(cut -d' ' -f1 /tmp/paseo-lite.sha256)  /out/paseo-lite" | sha256sum -c - \
- && chmod 755 /out/paseo-lite \
+ && curl -fsSL -o /out/feiyi "https://github.com/sudtanj/feiyi/releases/download/${FEIYI_RELEASE}/feiyi-x86_64-linux-musl" \
+ && echo "$(cut -d' ' -f1 /tmp/feiyi.sha256)  /out/feiyi" | sha256sum -c - \
+ && chmod 755 /out/feiyi \
  && case "${TARGETARCH:-amd64}" in \
       amd64) arch=x86_64 ;; \
       arm64) arch=aarch64 ;; \
@@ -60,9 +60,9 @@ RUN apk add --no-cache bash git openssh-client ca-certificates libgcc libstdc++ 
  && adduser -D -u 1000 -h /home/paseo -s /bin/bash paseo \
  && mkdir -p /workspace && chown paseo:paseo /workspace
 
-COPY --from=agents /out/paseo-lite /usr/local/bin/paseo-lite
+COPY --from=agents /out/feiyi /usr/local/bin/feiyi
 COPY --from=agents /out/ /usr/local/lib/agents/
-RUN rm -f /usr/local/lib/agents/paseo-lite
+RUN rm -f /usr/local/lib/agents/feiyi
 
 # Low-priority launcher: agents run at the lowest CPU priority (and idle I/O
 # class when available), so the daemon and its relay pings always win when
@@ -84,7 +84,7 @@ RUN mv /usr/local/lib/agents/gh /usr/local/bin/gh \
     done
 
 COPY --chmod=755 configure-codex-provider.sh /usr/local/bin/configure-codex-provider
-COPY --chmod=755 entrypoint.sh /usr/local/bin/paseo-lite-entrypoint
+COPY --chmod=755 entrypoint.sh /usr/local/bin/feiyi-entrypoint
 
 # Daemon defaults for a network-reachable container on a free-tier VM.
 # Claude Code: use the system ripgrep (musl) and silence background work.
@@ -107,5 +107,5 @@ WORKDIR /workspace
 EXPOSE 6768
 
 # Stays root so the entrypoint can heal volume ownership, then drops to paseo.
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/paseo-lite-entrypoint"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/feiyi-entrypoint"]
 CMD []

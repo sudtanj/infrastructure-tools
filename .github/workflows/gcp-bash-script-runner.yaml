@@ -14,7 +14,7 @@ on:
           - init-portainer
           - init-dozzle
           - init-paseo-codex
-          - init-paseo-lite
+          - init-feiyi
           - init-tailscale
           - init-workflow-cron
           - test-codex-url
@@ -87,7 +87,9 @@ jobs:
     runs-on: ubuntu-latest
 
     environment:
-      name: "approve-${{ matrix.script }}"
+      # init-feiyi.sh (formerly init-paseo-lite.sh) keeps the old environment, so
+      # any environment-scoped secrets and approval rules carry over.
+      name: "${{ matrix.script == 'bash-scripts/init-feiyi.sh' && 'approve-bash-scripts/init-paseo-lite.sh' || format('approve-{0}', matrix.script) }}"
 
     strategy:
       fail-fast: false
@@ -249,19 +251,19 @@ jobs:
           # N8N_ lets a secret N8N_ENCRYPTION_KEY override the key the script generates
           # and persists in /etc/n8n/n8n.env. The script refuses to start if the supplied
           # key differs from the one already on disk, since that would orphan credentials.
-          # ANTHROPIC_ / CLAUDE_CODE_ forward Claude Code auth to init-paseo-codex.sh and init-paseo-lite.sh
+          # ANTHROPIC_ / CLAUDE_CODE_ forward Claude Code auth to init-paseo-codex.sh and init-feiyi.sh
           # (CLAUDE_CODE_OAUTH_TOKEN for subscription, ANTHROPIC_API_KEY for usage billing,
           # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for BYOK).
-          # GH_USERNAME / GH_EMAIL set the global git identity inside the paseo-lite container.
+          # GH_USERNAME / GH_EMAIL set the global git identity inside the feiyi container.
           # DOZZLE_ forwards DOZZLE_PASSWORD (and optional overrides) to init-dozzle.sh.
-          # PASEO_PASSWORD protects direct (non-relay) connections to init-paseo-codex.sh and init-paseo-lite.sh
-          # (:6767 / :6768) and unlocks paseo-lite's pairing page; relay clients still need the pairing key.
+          # PASEO_PASSWORD protects direct (non-relay) connections to init-paseo-codex.sh and init-feiyi.sh
+          # (:6767 / :6768) and unlocks feiyi's pairing page; relay clients still need the pairing key.
           # WORKFLOW_CRON_ configures init-workflow-cron.sh: the token that dispatches the workflows (GH_TOKEN unless
           # WORKFLOW_CRON_GITHUB_TOKEN is set; needs Actions: write here) and the Telegram alert (TELEGRAM_*). The job list is in the script.
-          # PASEO_APP_BASE_URL (repository variable or secret) makes paseo-lite's pairing link open that web app,
-          # e.g. https://sudtanj.github.io/paseo-lite (the GitHub Pages build in sudtanj/paseo-lite).
-          # PASEO_ZILONG_MCP_URL gives every paseo-lite agent the zilong-router MCP gateway (http://<router>:20128/mcp);
-          # init-paseo-lite.sh sends CODEX_API_KEY as its key.
+          # PASEO_APP_BASE_URL (repository variable or secret) makes feiyi's pairing link open that web app,
+          # e.g. https://sudtanj.github.io/feiyi (the GitHub Pages build in sudtanj/feiyi).
+          # PASEO_ZILONG_MCP_URL gives every feiyi agent the zilong-router MCP gateway (http://<router>:20128/mcp);
+          # init-feiyi.sh sends CODEX_API_KEY as its key.
           SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,PASEO_ZILONG_MCP_URL,WORKFLOW_CRON_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}

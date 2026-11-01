@@ -17,7 +17,7 @@ updates:
       - /builder-tools/proxyrack
       - /builder-tools/proxyrack-bundle
       - /builder-tools/paseo-codex
-      - /builder-tools/paseo-lite
+      - /builder-tools/feiyi
       - /builder-tools/pawns
       - /builder-tools/repocket
       - /builder-tools/tailscale

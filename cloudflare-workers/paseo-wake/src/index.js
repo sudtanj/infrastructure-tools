@@ -1,4 +1,4 @@
-// paseo-wake: a Cloudflare Worker in front of paseo-lite's Instabox public URL.
+// paseo-wake: a Cloudflare Worker in front of feiyi's Instabox public URL.
 //
 // A paused Instabox machine answers its public URL with "Sandbox offline", and
 // nothing on the machine can wake it. This Worker proxies "/" and "/ws" to the

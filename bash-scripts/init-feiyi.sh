@@ -1,8 +1,11 @@
 #!/bin/bash
-# bash-scripts/init-paseo-lite.sh
+# bash-scripts/init-feiyi.sh
 # Runs ON the VM via IAP SSH. Idempotent.
-# Target: GCP free-tier e2-micro (1 GB RAM). One container: paseo-lite
+# Target: GCP free-tier e2-micro (1 GB RAM). One container: feiyi
 # (Rust Paseo daemon + native Claude Code + native Codex, no Node.js).
+# Replaces init-paseo-lite.sh (the daemon was renamed paseo-lite -> feiyi): an
+# existing "paseo-lite" container is stopped and replaced by "feiyi", reusing the
+# same volumes (paseo-lite-home, paseo-workspace), so state, agents and logins carry over.
 # Same secrets as init-paseo-codex.sh: CODEX_*, GH_TOKEN, ANTHROPIC_*, CLAUDE_CODE_*,
 # plus optional GH_USERNAME / GH_EMAIL (global git identity).
 #
@@ -85,7 +88,7 @@ PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
 # The daemon itself needs a few MB; the cap is for the agent CLIs it runs.
-# paseo-lite shares one codex app-server across projects and, with
+# feiyi shares one codex app-server across projects and, with
 # PASEO_CLAUDE_MAX_LIVE=auto, runs as many agents at once as the container's
 # memory and CPU allow (one on a 1 GB VM), adding workers only while the
 # machine stays calm. So the container is sized from the host: everything
@@ -96,7 +99,7 @@ PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
 # Host gets its own disk swapfile below.
 HOST_MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
 HOST_CPUS=$(nproc 2>/dev/null || echo 1)
-# The VM is dedicated to paseo-lite: on a small host (<= 2 GB) the host
+# The VM is dedicated to feiyi: on a small host (<= 2 GB) the host
 # keeps 320 MB (kernel, sshd, tailscale, docker, with headroom so the host
 # never runs out), the container the rest (~647 MB on an e2-micro, two agents
 # with zram swap). HOST_RESERVE_MB overrides.
@@ -170,15 +173,22 @@ fi
 
 # Bump this whenever the docker run flags change (DNS, limits, etc.) so the
 # container is recreated; the hash below only covers values, not the flags.
-CONFIG_REV="7"
+CONFIG_REV="8"   # 8: container renamed paseo-lite -> feiyi
 DNS64_MODE="${DNS64_MODE:-auto}"
 DNS1="${DNS1:-2a00:1098:2b::1}"
 DNS2="${DNS2:-2a01:4f9:c010:3f02::1}"
 
-IMAGE="sudtanj/paseo-lite:latest"
-CONTAINER_NAME="paseo-lite"
+IMAGE="sudtanj/feiyi:latest"
+CONTAINER_NAME="feiyi"
+# Volume names are deliberately unchanged by the rename: they hold the daemon
+# state (~/.paseo-lite), ~/.claude, ~/.codex, git/gh config and the workspace.
 HOME_VOLUME="paseo-lite-home"
 WORKSPACE_VOLUME="paseo-workspace"
+# The container (and image) this script ran before the rename. It is stopped
+# before feiyi starts (same host port), restarted if feiyi fails to come up,
+# and removed once feiyi is running.
+LEGACY_CONTAINER_NAME="paseo-lite"
+LEGACY_IMAGE="sudtanj/paseo-lite:latest"
 
 echo "[*] init start"
 
@@ -365,14 +375,48 @@ EXISTS=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" >/dev/null 2>&1 && echo y
 CUR_SHORT="${CUR_HASH:0:12}"; CUR_SHORT="${CUR_SHORT:-none}"
 dbg "hash: desired=${CONFIG_HASH:0:12} current=${CUR_SHORT} | container exists=${EXISTS} running=${RUNNING}"
 
+# --- Pre-rename container (paseo-lite) ---
+LEGACY_EXISTS=$(docker inspect -f '{{.Id}}' "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1 && echo yes || echo no)
+dbg "legacy container ${LEGACY_CONTAINER_NAME}: exists=${LEGACY_EXISTS}"
+# Stops it gracefully (SIGTERM, 30s: the daemon saves agent state and the running
+# turn) and keeps it, with its restart policy off so a reboot can't start it next
+# to feiyi, until feiyi is up. Its volumes are left alone: feiyi mounts the same ones.
+stop_legacy() {
+  [ "$LEGACY_EXISTS" = "yes" ] || return 0
+  echo "[>] migrating: stopping the old ${LEGACY_CONTAINER_NAME} container (volumes kept for ${CONTAINER_NAME})"
+  docker update --restart=no "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker stop -t 30 "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1 || true
+}
+# Rollback when feiyi does not come up: the old container goes back to how it ran.
+restore_legacy() {
+  [ "$LEGACY_EXISTS" = "yes" ] || return 0
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker update --restart=always "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1 || true
+  if docker start "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1; then
+    echo "[!] rolled back: ${CONTAINER_NAME} did not start, the old ${LEGACY_CONTAINER_NAME} container is running again" >&2
+  else
+    echo "[x] could not restart the old ${LEGACY_CONTAINER_NAME} container either" >&2
+  fi
+}
+# Once feiyi runs: drop the old container and its image (frees disk on the 30 GB VM).
+remove_legacy() {
+  [ "$LEGACY_EXISTS" = "yes" ] || return 0
+  stop_legacy
+  docker rm -f "$LEGACY_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker image rm "$LEGACY_IMAGE" >/dev/null 2>&1 || true
+  echo "[+] removed the old ${LEGACY_CONTAINER_NAME} container"
+}
+
 if [ "$CUR_HASH" = "$CONFIG_HASH" ] && [ "$RUNNING" = "true" ]; then
+  remove_legacy
   echo "[+] unchanged - container left running"
   dbg "container: $(docker inspect -f 'status={{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
   dbg "usage: $(dk stats --no-stream --format 'cpu={{.CPUPerc}} mem={{.MemUsage}} pids={{.PIDs}}' "$CONTAINER_NAME" 2>/dev/null || echo n/a)"
   exit 0
 fi
 
-if [ "$EXISTS" = "no" ]; then REASON="container does not exist"
+if [ "$EXISTS" = "no" ] && [ "$LEGACY_EXISTS" = "yes" ]; then REASON="migrating from the ${LEGACY_CONTAINER_NAME} container"
+elif [ "$EXISTS" = "no" ]; then REASON="container does not exist"
 elif [ "$RUNNING" != "true" ]; then REASON="container is not running (status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo unknown))"
 elif [ "$IMG_NOTE" = "CHANGED" ]; then REASON="new image pulled"
 else REASON="config/secrets/limits/DNS changed"
@@ -384,15 +428,19 @@ dbg "reason: ${REASON}"
 if [ "$EXISTS" = "yes" ]; then
   dbg "old container: $(docker inspect -f 'status={{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}' "$CONTAINER_NAME" 2>/dev/null)"
 fi
-# Graceful stop first: SIGTERM lets paseo-lite save agent state and the running
+# Graceful stop first: SIGTERM lets the daemon save agent state and the running
 # turn so it resumes after the restart (rm -f alone is SIGKILL with no flush).
 T_STOP=$(date +%s)
 docker stop -t 30 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+# The pre-rename container binds the same port and mounts the same volumes:
+# it must be stopped before feiyi starts.
+stop_legacy
 dbg "old container stopped and removed in $(since "$T_STOP")"
 if command -v ss >/dev/null 2>&1 && [ -n "$(ss -Hltn "sport = :${PASEO_PORT}" 2>/dev/null)" ]; then
   echo "[x] port ${PASEO_PORT} is already in use on the host - not starting ${CONTAINER_NAME}" >&2
   dbg "listener on :${PASEO_PORT}: $(ss -Hltnp "sport = :${PASEO_PORT}" 2>/dev/null | head -n 3)"
+  [ "$LEGACY_EXISTS" = "yes" ] && echo "[!] the old ${LEGACY_CONTAINER_NAME} container is stopped but kept; free the port and rerun" >&2
   exit 1
 fi
 dbg "port ${PASEO_PORT} is free"
@@ -475,6 +523,7 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   "$IMAGE" 2>&1); then
   echo "[x] docker run failed:" >&2
   printf '%s\n' "$run_out" | redact >&2
+  restore_legacy
   exit 1
 fi
 CID=$(printf '%s\n' "$run_out" | tail -n 1)
@@ -497,6 +546,7 @@ if [ "$STATE" != "running" ]; then
   echo "[x] container not running (state=${STATE})" >&2
   dbg "state detail: $(docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} error={{.State.Error}}' "$CONTAINER_NAME" 2>/dev/null)"
   docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | redact >&2 || true
+  restore_legacy
   exit 1
 fi
 echo "[+] container running"
@@ -505,7 +555,7 @@ dbg "container: $(docker inspect -f 'pid={{.State.Pid}} restarts={{.RestartCount
 dbg "limits applied: $(docker inspect -f 'nanocpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} memswap={{.HostConfig.MemorySwap}} pids={{.HostConfig.PidsLimit}} net={{.HostConfig.NetworkMode}} dns={{.HostConfig.Dns}}' "$CONTAINER_NAME" 2>/dev/null)"
 
 # --- Seed Codex config + clear stale SQLite state ---
-# paseo-lite starts its shared codex app-server lazily on the first prompt,
+# feiyi starts its shared codex app-server lazily on the first prompt,
 # so writing the config after container start is picked up without a restart.
 # Thread mode (read-only / auto / full-access) chosen in the UI overrides the
 # sandbox/approval defaults below for agent sessions.
@@ -515,7 +565,7 @@ D=/home/paseo/.codex
 mkdir -p "$D"
 rm -rf "$D/state" "$D"/*.sqlite "$D"/*.sqlite-shm "$D"/*.sqlite-wal 2>/dev/null || true
 {
-  echo '# Managed by init-paseo-lite.sh - do not edit manually.'
+  echo '# Managed by init-feiyi.sh - do not edit manually.'
   echo ''
   echo 'sandbox_mode = "danger-full-access"'
   echo 'approval_policy = "never"'
@@ -623,8 +673,23 @@ if [ -n "$CODEX_BASE_URL" ] && command -v curl >/dev/null 2>&1; then
   esac
 fi
 
+# --- Finish the migration: remove the old container only once feiyi has stayed up ---
+if [ "$LEGACY_EXISTS" = "yes" ]; then
+  sleep 5
+  S3=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo missing)
+  R3=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")
+  if [ "$S3" = "running" ] && [ "$R3" = "0" ]; then
+    remove_legacy
+  else
+    echo "[x] ${CONTAINER_NAME} is not stable (status=${S3}, restarts=${R3}); recent logs:" >&2
+    docker logs --tail 40 "$CONTAINER_NAME" 2>&1 | redact | sed 's/^/    | /' >&2 || true
+    restore_legacy
+    exit 1
+  fi
+fi
+
 # The pairing link is a credential for the relay - never print it in CI logs.
-echo "[*] pair a device on the VM: docker exec ${CONTAINER_NAME} paseo-lite pair"
+echo "[*] pair a device on the VM: docker exec ${CONTAINER_NAME} feiyi pair"
 echo "[+] init done"
 dbg "total time: $(since "$T_START")"
 exit 0

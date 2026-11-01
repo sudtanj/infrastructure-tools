@@ -1,6 +1,6 @@
-name: "Deploy paseo-wake (Cloudflare Worker that wakes paseo-lite on Instabox)"
+name: "Deploy paseo-wake (Cloudflare Worker that wakes feiyi on Instabox)"
 
-# Deploys cloudflare-workers/paseo-wake: a Worker in front of paseo-lite's Instabox public URL
+# Deploys cloudflare-workers/paseo-wake: a Worker in front of feiyi's Instabox public URL
 # that wakes the paused machine when someone who knows the Paseo password connects.
 # Point the Paseo app's direct connection (and your browser) at the Worker URL instead of the
 # Instabox URL. Run "Deploy paseo-lite on Instabox" (on-demand) first, so the port is published.

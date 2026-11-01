@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Runs under tini as PID 1. Generates the Codex BYOK config, heals ownership
 # of persisted config dirs, wires up gh as a git credential helper, then
-# drops root -> paseo (uid 1000) and execs the paseo-lite daemon.
+# drops root -> paseo (uid 1000) and execs the feiyi daemon.
 #
 # Claude Code needs no generated config: ANTHROPIC_API_KEY /
 # ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
@@ -65,6 +65,6 @@ if command -v gh >/dev/null 2>&1; then
 fi
 
 if [ "$(id -u)" = "0" ]; then
-    exec su-exec paseo /usr/local/bin/paseo-lite "$@"
+    exec su-exec paseo /usr/local/bin/feiyi "$@"
 fi
-exec /usr/local/bin/paseo-lite "$@"
+exec /usr/local/bin/feiyi "$@"

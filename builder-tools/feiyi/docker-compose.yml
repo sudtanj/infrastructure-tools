@@ -1,10 +1,7 @@
 services:
-  paseo-lite:
-    # Pulls the published image from Docker Hub instead of building locally.
-    # Pin an exact version instead of :latest for reproducible pulls (see
-    # https://hub.docker.com/r/sudtanj/paseo-lite/tags).
-    image: sudtanj/paseo-lite:latest
-    pull_policy: always
+  feiyi:
+    build: .
+    image: feiyi
     restart: unless-stopped
     # Sized for a GCP free-tier e2-micro (1 GB RAM, shared 0.25 vCPU). The
     # daemon itself needs a few MB; the budget is for the agent CLIs it runs.
@@ -31,19 +28,19 @@ services:
     #   - 2606:4700:4700::6400
     volumes:
       # Persistent daemon state and agent credentials/config (~/.claude,
-      # ~/.codex, paseo-lite's own ~/.paseo-lite state incl. pairing key).
+      # ~/.codex, feiyi's own ~/.paseo-lite state incl. pairing key).
       - paseo-home:/home/paseo
-      # Code visible to the Claude Code/Codex sessions paseo-lite launches -
+      # Code visible to the Claude Code/Codex sessions feiyi launches -
       # mounts the current directory (wherever you run `docker compose` from).
       - .:/workspace
     # ALL configuration lives directly in this file - no .env / env_file is
     # used. Uncomment and fill in what you need below, then
-    # `docker compose -f docker-compose.hub.yml up -d` to apply (no image rebuild needed for config).
+    # `docker compose up -d` to apply (no image rebuild needed for config).
     environment:
       # --- Low-resource defaults (free-tier VM) ---
       PASEO_RELAY_ENABLED: "true"           # keep relay on (set false if using Tailscale)
       PASEO_LOG_CONSOLE_LEVEL: warn
-      # Accepted for parity with paseo-codex; paseo-lite logs to stdout only
+      # Accepted for parity with paseo-codex; feiyi logs to stdout only
       # (Docker's json-file rotation below), so these have no effect.
       PASEO_LOG_FILE_LEVEL: info
       PASEO_LOG_FILE_ROTATE_SIZE: 5m
@@ -59,7 +56,7 @@ services:
       PASEO_LISTEN: 0.0.0.0:6768
       # PASEO_HOSTNAMES: paseo.example.com,.lan
 
-      # --- paseo-lite process sharing (optional, defaults shown) ------------
+      # --- feiyi process sharing (optional, defaults shown) ------------
       # Max concurrent claude processes across ALL projects; extra prompts
       # wait for a slot. Idle ones are released after PASEO_CLAUDE_IDLE_SECS.
       # PASEO_CLAUDE_MAX_LIVE: "3"
@@ -70,7 +67,7 @@ services:
 
       # --- Claude Code -----------------------------------------------------
       # Read natively by Claude Code from the environment on every launch -
-      # no config file is generated, and paseo-lite passes them straight
+      # no config file is generated, and feiyi passes them straight
       # through to the sessions it launches (like OPENAI_API_KEY for Codex).
       #
       # AUTH OPTION 1 - subscription (Pro/Max), the default here: leave
@@ -108,3 +105,6 @@ services:
 
 volumes:
   paseo-home:
+    # Pinned to the name compose gave it when this folder was paseo-lite/, so
+    # the rename to feiyi/ keeps the existing state, pairing key and logins.
+    name: paseo-lite_paseo-home

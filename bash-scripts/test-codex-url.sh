@@ -1,14 +1,14 @@
 #!/bin/bash
 # bash-scripts/test-codex-url.sh
 # Runs ON the VM via IAP SSH. Read-only: changes nothing, only tests whether CODEX_BASE_URL works
-# from the VM, step by step, so a failing Codex in paseo-lite shows where it breaks:
+# from the VM, step by step, so a failing Codex in feiyi shows where it breaks:
 #   1. name resolution        (MagicDNS names fail behind DNS64)
 #   2. route                  (via tailscale0? a subnet IP needs an approved + accepted route)
 #   3. tailnet path           (tailscale ping: WireGuard path to the peer, ignores the ACL)
 #   4. TCP connect            (ACL / peer firewall / listen address)
 #   5. GET  <base>/models     (with CODEX_API_KEY; lists whether CODEX_MODEL is served)
 #   6. POST <base>/responses  (a tiny real request with CODEX_MODEL: what Codex actually calls)
-#   7. the same GET from inside the paseo-lite container, when it runs (its DNS can differ)
+#   7. the same GET from inside the feiyi container, when it runs (its DNS can differ)
 #
 # Env: CODEX_BASE_URL (required, else skipped), CODEX_API_KEY, CODEX_MODEL (optional).
 # Secrets are never printed: the key goes to curl on stdin (curl -K -), so it is not in ps
@@ -21,7 +21,7 @@ INIT_DEBUG="${INIT_DEBUG:-1}"
 CODEX_BASE_URL="${CODEX_BASE_URL:-}"
 CODEX_API_KEY="${CODEX_API_KEY:-}"
 CODEX_MODEL="${CODEX_MODEL:-}"
-CONTAINER_NAME="${CONTAINER_NAME:-paseo-lite}"
+CONTAINER_NAME="${CONTAINER_NAME:-feiyi}"
 
 ok()   { echo "[+] $*"; }
 warn() { echo "[!] $*" >&2; }

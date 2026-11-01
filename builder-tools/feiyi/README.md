@@ -1,10 +1,10 @@
-# paseo-lite
+# feiyi
 
 > Part of a multi-image repo - see the [root README](../README.md) for how
 > the generic per-folder build workflow works. Everything below is scoped
-> to this folder; run these commands from inside it (`cd paseo-lite` first).
+> to this folder; run these commands from inside it (`cd feiyi` first).
 
-[**paseo-lite**](https://github.com/sudtanj/paseo-code-rust) - a Rust rewrite
+[**feiyi**](https://github.com/sudtanj/feiyi) - a Rust rewrite
 of the [Paseo](https://github.com/getpaseo/paseo) daemon for low-spec hosts -
 with the **native** [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 and the **native** [Codex CLI](https://github.com/openai/codex), on Alpine.
@@ -14,7 +14,7 @@ changing the image name.
 
 ## Why use this instead of `paseo-codex`
 
-| | paseo-codex | paseo-lite |
+| | paseo-codex | feiyi |
 |---|---|---|
 | Base | `ghcr.io/getpaseo/paseo` (Debian + Node.js) | `alpine` |
 | Daemon | Node.js Paseo daemon | ~1-2 MB static Rust binary, one thread |
@@ -22,7 +22,7 @@ changing the image name.
 | Codex processes | one `codex app-server` per agent | **one shared** app-server for every project; exits when idle |
 | Claude processes | one per agent, alive for the agent's life | started per prompt, kept warm 90 s, then released; max 3 at once (`PASEO_CLAUDE_MAX_LIVE`) |
 | Relay / pairing | Paseo relay | same Paseo relay (`relay.paseo.sh`), same E2EE pairing link/QR |
-| UI | full Paseo web UI | password-protected pairing page (QR only) at `:6768`; official Paseo apps via relay for the core agent flow (best-effort, see the [paseo-lite README](https://github.com/sudtanj/paseo-code-rust#protocol-compatibility)) |
+| UI | full Paseo web UI | password-protected pairing page (QR only) at `:6768`; official Paseo apps via relay for the core agent flow (best-effort, see the [feiyi README](https://github.com/sudtanj/feiyi#protocol-compatibility)) |
 
 Idle cost is the daemon alone: no agent process runs until you send a
 prompt, and adding projects costs nothing until an agent runs a turn.
@@ -31,7 +31,7 @@ prompt, and adding projects costs nothing until an agent runs a turn.
 
 - **`docker-compose.yml`** - builds the image locally from the `Dockerfile`.
 - **`docker-compose.hub.yml`** - pulls (published for `linux/amd64` only, see `.platforms`)
-  [`sudtanj/paseo-lite`](https://hub.docker.com/r/sudtanj/paseo-lite) instead.
+  [`sudtanj/feiyi`](https://hub.docker.com/r/sudtanj/feiyi) instead.
 
 **All configuration lives directly in the compose YAML** (`environment:`
 block). No `.env` / `env_file:` is used; `.env.example` only documents the
@@ -43,19 +43,19 @@ same variables.
 docker compose up -d                              # build locally
 docker compose -f docker-compose.hub.yml up -d    # or pull the published image
 
-docker compose logs paseo-lite                    # pairing QR + link (relay)
+docker compose logs feiyi                    # pairing QR + link (relay)
 ```
 
 A password-protected pairing page (QR code only, needs `PASEO_PASSWORD`) is
 at `http://<host>:6768`. The current directory is mounted
-at `/workspace` for agents to work in. `/home/paseo` (paseo-lite state and
+at `/workspace` for agents to work in. `/home/paseo` (feiyi state and
 pairing key, `~/.claude`, `~/.codex`) persists in the `paseo-home` volume.
 
 To pair a phone or app.paseo.sh, scan the QR / open the link printed in the
 logs on first start. Print it again with:
 
 ```bash
-docker compose exec -u paseo paseo-lite paseo-lite pair
+docker compose exec -u paseo feiyi feiyi pair
 ```
 
 ## Environment variables
@@ -77,22 +77,22 @@ Identical to `paseo-codex`:
 | `GH_TOKEN` / `GITHUB_TOKEN` | `gh` + git credential helper for private repos |
 | `GH_USERNAME`, `GH_EMAIL` | global git identity (`user.name` / `user.email`) set at every start so agent commits are attributed to you; the email defaults to `<username>@users.noreply.github.com`. `gh` is also set to `git_protocol=https` with prompts disabled |
 
-paseo-lite extras (optional): `PASEO_CLAUDE_MAX_LIVE` (3),
+feiyi extras (optional): `PASEO_CLAUDE_MAX_LIVE` (3),
 `PASEO_CLAUDE_IDLE_SECS` (90), `PASEO_CODEX_IDLE_SECS` (300),
 `PASEO_RELAY_ENDPOINT` (`relay.paseo.sh:443`).
 
 Interactive logins run as the `paseo` user:
 
 ```bash
-docker compose exec -u paseo paseo-lite claude      # then /login
-docker compose exec -u paseo paseo-lite codex login
+docker compose exec -u paseo feiyi claude      # then /login
+docker compose exec -u paseo feiyi codex login
 ```
 
 ## Build args
 
 | Arg | Default | |
 |---|---|---|
-| `PASEO_LITE_REF` | `main` | git ref of `sudtanj/paseo-code-rust` to build |
+| `FEIYI_RELEASE` | `latest` | release tag of `sudtanj/feiyi` whose prebuilt `feiyi-x86_64-linux-musl` is installed (`latest` = rolling build of main) |
 | `CLAUDE_CODE_VERSION` | `latest` | `stable`, `latest` or exact version (official installer) |
 | `CODEX_VERSION` | `latest` | `latest` or exact release (`0.46.0` -> `rust-v0.46.0`) |
 | `GH_VERSION` | `2.63.2` | GitHub CLI release |

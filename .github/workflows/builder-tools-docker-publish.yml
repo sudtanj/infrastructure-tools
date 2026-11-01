@@ -35,7 +35,7 @@ name: Builder Tools - Build and push Docker images
 #
 # Per-folder override: put a `.platforms` file in the folder (for example
 # `linux/amd64`) to build a different platform list; QEMU is skipped when
-# no emulated platform is requested. paseo-lite/ uses this (amd64 only).
+# no emulated platform is requested. feiyi/ uses this (amd64 only).
 on:
   push:
     branches:

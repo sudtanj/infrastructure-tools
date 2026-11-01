@@ -638,7 +638,7 @@ fi
 # peer's firewall drops everything, so it is only used to tell those two failures apart.
 # Peers named in TS_PING_PEER must answer (failure fails the run), and so must CODEX_BASE_URL when
 # set (the runner forwards the CODEX_ secrets to every script): its /models has to give an HTTP
-# answer, so Codex in paseo-lite can reach its endpoint. With neither, up to 3 online peers are
+# answer, so Codex in feiyi can reach its endpoint. With neither, up to 3 online peers are
 # picked from `tailscale status` and a failure is only a warning.
 PING_STATE="no peers checked"
 PEER_STRICT=1
