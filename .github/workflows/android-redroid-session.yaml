@@ -167,11 +167,16 @@ jobs:
           path: /home/runner/scrcpy
           key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm
 
+      # A failed build costs only the VNC screen, not the session; nothing
+      # half-built is left to be cached.
       - name: Build scrcpy
         if: steps.scrcpy-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          sudo apt-get install -y -qq meson ninja-build cmake pkg-config libx11-dev libxext-dev \
+          trap 'rm -rf /home/runner/scrcpy' ERR
+          sudo apt-get install -y -qq meson ninja-build cmake pkg-config libx11-dev libxext-dev libxcursor-dev libxi-dev \
+            libxrandr-dev libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev libegl-dev libgles-dev libudev-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswresample-dev >/dev/null
           cd "$RUNNER_TEMP"
           git clone -q --depth 1 -b "$SDL_VERSION" https://github.com/libsdl-org/SDL.git sdl
