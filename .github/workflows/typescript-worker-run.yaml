@@ -228,6 +228,11 @@ on:
         required: false
         default: ""
         type: string
+      upwork_live:
+        description: "upwork_bid really submits proposals (otherwise dry run)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -1085,6 +1090,11 @@ jobs:
           CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
           CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
           CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+          # upwork_bid scores jobs and drafts letters through zilong-router's /v1 (CODEX_ is its fallback).
+          ZILONG_ROUTER_API_KEY: ${{ secrets.ZILONG_ROUTER_API_KEY }}
+          ZILONG_ROUTER_BASE_URL: ${{ secrets.ZILONG_ROUTER_BASE_URL }}
+          ZILONG_ROUTER_MODEL: ${{ secrets.ZILONG_ROUTER_MODEL }}
+          UPWORK_BID_DRY_RUN: ${{ inputs.upwork_live && '0' || '' }}
           # steam_gifts signs in with the site's cookie string.
           STEAMGIFTS_COOKIE: ${{ secrets.STEAMGIFTS_COOKIE }}
           # gcp_billing sends its summary to Telegram.
