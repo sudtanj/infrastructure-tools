@@ -266,6 +266,17 @@ jobs:
               >>/tmp/scrcpy.log 2>&1
             sleep 3
           done' >/dev/null 2>&1 &
+          # Its server runs on the device as app_process; without it VNC is blank.
+          for _ in $(seq 1 12); do
+            sleep 5
+            if adb -s 127.0.0.1:5555 shell ps -A -o ARGS 2>/dev/null | grep -q scrcpy; then
+              scrcpy --version 2>/dev/null | head -1
+              exit 0
+            fi
+          done
+          echo "::warning title=No screen over VNC::scrcpy is not mirroring; adb still works (run scrcpy locally against android-redroid:5555)."
+          scrcpy --version 2>&1 | head -1 || true
+          tail -n 30 /tmp/scrcpy.log || true
 
       - name: Session
         env:
