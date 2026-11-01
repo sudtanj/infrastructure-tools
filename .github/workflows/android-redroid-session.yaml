@@ -181,7 +181,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/scrcpy
-          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-5
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-6
 
       # A failed build costs only the VNC screen, not the session; nothing
       # half-built is left to be cached.
@@ -225,15 +225,22 @@ jobs:
           server=/home/runner/scrcpy/share/scrcpy/scrcpy-server
           unzip -p "$server" classes.dex > classes.dex
           java -jar baksmali.jar d classes.dex -o server-smali
-          python3 - server-smali/com/genymobile/scrcpy/wrappers/DisplayManager.smali <<'PY'
+          python3 - server-smali/com/genymobile/scrcpy <<'PY'
           import sys, pathlib
-          p = pathlib.Path(sys.argv[1])
-          s = p.read_text()
-          sig = ".method public createVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;"
-          i = s.index(sig)
-          j = s.index(".end method", i)
+          def patch(path, sig, body):
+              p = pathlib.Path(sys.argv[1], path)
+              s = p.read_text()
+              i = s.index(sig)
+              j = s.index(".end method", i)
+              p.write_text(s[:i] + sig + body + s[j:])
+          # Stay root (scrcpy drops to shell, which may not create SECURE).
+          # ponytail: root breaks clipboard sync; fine for logins.
+          patch("Server.smali", ".method private static dropRootPrivileges()V", """
+              .locals 0
+              return-void
+          """)
           # -> createNewVirtualDisplay(name, w, h, dpi=320, surface, flags=0x14)
-          p.write_text(s[:i] + sig + """
+          patch("wrappers/DisplayManager.smali", ".method public createVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;", """
               .locals 7
               move-object v0, p0
               move-object v1, p1
@@ -245,7 +252,7 @@ jobs:
               invoke-virtual/range {v0 .. v6}, Lcom/genymobile/scrcpy/wrappers/DisplayManager;->createNewVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;I)Landroid/hardware/display/VirtualDisplay;
               move-result-object v0
               return-object v0
-          """ + s[j:])
+          """)
           PY
           java -jar smali.jar a -a 29 server-smali -o classes.dex
           # zip would write to "$server.zip" (no extension), so via a .jar copy.
