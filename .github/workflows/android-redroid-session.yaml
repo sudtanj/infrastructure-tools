@@ -70,6 +70,10 @@ env:
   SCRCPY_VERSION: v5.0.1
   SCRCPY_SERVER_SHA256: 764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536
   SDL_VERSION: release-3.4.18
+  # To patch scrcpy's server (see Build scrcpy).
+  SMALI_VERSION: 2.5.2
+  BAKSMALI_SHA256: d3116248cce4f82ec5a31eb7f95ee75daff42ddf6eed0ab573973dc53fbad2e5
+  SMALI_SHA256: 9544299578b16f771d8aa8eaefe0d3718ca03478c16f3c356f2fcf1366bfb116
   DATA_DIR: /var/lib/redroid-data
 
 jobs:
@@ -177,7 +181,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/scrcpy
-          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-2
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-3
 
       # A failed build costs only the VNC screen, not the session; nothing
       # half-built is left to be cached.
@@ -206,6 +210,47 @@ jobs:
             -Dv4l2=false -Dusb=false -Dvaapi=false >/dev/null
           ninja -C build install >/dev/null
           test -f /home/runner/scrcpy/share/scrcpy/scrcpy-server
+          # Login screens (Lazada's) set FLAG_SECURE, which blacks them out in
+          # a plain mirror. A secure mirror display shows them, but only the
+          # system user may create one (scrcpy runs its server as that user,
+          # see Start virtual display), and only through SurfaceControl. So the
+          # server is patched to skip DisplayManager's (non-secure) mirror and
+          # ask SurfaceControl for a secure display.
+          java -version >/dev/null 2>&1 || sudo apt-get install -y -qq openjdk-17-jre-headless >/dev/null
+          cd "$RUNNER_TEMP"
+          for t in baksmali smali; do
+            curl -fsSL -o "$t.jar" "https://bitbucket.org/JesusFreke/smali/downloads/$t-$SMALI_VERSION.jar"
+          done
+          printf '%s  baksmali.jar\n%s  smali.jar\n' "$BAKSMALI_SHA256" "$SMALI_SHA256" | sha256sum -c --quiet
+          server=/home/runner/scrcpy/share/scrcpy/scrcpy-server
+          unzip -p "$server" classes.dex > classes.dex
+          java -jar baksmali.jar d classes.dex -o server-smali
+          python3 - server-smali/com/genymobile/scrcpy <<'PY'
+          import sys, pathlib
+          root = pathlib.Path(sys.argv[1])
+          def replace_body(path, signature, body):
+              p = root / path
+              s = p.read_text()
+              i = s.index(signature)
+              j = s.index(".end method", i)
+              p.write_text(s[:i] + signature + "\n" + body + "\n" + s[j:])
+          replace_body("video/ScreenCapture.smali",
+              ".method private static createDisplay()Landroid/os/IBinder;",
+              """    .locals 2
+              const-string v0, "scrcpy"
+              const/4 v1, 0x1
+              invoke-static {v0, v1}, Lcom/genymobile/scrcpy/wrappers/SurfaceControl;->createDisplay(Ljava/lang/String;Z)Landroid/os/IBinder;
+              move-result-object v0
+              return-object v0""")
+          replace_body("wrappers/DisplayManager.smali",
+              ".method public createVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;",
+              """    .locals 1
+              new-instance v0, Ljava/lang/Exception;
+              invoke-direct {v0}, Ljava/lang/Exception;-><init>()V
+              throw v0""")
+          PY
+          java -jar smali.jar a -a 29 server-smali -o classes.dex
+          zip -q -j "$server" classes.dex
           LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy --version | head -1
 
       - name: Join the tailnet
@@ -322,9 +367,21 @@ jobs:
           x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -wait 10 -defer 10 -bg -quiet -o /tmp/x11vnc.log >/dev/null
           # scrcpy mirrors the screen into the display and forwards clicks and
           # keys; restarted if it exits (e.g. Android restarts its UI).
-          # No audio: nothing would play it.
+          # No audio: nothing would play it. Its server runs as the system
+          # user (through this adb wrapper), which may mirror secure windows.
+          cat > /tmp/adb-system <<'EOF'
+          #!/bin/bash
+          args=("$@")
+          for i in "${!args[@]}"; do
+            if [ "${args[$i]}" = shell ] && [[ "${args[$((i + 1))]:-}" == CLASSPATH=* ]]; then
+              exec adb "${args[@]:0:$i}" shell "su 1000 sh -c '${args[*]:$((i + 1))}'"
+            fi
+          done
+          exec adb "$@"
+          EOF
+          chmod +x /tmp/adb-system
           setsid nohup bash -c 'while true; do
-            DISPLAY=:99 LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy -s 127.0.0.1:5555 \
+            DISPLAY=:99 ADB=/tmp/adb-system LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy -s 127.0.0.1:5555 \
               --no-audio --max-fps 30 --render-driver=software --window-borderless \
               --window-x 0 --window-y 0 --window-width 720 --window-height 1280 \
               >>/tmp/scrcpy.log 2>&1
