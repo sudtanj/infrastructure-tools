@@ -124,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$STATE_TAG" -R "$PRIVATE_REPO" >/dev/null 2>&1; then
-            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Android Redroid state" \
+            gh release create "$STATE_TAG" -R "$PRIVATE_REPO" --title "Android Redroid state" --latest=false \
               --notes "Encrypted /data saved by infrastructure-tools android-redroid-session." >/dev/null
           fi
           # Not `|| true`: a failed listing must stop the run, or a clean
