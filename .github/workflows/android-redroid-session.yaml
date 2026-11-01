@@ -166,7 +166,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/scrcpy
-          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-2
 
       # A failed build costs only the VNC screen, not the session; nothing
       # half-built is left to be cached.
@@ -188,11 +188,13 @@ jobs:
           cd scrcpy
           curl -fsSL -o scrcpy-server "https://github.com/Genymobile/scrcpy/releases/download/$SCRCPY_VERSION/scrcpy-server-$SCRCPY_VERSION"
           echo "$SCRCPY_SERVER_SHA256  scrcpy-server" | sha256sum -c --quiet
-          # Only the mirror: no camera (v4l2), USB, VA-API or server build.
+          # Only the mirror: no camera (v4l2), USB or VA-API. The server is the
+          # prebuilt one (compile_server=false would leave it out entirely).
           PKG_CONFIG_PATH=/home/runner/scrcpy/lib/pkgconfig meson setup build --buildtype=release --strip \
-            --prefix=/home/runner/scrcpy -Dprebuilt_server=scrcpy-server -Dcompile_server=false \
+            --prefix=/home/runner/scrcpy -Dprebuilt_server=scrcpy-server \
             -Dv4l2=false -Dusb=false -Dvaapi=false >/dev/null
           ninja -C build install >/dev/null
+          test -f /home/runner/scrcpy/share/scrcpy/scrcpy-server
           LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy --version | head -1
 
       - name: Join the tailnet
