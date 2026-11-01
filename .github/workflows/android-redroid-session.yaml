@@ -57,9 +57,14 @@ concurrency:
 env:
   STATE_TAG: android-redroid-state
   # 64-bit only: the runner's Arm CPUs may not run 32-bit Arm code, and a
-  # 32-bit zygote would then crash-loop. Pinned to a major version: a new one
-  # may not boot on the saved /data.
-  REDROID_IMAGE: redroid/redroid:14.0.0_64only-latest
+  # 32-bit zygote would then crash-loop. Pinned to a major version: moving up
+  # upgrades the saved /data like an OTA; moving down can't (use `fresh`).
+  REDROID_IMAGE: redroid/redroid:16.0.0_64only-latest
+  # Ubuntu's scrcpy is 1.25 (2022) and there is no Linux arm64 release build,
+  # so the client is built once (with SDL3, which Ubuntu 24.04 lacks) and cached.
+  SCRCPY_VERSION: v5.0.1
+  SCRCPY_SERVER_SHA256: 764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536
+  SDL_VERSION: release-3.4.18
   DATA_DIR: /var/lib/redroid-data
 
 jobs:
@@ -151,7 +156,38 @@ jobs:
           set -euo pipefail
           docker pull -q "$REDROID_IMAGE" >/dev/null
           sudo apt-get update -qq >/dev/null
-          sudo apt-get install -y -qq adb scrcpy xvfb x11vnc >/dev/null
+          # scrcpy's runtime libraries; the -dev ones only to build it.
+          sudo apt-get install -y -qq adb xvfb x11vnc \
+            libavformat60 libavcodec60 libavutil58 libswresample4 >/dev/null
+
+      - name: Cache scrcpy
+        id: scrcpy-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/scrcpy
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm
+
+      - name: Build scrcpy
+        if: steps.scrcpy-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq meson ninja-build cmake pkg-config libx11-dev libxext-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev >/dev/null
+          cd "$RUNNER_TEMP"
+          git clone -q --depth 1 -b "$SDL_VERSION" https://github.com/libsdl-org/SDL.git sdl
+          cmake -S sdl -B sdl/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/home/runner/scrcpy \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_WAYLAND=OFF >/dev/null
+          ninja -C sdl/build install >/dev/null
+          git clone -q --depth 1 -b "$SCRCPY_VERSION" https://github.com/Genymobile/scrcpy.git scrcpy
+          cd scrcpy
+          curl -fsSL -o scrcpy-server "https://github.com/Genymobile/scrcpy/releases/download/$SCRCPY_VERSION/scrcpy-server-$SCRCPY_VERSION"
+          echo "$SCRCPY_SERVER_SHA256  scrcpy-server" | sha256sum -c --quiet
+          # Only the mirror: no camera (v4l2), USB, VA-API or server build.
+          PKG_CONFIG_PATH=/home/runner/scrcpy/lib/pkgconfig meson setup build --buildtype=release --strip \
+            --prefix=/home/runner/scrcpy -Dprebuilt_server=scrcpy-server -Dcompile_server=false \
+            -Dv4l2=false -Dusb=false -Dvaapi=false >/dev/null
+          ninja -C build install >/dev/null
+          LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy --version | head -1
 
       - name: Join the tailnet
         env:
@@ -239,6 +275,11 @@ jobs:
             adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
             if [ "$(adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
               echo "Booted: Android $(adb -s 127.0.0.1:5555 shell getprop ro.build.version.release | tr -d '\r'), $(adb -s 127.0.0.1:5555 shell getprop ro.product.cpu.abilist | tr -d '\r')"
+              # No window animations: fewer frames to draw in software and to
+              # send over VNC, and the screen settles sooner after each tap.
+              for s in window_animation_scale transition_animation_scale animator_duration_scale; do
+                adb -s 127.0.0.1:5555 shell settings put global "$s" 0
+              done
               exit 0
             fi
             if [ "$(docker inspect -f '{{.State.Running}}' redroid)" != true ]; then break; fi
@@ -253,7 +294,8 @@ jobs:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -euo pipefail
-          setsid nohup Xvfb :99 -screen 0 720x1280x24 >/dev/null 2>&1 &
+          # 16-bit colour: half the pixels for x11vnc to compare and send.
+          setsid nohup Xvfb :99 -screen 0 720x1280x16 >/dev/null 2>&1 &
           sleep 2
           mkdir -p ~/.vnc
           x11vnc -storepasswd "$VNC_PASSWORD" ~/.vnc/passwd >/dev/null
@@ -261,9 +303,11 @@ jobs:
           x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -wait 10 -defer 10 -bg -quiet -o /tmp/x11vnc.log >/dev/null
           # scrcpy mirrors the screen into the display and forwards clicks and
           # keys; restarted if it exits (e.g. Android restarts its UI).
+          # No audio: nothing would play it.
           setsid nohup bash -c 'while true; do
-            DISPLAY=:99 scrcpy -s 127.0.0.1:5555 --render-driver=software --window-borderless \
-              --window-x 0 --window-y 0 --window-width 720 --window-height 1280 --max-fps 30 \
+            DISPLAY=:99 LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy -s 127.0.0.1:5555 \
+              --no-audio --max-fps 30 --render-driver=software --window-borderless \
+              --window-x 0 --window-y 0 --window-width 720 --window-height 1280 \
               >>/tmp/scrcpy.log 2>&1
             sleep 3
           done' >/dev/null 2>&1 &
@@ -271,12 +315,11 @@ jobs:
           for _ in $(seq 1 12); do
             sleep 5
             if adb -s 127.0.0.1:5555 shell ps -A -o ARGS 2>/dev/null | grep -q scrcpy; then
-              scrcpy --version 2>/dev/null | head -1
               exit 0
             fi
           done
           echo "::warning title=No screen over VNC::scrcpy is not mirroring; adb still works (run scrcpy locally against android-redroid:5555)."
-          scrcpy --version 2>&1 | head -1 || true
+          LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy --version 2>&1 | head -1 || true
           tail -n 30 /tmp/scrcpy.log || true
 
       - name: Session
