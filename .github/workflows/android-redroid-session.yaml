@@ -181,7 +181,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/scrcpy
-          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-4
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-5
 
       # A failed build costs only the VNC screen, not the session; nothing
       # half-built is left to be cached.
@@ -211,11 +211,11 @@ jobs:
           ninja -C build install >/dev/null
           test -f /home/runner/scrcpy/share/scrcpy/scrcpy-server
           # Login screens (Lazada's) set FLAG_SECURE, which blacks them out in
-          # a plain mirror. A secure mirror display shows them, but only the
-          # system user may create one (scrcpy runs its server as that user,
-          # see Start virtual display), and only through SurfaceControl. So the
-          # server is patched to skip DisplayManager's (non-secure) mirror and
-          # ask SurfaceControl for a secure display.
+          # a plain mirror. A mirror display flagged SECURE shows them; Android
+          # 14 ignores "secure" in SurfaceControl.createDisplay, so the server
+          # is patched to build its mirror through DisplayManager with
+          # AUTO_MIRROR|SECURE (0x14). Only root/system may set SECURE, so the
+          # server runs as root (see Start virtual display).
           java -version >/dev/null 2>&1 || sudo apt-get install -y -qq openjdk-17-jre-headless >/dev/null
           cd "$RUNNER_TEMP"
           for t in baksmali smali; do
@@ -225,29 +225,27 @@ jobs:
           server=/home/runner/scrcpy/share/scrcpy/scrcpy-server
           unzip -p "$server" classes.dex > classes.dex
           java -jar baksmali.jar d classes.dex -o server-smali
-          python3 - server-smali/com/genymobile/scrcpy <<'PY'
+          python3 - server-smali/com/genymobile/scrcpy/wrappers/DisplayManager.smali <<'PY'
           import sys, pathlib
-          root = pathlib.Path(sys.argv[1])
-          def replace_body(path, signature, body):
-              p = root / path
-              s = p.read_text()
-              i = s.index(signature)
-              j = s.index(".end method", i)
-              p.write_text(s[:i] + signature + "\n" + body + "\n" + s[j:])
-          replace_body("video/ScreenCapture.smali",
-              ".method private static createDisplay()Landroid/os/IBinder;",
-              """    .locals 2
-              const-string v0, "scrcpy"
-              const/4 v1, 0x1
-              invoke-static {v0, v1}, Lcom/genymobile/scrcpy/wrappers/SurfaceControl;->createDisplay(Ljava/lang/String;Z)Landroid/os/IBinder;
+          p = pathlib.Path(sys.argv[1])
+          s = p.read_text()
+          sig = ".method public createVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;"
+          i = s.index(sig)
+          j = s.index(".end method", i)
+          # -> createNewVirtualDisplay(name, w, h, dpi=320, surface, flags=0x14)
+          p.write_text(s[:i] + sig + """
+              .locals 7
+              move-object v0, p0
+              move-object v1, p1
+              move v2, p2
+              move v3, p3
+              const/16 v4, 0x140
+              move-object v5, p5
+              const/16 v6, 0x14
+              invoke-virtual/range {v0 .. v6}, Lcom/genymobile/scrcpy/wrappers/DisplayManager;->createNewVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;I)Landroid/hardware/display/VirtualDisplay;
               move-result-object v0
-              return-object v0""")
-          replace_body("wrappers/DisplayManager.smali",
-              ".method public createVirtualDisplay(Ljava/lang/String;IIILandroid/view/Surface;)Landroid/hardware/display/VirtualDisplay;",
-              """    .locals 1
-              new-instance v0, Ljava/lang/Exception;
-              invoke-direct {v0}, Ljava/lang/Exception;-><init>()V
-              throw v0""")
+              return-object v0
+          """ + s[j:])
           PY
           java -jar smali.jar a -a 29 server-smali -o classes.dex
           # zip would write to "$server.zip" (no extension), so via a .jar copy.
@@ -369,14 +367,14 @@ jobs:
           x11vnc -display :99 -localhost -rfbauth ~/.vnc/passwd -forever -shared -wait 10 -defer 10 -bg -quiet -o /tmp/x11vnc.log >/dev/null
           # scrcpy mirrors the screen into the display and forwards clicks and
           # keys; restarted if it exits (e.g. Android restarts its UI).
-          # No audio: nothing would play it. Its server runs as the system
-          # user (through this adb wrapper), which may mirror secure windows.
+          # No audio: nothing would play it. Its server runs as root
+          # (through this adb wrapper), so it may create a secure mirror.
           cat > /tmp/adb-system <<'EOF'
           #!/bin/bash
           args=("$@")
           for i in "${!args[@]}"; do
             if [ "${args[$i]}" = shell ] && [[ "${args[$((i + 1))]:-}" == CLASSPATH=* ]]; then
-              exec adb "${args[@]:0:$i}" shell "su 1000 sh -c '${args[*]:$((i + 1))}'"
+              exec adb "${args[@]:0:$i}" shell "su 0 sh -c '${args[*]:$((i + 1))}'"
             fi
           done
           exec adb "$@"
