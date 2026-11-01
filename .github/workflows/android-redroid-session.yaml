@@ -198,9 +198,17 @@ jobs:
           # Containers are forwarded, not local, traffic; check they leave
           # through the exit node too, before Android starts.
           host="$(curl -fsS --max-time 10 https://api.ipify.org)"
-          box="$(docker run --rm curlimages/curl:latest -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
           echo "::add-mask::${host}"
+          docker pull -q curlimages/curl:latest >/dev/null
+          # By IP too, to tell a DNS failure from a routing one.
+          box="$(docker run --rm curlimages/curl:latest -fsS --max-time 15 https://api.ipify.org 2>/tmp/box.err || true)"
           [ -z "$box" ] || echo "::add-mask::${box}"
+          if [ -z "$box" ]; then
+            echo "::error title=No internet in containers::$(tail -c 300 /tmp/box.err)"
+            docker run --rm curlimages/curl:latest -sS -o /dev/null -w 'by IP: HTTP %{http_code}\n' --max-time 15 https://1.1.1.1 || true
+            ip rule; ip route show table 52 | head -5; sudo iptables -t nat -S POSTROUTING
+            exit 1
+          fi
           if [ "$box" != "$host" ]; then
             echo "::error title=Exit node not used by containers::A container's egress IP differs from the host's."
             exit 1
