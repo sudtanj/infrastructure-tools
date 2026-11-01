@@ -181,7 +181,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/scrcpy
-          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-3
+          key: scrcpy-${{ env.SCRCPY_VERSION }}-${{ env.SDL_VERSION }}-ubuntu-24.04-arm-4
 
       # A failed build costs only the VNC screen, not the session; nothing
       # half-built is left to be cached.
@@ -250,7 +250,9 @@ jobs:
               throw v0""")
           PY
           java -jar smali.jar a -a 29 server-smali -o classes.dex
-          zip -q -j "$server" classes.dex
+          # zip would write to "$server.zip" (no extension), so via a .jar copy.
+          cp "$server" server.jar && zip -q -j server.jar classes.dex && mv server.jar "$server"
+          if sha256sum "$server" | grep -q "^$SCRCPY_SERVER_SHA256"; then exit 1; fi
           LD_LIBRARY_PATH=/home/runner/scrcpy/lib /home/runner/scrcpy/bin/scrcpy --version | head -1
 
       - name: Join the tailnet
