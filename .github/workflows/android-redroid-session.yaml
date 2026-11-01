@@ -193,6 +193,11 @@ jobs:
           TAILSCALE_EXIT_NODE: ${{ secrets.TAILSCALE_EXIT_NODE }}
         run: |
           set -euo pipefail
+          # Tailscale's rule 5270 sends everything to the exit node, replies
+          # to containers included, which then never arrive. Docker's subnet
+          # keeps the main table, ahead of it.
+          subnet="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}')"
+          sudo ip rule add to "$subnet" lookup main priority 5200
           bash .github/scripts/android-emulator-exit-node.sh
           if [ "$USE_EXIT_NODE" != true ]; then exit 0; fi
           # Containers are forwarded, not local, traffic; check they leave
