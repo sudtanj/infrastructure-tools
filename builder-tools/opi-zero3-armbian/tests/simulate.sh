@@ -145,6 +145,18 @@ SSH_OPTS=(-p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 vm()      { ssh "${SSH_OPTS[@]}" -o BatchMode=yes -i "${WORK}/id_ed25519" "${USER_NAME}@127.0.0.1" "$@"; }
 vm_sudo() { printf '%s\n' "$PASSWORD" | vm "sudo -S -p '' $*"; }
 
+# SSH is restarted during first boot (host keys, provisioning), which kills a single
+# `systemctl is-system-running --wait`: ask again until systemd says it is done
+settle_vm() {  # timeout seconds
+  local start=$SECONDS state
+  while [ $((SECONDS - start)) -lt "$1" ]; do
+    state="$(vm "systemctl is-system-running" 2>/dev/null || true)"
+    case "$state" in running|degraded) return 0 ;; esac
+    sleep 5
+  done
+  echo "# system did not settle within $1 s (state: ${state:-unreachable})"
+}
+
 boot_vm() {  # name
   local cpu=(-cpu cortex-a53) accel=(-accel "tcg,thread=multi")
   [ "$ACCEL" = kvm ] && { cpu=(-cpu host); accel=(-accel kvm); }
@@ -163,7 +175,7 @@ boot_vm() {  # name
   done
   ok "boot ($1): SSH up after $((SECONDS - start)) s"
   # Let first-boot units settle (running or degraded both end the wait)
-  vm "timeout 900 systemctl is-system-running --wait" || true
+  settle_vm 900
 }
 
 reboot_vm() {  # name
@@ -176,7 +188,7 @@ reboot_vm() {  # name
     sleep 10
   done
   ok "reboot ($1): SSH back after $((SECONDS - start)) s"
-  vm "timeout 600 systemctl is-system-running --wait" || true
+  settle_vm 600
 }
 
 # Measurements for metrics.json (SIM_METRICS_FILE): key=value lines go there, the rest to the log
