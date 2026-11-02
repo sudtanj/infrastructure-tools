@@ -242,10 +242,10 @@ uwe5622_rounds() {
   taint0="$(vm "cat /proc/sys/kernel/tainted")"
   for i in $(seq 1 "$rounds"); do
     # sprdbt_tty is blacklisted with "install ... /bin/true"; --ignore-install loads it anyway
-    timeout 300 vm_sudo "sh -c 'modprobe sprdwl_ng; modprobe --ignore-install sprdbt_tty'" \
+    vm_sudo "timeout 300 sh -c 'modprobe sprdwl_ng; modprobe --ignore-install sprdbt_tty'" \
       >> "${WORK}/uwe5622-rounds.log" 2>&1 || echo "# round ${i}: load returned an error" >> "${WORK}/uwe5622-rounds.log"
     [ "$(vm "lsmod" | grep -cE "^(${mods}) ")" -eq 3 ] && loaded=$((loaded + 1))
-    timeout 300 vm_sudo "sh -c 'rmmod sprdbt_tty; rmmod sprdwl_ng; rmmod uwe5622_bsp_sdio'" \
+    vm_sudo "timeout 300 sh -c 'rmmod sprdbt_tty; rmmod sprdwl_ng; rmmod uwe5622_bsp_sdio'" \
       >> "${WORK}/uwe5622-rounds.log" 2>&1 || echo "# round ${i}: unload returned an error" >> "${WORK}/uwe5622-rounds.log"
     [ "$(vm "lsmod" | grep -cE "^(${mods}) ")" -eq 0 ] && unloaded=$((unloaded + 1))
   done
