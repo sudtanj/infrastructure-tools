@@ -1,0 +1,3 @@
+# The build fetches dengai's source itself (see the Dockerfile).
+*
+!Dockerfile

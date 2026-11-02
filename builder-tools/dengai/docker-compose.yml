@@ -1,0 +1,28 @@
+# Build from source (the Dockerfile clones dengai): docker compose up -d --build
+# API: http://127.0.0.1:8737 (Authorization: Bearer $DENGAI_API_TOKEN)
+services:
+  dengai:
+    build: .
+    image: dengai:local
+    container_name: dengai
+    restart: unless-stopped
+    ports:
+      # Loopback only. Use "<tailscale-ip>:8737:8737" to reach it remotely.
+      - "127.0.0.1:8737:8737"
+    env_file: .env
+    volumes:
+      # refresh_token (long-lived login), guard.json, state.json: keep private.
+      - dengai-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    pids_limit: 32
+    logging:
+      driver: json-file
+      options: { max-size: 1m, max-file: "1" }
+
+volumes:
+  dengai-data:
