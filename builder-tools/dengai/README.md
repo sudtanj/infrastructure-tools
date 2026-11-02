@@ -46,3 +46,13 @@ the Rust compile runs without QEMU. `DENGAI_REF` pins a tag or branch.
 The API binds `0.0.0.0` inside the container. Compose publishes it on
 `127.0.0.1` only. To reach it remotely, publish it on the Tailscale IP. The
 `/data` volume holds a long-lived Steam login: keep it private.
+
+## Orange Pi
+
+[`bash-scripts/init-dengai.sh`](../../bash-scripts/init-dengai.sh) does the same with
+tighter limits (64 MB, 0.5 CPU), runnable from the Orange Pi workflow
+(`orangepi-bash-script-runner`, script `init-dengai`).
+Repo secrets to add: `DENGAI_USERNAME`, `DENGAI_PASSWORD`, `DENGAI_SHARED_SECRET`,
+`DENGAI_API_TOKEN`, and optionally `DENGAI_BACKFILL_URL`. Remove `DENGAI_PASSWORD`
+once the refresh token is saved. `DENGAI_BIND` (e.g. the Tailscale IP) overrides the
+`127.0.0.1` publish address.

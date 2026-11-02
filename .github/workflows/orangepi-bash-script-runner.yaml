@@ -18,7 +18,7 @@ name: "Run Bash Scripts on Orange Pi"
 #   EARNAPP_UUID is optional: init-earnapp derives a stable one from TAILSCALE_OAUTH_CLIENT_SECRET
 #   (a new OAuth secret = a new device) and sends the link-device URL to TELEGRAM_TOKEN/TELEGRAM_CHAT_ID,
 #   never to the log.
-#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, WIPTER_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_, WORKFLOW_CRON_ (token: GH_TOKEN by default)
+#   Script secrets (same names as the GCP runner): HONEYGAIN_, TRAFFMONETIZER_, EARNFM_, REPOCKET_, PAWNS_, PACKETSTREAM_, BITPING_, EARNAPP_, WIPTER_, DOZZLE_, MINI_ROUTER_ (exported to the device as ZILONG_ROUTER_), KONGMING_, DENGAI_ (Orange Pi only), WORKFLOW_CRON_ (token: GH_TOKEN by default)
 #   opi-init-tailscale-docker.sh alone also gets every OPI_TS_ secret (OPI_TS_IP, OPI_TS_ROUTES, OPI_TS_TAGS,
 #   OPI_TS_HOSTNAME, OPI_TS_TAILSCALED_EXTRA_ARGS, ...) and
 #   TAILSCALE_OAUTH_CLIENT_SECRET, its only credential (the OAuth client needs auth_keys
@@ -45,6 +45,7 @@ on:
           - init-dozzle
           - init-zilong-router
           - init-kongming
+          - init-dengai
           - init-workflow-cron
           - opi-init-tailscale-docker
           - reset-containers
@@ -163,6 +164,7 @@ jobs:
                      REPOCKET_TOKEN REPOCKET_DEVICE PAWNS_EMAIL PAWNS_PASSWORD PAWNS_DEVICE
                      PACKETSTREAM_CID PACKETSTREAM_DEVICE BITPING_API_KEY BITPING_DEVICE EARNAPP_UUID WIPTER_EMAIL WIPTER_PASSWORD
                      MINI_ROUTER_TURSO_TOKEN MINI_ROUTER_TURSO_URL
+                     DENGAI_USERNAME DENGAI_PASSWORD DENGAI_SHARED_SECRET DENGAI_GUARD_CODE DENGAI_API_TOKEN DENGAI_BACKFILL_URL
                      MINI_ROUTER_INITIAL_PASSWORD MINI_ROUTER_JWT_SECRET
                      KONGMING_TURSO_AUTH_TOKEN KONGMING_TURSO_DATABASE_URL KONGMING_TURSO_TOKEN KONGMING_TURSO_URL
                      KONGMING_PASSWORD KONGMING_SECRET KONGMING_PUBLIC_URL
@@ -261,13 +263,30 @@ jobs:
           # is set) and its Telegram alert.
           # Secrets are named one by one below (not toJSON(secrets)) so the runner only ever holds
           # the ones the scripts read; a secret a script starts reading must be added to the list.
-          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,WIPTER_,DOZZLE_,MINI_ROUTER_,KONGMING_,WORKFLOW_CRON_"
+          SECRET_FILTER: "HONEYGAIN_,TRAFFMONETIZER_,EARNFM_,REPOCKET_,PAWNS_,PACKETSTREAM_,BITPING_,EARNAPP_,WIPTER_,DOZZLE_,MINI_ROUTER_,KONGMING_,DENGAI_,WORKFLOW_CRON_"
           BITPING_API_KEY: ${{ secrets.BITPING_API_KEY }}
           BITPING_CPU_LIMIT: ${{ secrets.BITPING_CPU_LIMIT }}
           BITPING_DEVICE: ${{ secrets.BITPING_DEVICE }}
           BITPING_IMAGE: ${{ secrets.BITPING_IMAGE }}
           BITPING_MAX_PROXY_SESSIONS: ${{ secrets.BITPING_MAX_PROXY_SESSIONS }}
           BITPING_MEMORY_LIMIT: ${{ secrets.BITPING_MEMORY_LIMIT }}
+          DENGAI_ALLOW_ANY: ${{ secrets.DENGAI_ALLOW_ANY }}
+          DENGAI_API_TOKEN: ${{ secrets.DENGAI_API_TOKEN }}
+          DENGAI_AUTO_CLAIM_APPS: ${{ secrets.DENGAI_AUTO_CLAIM_APPS }}
+          DENGAI_BACKFILL_INTERVAL_SECS: ${{ secrets.DENGAI_BACKFILL_INTERVAL_SECS }}
+          DENGAI_BACKFILL_URL: ${{ secrets.DENGAI_BACKFILL_URL }}
+          DENGAI_BIND: ${{ secrets.DENGAI_BIND }}
+          DENGAI_CLAIMS_PER_HOUR: ${{ secrets.DENGAI_CLAIMS_PER_HOUR }}
+          DENGAI_COUNTRY: ${{ secrets.DENGAI_COUNTRY }}
+          DENGAI_GUARD_CODE: ${{ secrets.DENGAI_GUARD_CODE }}
+          DENGAI_IMAGE: ${{ secrets.DENGAI_IMAGE }}
+          DENGAI_LOG: ${{ secrets.DENGAI_LOG }}
+          DENGAI_PASSWORD: ${{ secrets.DENGAI_PASSWORD }}
+          DENGAI_PORT: ${{ secrets.DENGAI_PORT }}
+          DENGAI_SHARED_SECRET: ${{ secrets.DENGAI_SHARED_SECRET }}
+          DENGAI_SKIP_DEMOS: ${{ secrets.DENGAI_SKIP_DEMOS }}
+          DENGAI_SKIP_PLAYTESTS: ${{ secrets.DENGAI_SKIP_PLAYTESTS }}
+          DENGAI_USERNAME: ${{ secrets.DENGAI_USERNAME }}
           DOZZLE_ADDR: ${{ secrets.DOZZLE_ADDR }}
           EARNAPP_CPU_LIMIT: ${{ secrets.EARNAPP_CPU_LIMIT }}
           EARNAPP_IMAGE: ${{ secrets.EARNAPP_IMAGE }}
