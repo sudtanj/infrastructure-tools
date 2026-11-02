@@ -318,7 +318,16 @@ jobs:
       - name: Inspect image
         run: |
           (cd image && sha256sum -c ./*.img.xz.sha)
-          sudo OPI_UWE5622_VARIANT=armbian "$DIR/tests/image-inspect.sh" image/*.img.xz
+          sudo OPI_UWE5622_VARIANT=armbian OPI_METRICS_FILE="$PWD/metrics-inspect.env" \
+            "$DIR/tests/image-inspect.sh" image/*.img.xz
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opi-metrics-inspect
+          retention-days: 3
+          if-no-files-found: ignore
+          path: metrics-inspect.env
 
   inspect-uwe5622:
     needs: build-uwe5622
@@ -355,7 +364,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-arm sshpass xz-utils >/dev/null
       - name: Simulate an Orange Pi Zero 3 (QEMU, 4x Cortex-A53, 1 GiB)
-        run: sudo "$DIR/tests/simulate.sh" image/*.img.xz
+        run: sudo SIM_METRICS_FILE="$PWD/metrics-simulate.env" "$DIR/tests/simulate.sh" image/*.img.xz
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opi-metrics-simulate
+          retention-days: 3
+          if-no-files-found: ignore
+          path: metrics-simulate.env
 
   simulate-uwe5622:
     # The uwe5622-mainline image, with the same driver commit built for the simulation kernel:
@@ -384,7 +401,73 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-arm sshpass xz-utils >/dev/null
       - name: Simulate with the uwe5622-mainline driver (no chip present)
-        run: sudo SIM_UWE5622_SRC="$PWD/uwe5622" SIM_SKIP_UPGRADE=1 "$DIR/tests/simulate.sh" image/*.img.xz
+        run: sudo SIM_UWE5622_SRC="$PWD/uwe5622" SIM_SKIP_UPGRADE=1 SIM_SKIP_MEASURE=1 "$DIR/tests/simulate.sh" image/*.img.xz
+
+  metrics:
+    # Measurements of the default image (inspect + simulate) in metrics.json, compared with the
+    # last successful run on main that has them; table in the run summary
+    needs: [build, inspect, simulate]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: opi-metrics-*
+          path: m
+          merge-multiple: true
+      - name: Previous measurements (last successful main run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p prev
+          for run in $(gh api "repos/$REPO/actions/artifacts?name=opi-metrics&per_page=30" \
+                         --jq '.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == "main") | .workflow_run.id'); do
+            [ "$run" = "$GITHUB_RUN_ID" ] && continue
+            [ "$(gh api "repos/$REPO/actions/runs/$run" --jq .conclusion)" = success ] || continue
+            if gh run download "$run" -R "$REPO" -n opi-metrics -D prev; then echo "$run" > prev/run-id; break; fi
+          done
+          ls -la prev
+      - name: metrics.json and summary
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          { cat m/*.env 2>/dev/null || true; } | grep -E '^[a-z0-9_]+=' > all.env || true
+          jq -Rn --arg sha "$SHA" --arg run "$GITHUB_RUN_ID" '
+            ([inputs | capture("^(?<k>[a-z0-9_]+)=(?<v>.*)$")] | map({(.k): (.v | tonumber? // .)}) | add) // {}
+            | {commit: $sha, run: ($run | tonumber), metrics: .}' all.env > metrics.json
+          cat metrics.json
+          prev='{}' prev_run=none
+          if [ -s prev/metrics.json ]; then prev="$(jq -c .metrics prev/metrics.json)"; prev_run="$(cat prev/run-id)"; fi
+          {
+            echo "## Orange Pi Zero 3 image measurements"
+            echo
+            if [ "$prev_run" = none ]; then
+              echo "No earlier successful main run with measurements to compare with."
+            else
+              echo "Compared with run [${prev_run}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${prev_run}), the last successful main run with measurements."
+            fi
+            echo "Simulation values come from QEMU (TCG, slower than the board): compare runs, not absolutes."
+            echo
+            echo "| metric | this run | previous | change |"
+            echo "|---|---:|---:|---:|"
+            jq -r --argjson p "$prev" '.metrics | to_entries[] | . as $e | ($p[$e.key]) as $o
+              | "| \($e.key) | \($e.value) | \($o // "-") | \(
+                  if ($o | type) == "number" and ($e.value | type) == "number" then
+                    ((($e.value - $o) * 100 | round) / 100 | tostring)
+                    + (if $o != 0 then " (" + (((($e.value - $o) / $o * 1000) | round) / 10 | tostring) + "%)" else "" end)
+                  else "" end) |"' metrics.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opi-metrics
+          retention-days: 90
+          path: metrics.json
 
   promote:
     # Each candidate is promoted on its own tests: the Armbian pin on inspect + simulate, the

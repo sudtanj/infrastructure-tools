@@ -17,6 +17,8 @@
 #   SIM_MEMORY (default 1024, MiB)  SIM_CPUS (4)  SIM_ACCEL (tcg; kvm uses -cpu host)
 #   SIM_MIN_AVAILABLE_MB  fail when less memory is available with Docker + Dozzle up (default 400)
 #   SIM_SKIP_UPGRADE=1    skip the upgrade + reboot round
+#   SIM_METRICS_FILE=f    write the measurements (key=value) to f; SIM_SKIP_MEASURE=1 skips them
+#                         (memory, boot timing of a plain reboot, idle CPU/wakeups, disk writes)
 #   SIM_UWE5622_SRC=dir   build the uwe5622-mainline driver in dir against the simulation kernel
 #                         and run SIM_UWE5622_ROUNDS (10) load/unload rounds without the chip
 
@@ -29,6 +31,7 @@ MEMORY="${SIM_MEMORY:-1024}"
 CPUS="${SIM_CPUS:-4}"
 ACCEL="${SIM_ACCEL:-tcg}"
 MIN_AVAIL="${SIM_MIN_AVAILABLE_MB:-400}"
+if [ -n "${SIM_METRICS_FILE:-}" ]; then : > "$SIM_METRICS_FILE"; fi
 WORK="${SIM_WORK:-$(mktemp -d)}"
 MNT="${WORK}/root"
 PORT=2222
@@ -163,6 +166,30 @@ boot_vm() {  # name
   vm "timeout 900 systemctl is-system-running --wait" || true
 }
 
+reboot_vm() {  # name
+  vm_sudo "systemctl reboot" || true
+  sleep 20
+  # QEMU keeps running across the guest reboot
+  local start=$SECONDS
+  until vm true 2>/dev/null; do
+    if [ $((SECONDS - start)) -gt 1500 ]; then fail "reboot ($1): SSH back within 25 min"; exit 1; fi
+    sleep 10
+  done
+  ok "reboot ($1): SSH back after $((SECONDS - start)) s"
+  vm "timeout 600 systemctl is-system-running --wait" || true
+}
+
+# Measurements for metrics.json (SIM_METRICS_FILE): key=value lines go there, the rest to the log
+measure() {  # sim-metrics.sh arguments...
+  scp -q -P "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -i "${WORK}/id_ed25519" "${HERE}/sim-metrics.sh" "${USER_NAME}@127.0.0.1:/tmp/sim-metrics.sh"
+  local out
+  out="$(vm_sudo "bash /tmp/sim-metrics.sh $*" 2>&1)" || echo "# measurement '$*' failed"
+  printf '%s\n' "$out" | grep -v '^[a-z0-9_]*=' || true
+  printf '%s\n' "$out" | grep '^[a-z0-9_]*=' | sed 's/^/# metric /' || true
+  if [ -n "${SIM_METRICS_FILE:-}" ]; then printf '%s\n' "$out" | grep '^[a-z0-9_]*=' >> "$SIM_METRICS_FILE" || true; fi
+}
+
 expect() {  # description command...
   local d="$1"; shift
   if "$@" >/dev/null 2>&1; then ok "$d"; else fail "$d"; fi
@@ -244,6 +271,8 @@ root_kb="$(vm "df --output=size -k / | tail -n1")"
 [ "$root_kb" -gt "$((pre_boot_kb + 2097152))" ] && ok "root filesystem grown to the card" \
   || fail "root filesystem grown to the card (${pre_boot_kb} -> ${root_kb} KiB)"
 
+[ -n "${SIM_SKIP_MEASURE:-}" ] || measure mem first_boot   # Docker up, no container yet
+
 # A real deployment from this repo, the way the Orange Pi workflow runs it (root via sudo)
 scp -P "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
   -i "${WORK}/id_ed25519" "${REPO}/bash-scripts/init-dozzle.sh" "${USER_NAME}@127.0.0.1:/tmp/init-dozzle.sh"
@@ -254,6 +283,19 @@ else
 fi
 
 checks "first boot"
+[ -n "${SIM_SKIP_MEASURE:-}" ] || measure mem docker   # Docker + Dozzle up
+
+if [ -z "${SIM_SKIP_MEASURE:-}" ]; then
+  # A normal boot of the provisioned board (no first-boot work), then idle with Dozzle running:
+  # what the board does all day. TCG is slower than the board, so compare runs, not absolutes.
+  echo "# --- measurements: plain reboot, then idle ---"
+  reboot_vm measure
+  measure boot
+  sleep "${SIM_SETTLE_S:-120}"
+  measure mem idle
+  measure idle "${SIM_IDLE_S:-60}"
+  measure disk "${SIM_DISK_S:-300}"
+fi
 
 if [ -n "${SIM_UWE5622_SRC:-}" ]; then
   uwe5622_rounds
@@ -291,16 +333,7 @@ if [ -z "${SIM_SKIP_UPGRADE:-}" ]; then
     fail "security upgrade dry run after the full upgrade"; tail -n 30 "${WORK}/security-dry.log"
   fi
 
-  vm_sudo "systemctl reboot" || true
-  sleep 20
-  # QEMU keeps running across the guest reboot
-  boot_vm_wait_start=$SECONDS
-  until vm true 2>/dev/null; do
-    if [ $((SECONDS - boot_vm_wait_start)) -gt 1500 ]; then fail "reboot: SSH back within 25 min"; exit 1; fi
-    sleep 10
-  done
-  ok "reboot: SSH back after $((SECONDS - boot_vm_wait_start)) s"
-  vm "timeout 600 systemctl is-system-running --wait" || true
+  reboot_vm "after upgrade"
   checks "after upgrade + reboot"
 fi
 

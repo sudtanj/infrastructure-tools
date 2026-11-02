@@ -170,5 +170,26 @@ du -xm -d 4 "${MNT}/usr" "${MNT}/var" "${MNT}/opt" 2>/dev/null | sort -rn | head
 # --- the lockdown, checked by the image's own tools ---
 if chroot "$MNT" /usr/local/sbin/opi-selfcheck --image; then ok "opi-selfcheck --image"; else fail "opi-selfcheck --image"; fi
 
+# --- measurements (OPI_METRICS_FILE: key=value lines, merged into metrics.json by the workflow) ---
+mib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
+du_mib() { mib "$(( $(du -sxk "$1" 2>/dev/null | cut -f1) * 1024 ))"; }
+enabled_units="$(chroot "$MNT" systemctl list-unit-files --state=enabled --no-legend 2>/dev/null | awk '{ print $1 }')"
+echo "# enabled units: $(tr '\n' ' ' <<< "$enabled_units")"
+echo "# fstab: $(grep -vE '^[[:space:]]*(#|$)' "${MNT}/etc/fstab" | tr '\n' ';')"
+grep -E '^(MIN_SPEED|MAX_SPEED|GOVERNOR)=' "${MNT}/etc/default/cpufrequtils" 2>/dev/null | sed 's/^/# cpufrequtils: /' || true
+metrics=(
+  "image_xz_mib=$([[ "$IMG_IN" == *.xz ]] && mib "$(stat -c %s "$IMG_IN")" || echo 0)"
+  "image_raw_mib=$(mib "$(stat -c %s "$IMG")")"
+  "rootfs_used_mib=$(mib "$(df --output=used -B1 "$MNT" | tail -n1)")"
+  "packages=$(chroot "$MNT" dpkg-query -W -f='${db:Status-Abbrev}\n' 2>/dev/null | grep -c '^ii')"
+  "firmware_mib=$(du_mib "${MNT}/usr/lib/firmware")"
+  "kernel_modules_mib=$(du_mib "${mods_root}/${KVER}")"
+  "initrd_kib=$(( $(stat -L -c %s "${MNT}/boot/uInitrd" 2>/dev/null || echo 0) / 1024 ))"
+  "enabled_services=$(grep -c '\.service$' <<< "$enabled_units" || true)"
+  "enabled_timers=$(grep -c '\.timer$' <<< "$enabled_units" || true)"
+)
+printf '# metric %s\n' "${metrics[@]}"
+if [ -n "${OPI_METRICS_FILE:-}" ]; then printf '%s\n' "${metrics[@]}" > "$OPI_METRICS_FILE"; fi
+
 [ "$FAILED" -eq 0 ] && echo "# image inspection: all passed" || echo "# image inspection: FAILED"
 exit "$FAILED"
