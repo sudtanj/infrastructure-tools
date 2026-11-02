@@ -89,7 +89,11 @@ async function page(): Promise<(expr: string) => Promise<any>> {
   const pending = new Map<number, (v: any) => void>();
   ws.onmessage = (e) => {
     const m = JSON.parse(String(e.data));
-    pending.get(m.id)?.(m.result?.result?.value);
+    // Only replies to our own numbered requests; events and unknown ids are ignored.
+    const resolve = typeof m.id === "number" ? pending.get(m.id) : undefined;
+    if (typeof resolve !== "function") return;
+    pending.delete(m.id);
+    resolve(m.result?.result?.value);
   };
   return (expression) =>
     new Promise((resolve) => {
