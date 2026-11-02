@@ -1292,6 +1292,9 @@ jobs:
             # last 60 lines below. Pass/fail rows go to the step summary.
             if [ "$VERBOSE" = "true" ]; then
               redact < "$log"
+            else
+              # upwork_bid's one-line tick report, so hourly runs show what it did.
+              grep -E '^ *\| Upwork bid:' "$log" | redact || true
             fi
 
             if [ "$rc" -eq 0 ]; then
