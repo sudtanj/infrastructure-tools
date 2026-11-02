@@ -269,6 +269,11 @@ jobs:
             bc bison flex libssl-dev libelf-dev "./$deb"
           echo "kdir=$kdir" >> "$GITHUB_OUTPUT"
           echo "kernel: $(cat "$kdir/include/config/kernel.release")"
+          # Modules need the kernel's compiler (major version); build-modules.sh picks gcc-<major>
+          grep '^CONFIG_CC_VERSION_TEXT=' "$kdir/include/config/auto.conf"
+          major="$(( $(sed -n 's/^CONFIG_GCC_VERSION=//p' "$kdir/include/config/auto.conf") / 10000 ))"
+          command -v "gcc-$major" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "gcc-$major"
+          "gcc-$major" --version | head -n1
       - name: Fetch uwe5622-mainline
         run: |
           set -euo pipefail

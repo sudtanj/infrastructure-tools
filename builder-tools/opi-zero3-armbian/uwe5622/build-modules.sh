@@ -31,10 +31,17 @@ trap 'rm -rf "$BUILD"' EXIT
 cp -a "${SRC_IN}/." "$BUILD/"
 rm -rf "${BUILD}/.git"
 
-echo "# kernel ${KREL}, built with: $(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"$/\1/p' "${KDIR}/.config")"
-echo "# compiler here: $(${CC:-gcc} --version | head -n1)"
+# The compiler the kernel was really built with: include/config/auto.conf is the build-time config
+# (.config may have been re-evaluated with the local compiler, e.g. by Armbian's headers postinst).
+# Its flags (-fmin-function-alignment, ...) need the same major version: gcc-<major> when present.
+conf="${KDIR}/include/config/auto.conf"
+kgcc="$(sed -n 's/^CONFIG_GCC_VERSION=//p' "$conf")"
+if [ -z "${CC:-}" ] && [ "${kgcc:-0}" -gt 0 ] && command -v "gcc-$((kgcc / 10000))" >/dev/null; then CC="gcc-$((kgcc / 10000))"; fi
+CC="${CC:-gcc}"
+echo "# kernel ${KREL}, built with: $(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"$/\1/p' "$conf")"
+echo "# compiler here: ${CC}: $("$CC" --version | head -n1)"
 set +e
-make -C "$KDIR" M="$BUILD" -j"$(nproc)" \
+make -C "$KDIR" M="$BUILD" -j"$(nproc)" CC="$CC" \
   CONFIG_AW_WIFI_DEVICE_UWE5622=y CONFIG_WLAN_UWE5622=m CONFIG_TTY_OVERY_SDIO=m modules \
   > "${OUT}/build.log" 2>&1
 status=$?
