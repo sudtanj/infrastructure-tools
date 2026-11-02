@@ -107,8 +107,10 @@ systemctl enable docker.service containerd.service opi-firewall.service opi-prov
 # aw859a-bluetooth (Armbian's uwe5622 extension) would fail every boot without bluez.
 # nftables.service loads /etc/nftables.conf, which starts with "flush ruleset": it would wipe our
 # table (and Docker's rules) whenever it ran.
+# keyboard-setup/console-setup only configure the VT keymap and font (4 s of boot on the board);
+# the board is headless and the only console is the serial line.
 systemctl mask bluetooth.service aw859a-bluetooth.service ModemManager.service avahi-daemon.service \
-  nftables.service 2>/dev/null || true
+  nftables.service keyboard-setup.service console-setup.service 2>/dev/null || true
 
 echo "[customize] no default login"
 # Armbian sets a known root password, autologin on the consoles and an interactive first-login
