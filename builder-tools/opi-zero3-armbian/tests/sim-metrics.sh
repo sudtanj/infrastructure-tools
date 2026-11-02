@@ -20,7 +20,7 @@ case "$mode" in
     echo "${p}_processes=$(ps -e -o pid=,ppid= | awk '$1 != 2 && $2 != 2' | wc -l)"
     echo "# ${p}: running services: $(systemctl list-units --type=service --state=running --no-legend --plain | awk '{ print $1 }' | tr '\n' ' ')"
     echo "# ${p}: largest processes (RSS KiB):"
-    ps -e -o rss=,comm= --sort=-rss | head -n 12 | sed "s/^/#   /"
+    { ps -e -o rss=,comm= --sort=-rss | head -n 12 | sed "s/^/#   /"; } || true
     free -m | sed 's/^/#   /'
     { zramctl 2>/dev/null || true; } | sed 's/^/#   /'
     ;;

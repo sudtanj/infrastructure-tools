@@ -261,7 +261,8 @@ jobs:
         run: |
           set -euo pipefail
           deb="$(ls headers/*.deb)"
-          kdir="/$(dpkg-deb -c "$deb" | grep -o 'usr/src/linux-headers-[^/]*' | head -n1)"
+          dpkg-deb -c "$deb" > headers-files.txt
+          kdir="/$(grep -m1 -o 'usr/src/linux-headers-[^/]*' headers-files.txt)"
           sudo apt-get update -qq
           # Its postinst builds the host tools and restores the kernel's build-time config
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \

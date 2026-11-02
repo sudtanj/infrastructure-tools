@@ -94,7 +94,8 @@ check "firmware wifi_2355b001_1ant.ini" test -s "${fw}/wifi_2355b001_1ant.ini"
 check "Bluetooth blacklist unchanged" cmp -s "${HERE}/../userpatches/overlay/modprobe-blacklist.conf" \
   "${MNT}/etc/modprobe.d/opi-blacklist.conf"
 bt_dep="$(chroot "$MNT" modprobe -S "$KVER" --show-depends sprdbt_tty 2>&1 || true)"
-[[ "$bt_dep" == "install /bin/true"* ]] && ok "modprobe sprdbt_tty is a no-op" || fail "modprobe sprdbt_tty is a no-op (${bt_dep})"
+# Its dependencies are listed first; the module itself must be the "install /bin/true" stub
+[ "$(tail -n1 <<< "$bt_dep" | sed "s/[[:space:]]*$//")" = "install /bin/true" ] && ok "modprobe sprdbt_tty is a no-op" || fail "modprobe sprdbt_tty is a no-op (${bt_dep})"
 wifi_dep="$(chroot "$MNT" modprobe -S "$KVER" --show-depends sprdwl_ng 2>&1 || true)"
 printf '#   %s\n' "$wifi_dep"
 grep -E '/(sprdwl_ng|sprdbt_tty|uwe5622_bsp_sdio)\.ko$' "${mods_root}/${KVER}/modules.builtin" >/dev/null 2>&1 \
