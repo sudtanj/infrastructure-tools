@@ -9,11 +9,19 @@ name: Builder Tools - Build Orange Pi Zero 3 Armbian image
 #   inspect    boot chain, board kernel Docker support, size, opi-selfcheck inside the image
 #   simulate   boots the image's root filesystem in QEMU shaped like a Zero 3 (4x A53, 1 GiB):
 #              provisioning, SSH, Docker, a real bash-scripts/ deploy, then apt upgrades + reboot
+#   build-uwe5622     the uwe5622-mainline Wi-Fi driver (UWE5622_COMMIT) built against the image's
+#                     exact kernel (Armbian's linux-headers package) and injected into a second
+#                     image, ...-uwe5622-mainline.img.xz (overrides Armbian's in-tree driver)
+#   inspect-uwe5622   that image: modules in updates/, vermagic, symbols, firmware, blacklist
+#   simulate-uwe5622  the driver built for the simulation kernel: 10 load/unload rounds without
+#                     the chip (no oops/WARN), then the usual checks
 #   promote    upstream updates: every Monday `check` looks for new fixes on the pinned Armbian
 #              release branch; the new head is built and tested as a candidate and only committed
 #              to `variables` once everything above passed, so a breaking upstream change never
 #              lands on main. A newer release branch (new kernel line, U-Boot, ...) is only
-#              announced; it is tried when a manual run asks for it (input new_release)
+#              announced; it is tried when a manual run asks for it (input new_release).
+#              The uwe5622-mainline main head is tried the same way and its pin (UWE5622_COMMIT)
+#              promoted only when the mainline image passed inspect-uwe5622 + simulate-uwe5622
 on:
   # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
   # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
@@ -66,6 +74,8 @@ jobs:
       branch: ${{ steps.decide.outputs.branch }}
       commit: ${{ steps.decide.outputs.commit }}
       bump: ${{ steps.decide.outputs.bump }}
+      uwe_commit: ${{ steps.decide.outputs.uwe_commit }}
+      uwe_bump: ${{ steps.decide.outputs.uwe_bump }}
     steps:
       - uses: actions/checkout@v7
 
@@ -98,14 +108,24 @@ jobs:
             fi
           fi
           echo "pinned=$ARMBIAN_BRANCH@$ARMBIAN_COMMIT building=$branch@$commit bump=$bump"
+          # uwe5622-mainline: its main head is the candidate, promoted like the Armbian pin
+          uwe_commit="$UWE5622_COMMIT" uwe_bump=false
+          if [ "$TRY_UPSTREAM" = true ]; then
+            uwe_head="$(git ls-remote "$UWE5622_REPO" refs/heads/main | cut -f1)"
+            [ -n "$uwe_head" ] || { echo "::error::cannot resolve main of $UWE5622_REPO"; exit 1; }
+            if [ "$uwe_head" != "$UWE5622_COMMIT" ]; then uwe_commit="$uwe_head" uwe_bump=true; fi
+          fi
+          echo "uwe5622-mainline pinned=$UWE5622_COMMIT building=$uwe_commit bump=$uwe_bump"
           build=true
           [ "$EVENT" = pull_request ] && build=false          # unit tests only
-          [ "$ONLY_IF_UPDATED" = true ] && [ "$bump" != true ] && build=false
+          [ "$ONLY_IF_UPDATED" = true ] && [ "$bump" != true ] && [ "$uwe_bump" != true ] && build=false
           {
             echo "build=$build"
             echo "branch=$branch"
             echo "commit=$commit"
             echo "bump=$bump"
+            echo "uwe_commit=$uwe_commit"
+            echo "uwe_bump=$uwe_bump"
           } >> "$GITHUB_OUTPUT"
 
   unit:
@@ -118,7 +138,8 @@ jobs:
           shellcheck -S warning -e SC1090,SC1091 \
             "$DIR"/userpatches/customize-image.sh "$DIR"/userpatches/overlay/opi-provision \
             "$DIR"/userpatches/overlay/opi-selfcheck "$DIR"/tests/*.sh "$DIR"/tests/unit/run.sh \
-            "$DIR"/userpatches/overlay/opi-security-upgrade "$DIR"/userpatches/extensions/opi-image.sh "$DIR"/tests/unit/stubs/*
+            "$DIR"/userpatches/overlay/opi-security-upgrade "$DIR"/userpatches/extensions/opi-image.sh "$DIR"/tests/unit/stubs/* \
+            "$DIR"/uwe5622/*.sh
 
       - name: Unit tests (bats, in Debian of the image's release)
         run: "$DIR/tests/unit/run.sh"
@@ -138,13 +159,14 @@ jobs:
       ARMBIAN_COMMIT: ${{ needs.check.outputs.commit }}
     outputs:
       artifact: ${{ steps.prepare.outputs.artifact }}
+      base: ${{ steps.prepare.outputs.base }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Get variables
         run: |
           # The candidate commit from `check` wins over the pinned one
-          sed 's|\r$||' "$DIR/variables" | grep -E '^[A-Z_]+=' | grep -v '^ARMBIAN_COMMIT=' | tr -d '"' >> "$GITHUB_ENV"
+          sed 's|\r$||' "$DIR/variables" | grep -E '^[A-Z0-9_]+=' | grep -v '^ARMBIAN_COMMIT=' | tr -d '"' >> "$GITHUB_ENV"
 
       - name: Free disk space
         run: |
@@ -179,7 +201,21 @@ jobs:
           ls -la armbian/output/images
           img="$(find armbian/output/images -maxdepth 1 -name '*.img.xz' -printf '%f\n' | head -n1)"
           [ -n "$img" ] || { echo "::error::no image produced"; exit 1; }
-          echo "artifact=${img%.img.xz}" >> "$GITHUB_OUTPUT"
+          base="${img%.img.xz}" name="${img%.img.xz}"
+          # The plain name goes to the image with the driver UWE5622_DRIVER picks (see variables)
+          if [ "$UWE5622_DRIVER" = mainline ]; then
+            name="${base}-uwe5622-armbian"
+            (cd armbian/output/images && mv "$img" "${name}.img.xz" && rm -f "${img}.sha" \
+              && sha256sum "${name}.img.xz" > "${name}.img.xz.sha")
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "artifact=$name" >> "$GITHUB_OUTPUT"
+          # Armbian's linux-headers package of the image's kernel, for the uwe5622-mainline build
+          mkdir -p kernel-headers
+          deb="$(find armbian/output -name 'linux-headers-*.deb' | sort | head -n1)"
+          [ -n "$deb" ] || { find armbian/output -name '*.deb' | head -n 50; echo "::error::no linux-headers package"; exit 1; }
+          cp "$deb" kernel-headers/
+          ls -la kernel-headers
 
       - name: Upload image
         uses: actions/upload-artifact@v4
@@ -190,6 +226,84 @@ jobs:
           path: |
             armbian/output/images/*.img.xz
             armbian/output/images/*.img.xz.sha
+
+      - name: Upload kernel headers package
+        uses: actions/upload-artifact@v4
+        with:
+          name: opi-kernel-headers
+          retention-days: 3
+          path: kernel-headers/*.deb
+
+  build-uwe5622:
+    # The uwe5622-mainline variant: the same image plus the driver built against its exact kernel
+    needs: [check, build]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      UWE5622_COMMIT: ${{ needs.check.outputs.uwe_commit }}
+    outputs:
+      artifact: ${{ steps.image.outputs.artifact }}
+      modules: ${{ steps.image.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Get variables
+        run: sed 's|\r$||' "$DIR/variables" | grep -E '^UWE5622_(REPO|DRIVER)=' | tr -d '"' >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: image
+      - uses: actions/download-artifact@v4
+        with:
+          name: opi-kernel-headers
+          path: headers
+      - name: Kernel build tree (Armbian's linux-headers package of the image)
+        id: headers
+        run: |
+          set -euo pipefail
+          deb="$(ls headers/*.deb)"
+          kdir="/$(dpkg-deb -c "$deb" | grep -o 'usr/src/linux-headers-[^/]*' | head -n1)"
+          sudo apt-get update -qq
+          # Its postinst builds the host tools and restores the kernel's build-time config
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev "./$deb"
+          echo "kdir=$kdir" >> "$GITHUB_OUTPUT"
+          echo "kernel: $(cat "$kdir/include/config/kernel.release")"
+      - name: Fetch uwe5622-mainline
+        run: |
+          set -euo pipefail
+          git init -q uwe5622
+          git -C uwe5622 fetch -q --depth 1 "$UWE5622_REPO" "$UWE5622_COMMIT"
+          git -C uwe5622 checkout -q FETCH_HEAD
+          git -C uwe5622 log -1 --format='%H %s'
+      - name: Build the modules against the image's kernel
+        run: '"$DIR/uwe5622/build-modules.sh" uwe5622 "${{ steps.headers.outputs.kdir }}" modules'
+      - name: Make the uwe5622-mainline image
+        id: image
+        run: |
+          set -euo pipefail
+          base="${{ needs.build.outputs.base }}"
+          name="${base}-uwe5622-mainline"
+          [ "$UWE5622_DRIVER" = mainline ] && name="$base"
+          mkdir -p out
+          sudo "$DIR/uwe5622/make-image.sh" image/*.img.xz modules "out/${name}.img.xz" "${UWE5622_REPO}@${UWE5622_COMMIT}"
+          ls -la out
+          echo "artifact=$name" >> "$GITHUB_OUTPUT"
+          echo "modules=uwe5622-mainline-modules-$(sed -n 's/^kernel_release=//p' modules/MANIFEST)" >> "$GITHUB_OUTPUT"
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.image.outputs.artifact }}
+          retention-days: 14
+          compression-level: 0  # already xz
+          path: |
+            out/*.img.xz
+            out/*.img.xz.sha
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.image.outputs.modules }}
+          retention-days: 14
+          path: modules/
 
   inspect:
     needs: build
@@ -204,7 +318,27 @@ jobs:
       - name: Inspect image
         run: |
           (cd image && sha256sum -c ./*.img.xz.sha)
-          sudo "$DIR/tests/image-inspect.sh" image/*.img.xz
+          sudo OPI_UWE5622_VARIANT=armbian "$DIR/tests/image-inspect.sh" image/*.img.xz
+
+  inspect-uwe5622:
+    needs: build-uwe5622
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-uwe5622.outputs.artifact }}
+          path: image
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-uwe5622.outputs.modules }}
+          path: modules
+      - name: Inspect the uwe5622-mainline image
+        run: |
+          (cd image && sha256sum -c ./*.img.xz.sha)
+          sudo OPI_UWE5622_VARIANT=mainline OPI_UWE5622_SYMVERS="$PWD/modules/kernel.symvers" \
+            "$DIR/tests/image-inspect.sh" image/*.img.xz
 
   simulate:
     needs: build
@@ -223,9 +357,43 @@ jobs:
       - name: Simulate an Orange Pi Zero 3 (QEMU, 4x Cortex-A53, 1 GiB)
         run: sudo "$DIR/tests/simulate.sh" image/*.img.xz
 
+  simulate-uwe5622:
+    # The uwe5622-mainline image, with the same driver commit built for the simulation kernel:
+    # load/unload rounds without the chip, then the usual checks (no upgrade round)
+    needs: [check, build-uwe5622]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      UWE5622_COMMIT: ${{ needs.check.outputs.uwe_commit }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Get variables
+        run: sed 's|\r$||' "$DIR/variables" | grep -E '^UWE5622_REPO=' | tr -d '"' >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-uwe5622.outputs.artifact }}
+          path: image
+      - name: Fetch uwe5622-mainline
+        run: |
+          set -euo pipefail
+          git init -q uwe5622
+          git -C uwe5622 fetch -q --depth 1 "$UWE5622_REPO" "$UWE5622_COMMIT"
+          git -C uwe5622 checkout -q FETCH_HEAD
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-arm sshpass xz-utils >/dev/null
+      - name: Simulate with the uwe5622-mainline driver (no chip present)
+        run: sudo SIM_UWE5622_SRC="$PWD/uwe5622" SIM_SKIP_UPGRADE=1 "$DIR/tests/simulate.sh" image/*.img.xz
+
   promote:
-    needs: [check, inspect, simulate]
-    if: needs.check.outputs.bump == 'true' && github.ref == 'refs/heads/main'
+    # Each candidate is promoted on its own tests: the Armbian pin on inspect + simulate, the
+    # uwe5622-mainline pin on the mainline image's inspect + simulation. One commit for both.
+    needs: [check, inspect, simulate, inspect-uwe5622, simulate-uwe5622]
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      ((needs.check.outputs.bump == 'true' && needs.inspect.result == 'success' && needs.simulate.result == 'success') ||
+       (needs.check.outputs.uwe_bump == 'true' && needs.inspect-uwe5622.result == 'success' && needs.simulate-uwe5622.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -233,18 +401,31 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-      - name: Commit the tested Armbian pin
+      - name: Commit the tested pins
         env:
           BRANCH: ${{ needs.check.outputs.branch }}
           COMMIT: ${{ needs.check.outputs.commit }}
+          UWE_COMMIT: ${{ needs.check.outputs.uwe_commit }}
+          ARMBIAN_OK: ${{ needs.check.outputs.bump == 'true' && needs.inspect.result == 'success' && needs.simulate.result == 'success' }}
+          UWE_OK: ${{ needs.check.outputs.uwe_bump == 'true' && needs.inspect-uwe5622.result == 'success' && needs.simulate-uwe5622.result == 'success' }}
         run: |
           set -euo pipefail
-          sed -i -e "s|^ARMBIAN_BRANCH=.*|ARMBIAN_BRANCH=\"$BRANCH\"|" \
-                 -e "s|^ARMBIAN_COMMIT=.*|ARMBIAN_COMMIT=\"$COMMIT\"|" "$DIR/variables"
+          msg=()
+          if [ "$ARMBIAN_OK" = true ]; then
+            sed -i -e "s|^ARMBIAN_BRANCH=.*|ARMBIAN_BRANCH=\"$BRANCH\"|" \
+                   -e "s|^ARMBIAN_COMMIT=.*|ARMBIAN_COMMIT=\"$COMMIT\"|" "$DIR/variables"
+            msg+=("Armbian build to $BRANCH (${COMMIT:0:8})")
+          fi
+          if [ "$UWE_OK" = true ]; then
+            sed -i "s|^UWE5622_COMMIT=.*|UWE5622_COMMIT=\"$UWE_COMMIT\"|" "$DIR/variables"
+            msg+=("uwe5622-mainline to ${UWE_COMMIT:0:8}")
+          fi
           if git diff --quiet; then echo "already pinned"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$DIR/variables"
-          # [skip ci]: this exact commit was just built and tested
-          git commit -m "opi-zero3-armbian: update Armbian build to $BRANCH (${COMMIT:0:8}) [skip ci]"
+          joined="$(printf '%s and ' "${msg[@]}")"
+          # [skip ci]: this exact combination was just built and tested
+          git commit -m "opi-zero3-armbian: update ${joined% and } [skip ci]"
+          git pull --rebase -q origin main
           git push

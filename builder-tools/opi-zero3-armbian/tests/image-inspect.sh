@@ -6,11 +6,16 @@
 #
 #   sudo tests/image-inspect.sh Armbian-...img.xz|.img
 #   OPI_MAX_ROOTFS_MB   fail when the root filesystem uses more (default 900)
+#   OPI_UWE5622_VARIANT armbian (default: Armbian's in-tree Wi-Fi driver) or mainline (uwe5622-mainline
+#                       modules in /lib/modules/<ver>/updates/uwe5622, see uwe5622/make-image.sh)
+#   OPI_UWE5622_SYMVERS the kernel's Module.symvers, for the symbol check when the image has no System.map
 
 set -euo pipefail
 
 IMG_IN="$1"
 MAX_MB="${OPI_MAX_ROOTFS_MB:-900}"
+VARIANT="${OPI_UWE5622_VARIANT:-armbian}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 MNT="${WORK}/root"
 FAILED=0
@@ -73,6 +78,82 @@ else
   fail "kernel config /boot/config-* present"
 fi
 
+# --- Wi-Fi/Bluetooth driver (UWE5622): Armbian's in-tree one, or uwe5622-mainline in updates/ ---
+for m in dev dev/pts proc sys; do mount --bind "/${m}" "${MNT}/${m}"; done
+mount -t tmpfs tmpfs "${MNT}/run"
+mods_root="${MNT}/usr/lib/modules"
+[ -d "$mods_root" ] || mods_root="${MNT}/lib/modules"
+KVER="$(find "$mods_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | head -n1)"
+upd="${mods_root}/${KVER}/updates/uwe5622"
+echo "# UWE5622 driver expected: ${VARIANT} (kernel ${KVER})"
+# Firmware the driver loads (uwe5622-mainline docs/HARDWARE.md): chip firmware and board RF tuning
+fw="${MNT}/usr/lib/firmware"
+if [ -s "${fw}/uwe5622/wcnmodem.bin" ] || [ -s "${fw}/wcnmodem.bin" ]; then ok "firmware wcnmodem.bin"; else fail "firmware wcnmodem.bin"; fi
+check "firmware wifi_2355b001_1ant.ini" test -s "${fw}/wifi_2355b001_1ant.ini"
+# Bluetooth stays off with either driver: the overlay's blacklist, unchanged, still applies
+check "Bluetooth blacklist unchanged" cmp -s "${HERE}/../userpatches/overlay/modprobe-blacklist.conf" \
+  "${MNT}/etc/modprobe.d/opi-blacklist.conf"
+bt_dep="$(chroot "$MNT" modprobe -S "$KVER" --show-depends sprdbt_tty 2>&1 || true)"
+[[ "$bt_dep" == "install /bin/true"* ]] && ok "modprobe sprdbt_tty is a no-op" || fail "modprobe sprdbt_tty is a no-op (${bt_dep})"
+wifi_dep="$(chroot "$MNT" modprobe -S "$KVER" --show-depends sprdwl_ng 2>&1 || true)"
+printf '#   %s\n' "$wifi_dep"
+grep -E '/(sprdwl_ng|sprdbt_tty|uwe5622_bsp_sdio)\.ko$' "${mods_root}/${KVER}/modules.builtin" >/dev/null 2>&1 \
+  && fail "UWE5622 driver is a module, not built into the kernel" || ok "UWE5622 driver is a module, not built into the kernel"
+case "$VARIANT" in
+  armbian)
+    check "no uwe5622-mainline modules (updates/uwe5622 absent)" test ! -e "$upd"
+    if grep -qE '^insmod .*/kernel/.*/sprdwl_ng\.ko' <<< "$wifi_dep"; then ok "sprdwl_ng is Armbian's in-tree module"; else fail "sprdwl_ng is Armbian's in-tree module"; fi
+    ;;
+  mainline)
+    sed 's/^/#   /' "${upd}/SOURCE" 2>/dev/null || true
+    for ko in uwe5622_bsp_sdio sprdwl_ng sprdbt_tty; do
+      check "updates/uwe5622/${ko}.ko" test -s "${upd}/${ko}.ko"
+      vermagic="$(chroot "$MNT" modinfo -F vermagic "/lib/modules/${KVER}/updates/uwe5622/${ko}.ko" 2>/dev/null || true)"
+      [ "${vermagic%% *}" = "$KVER" ] && ok "${ko} vermagic ${KVER}" || fail "${ko} vermagic ${KVER} (got '${vermagic}')"
+    done
+    for ko in uwe5622_bsp_sdio sprdwl_ng; do
+      if grep -qE "^insmod /(usr/)?lib/modules/${KVER}/updates/uwe5622/${ko}\.ko" <<< "$wifi_dep"; then
+        ok "modprobe sprdwl_ng loads ${ko} from updates/"
+      else
+        fail "modprobe sprdwl_ng loads ${ko} from updates/"
+      fi
+    done
+    # Every symbol the modules import must come from this kernel or its modules
+    smap="${MNT}/boot/System.map-${KVER}"
+    if [ -s "$smap" ]; then
+      depmod_args=(-F "/boot/System.map-${KVER}")
+    elif [ -n "${OPI_UWE5622_SYMVERS:-}" ] && [ -s "$OPI_UWE5622_SYMVERS" ]; then
+      cp "$OPI_UWE5622_SYMVERS" "${MNT}/run/kernel.symvers"
+      depmod_args=(-E /run/kernel.symvers)
+    else
+      depmod_args=()
+      fail "symbol check: neither /boot/System.map-${KVER} nor OPI_UWE5622_SYMVERS"
+    fi
+    if [ "${#depmod_args[@]}" -gt 0 ]; then
+      unresolved="$(chroot "$MNT" depmod -n -e "${depmod_args[@]}" "$KVER" 2>&1 >/dev/null | grep -iE 'unknown symbol' | grep 'updates/uwe5622' || true)"
+      [ -z "$unresolved" ] && ok "depmod -e: no unresolved symbols (${depmod_args[0]})" \
+        || { fail "depmod -e: no unresolved symbols"; printf '#   %s\n' "$unresolved"; }
+    fi
+    if grep -q '^CONFIG_MODULE_SIG_FORCE=y' "${MNT}/boot/config-${KVER}" 2>/dev/null; then
+      fail "kernel accepts unsigned modules (CONFIG_MODULE_SIG_FORCE is set)"
+    else
+      ok "kernel accepts unsigned modules"
+    fi
+    ;;
+  *) fail "OPI_UWE5622_VARIANT must be armbian or mainline (${VARIANT})" ;;
+esac
+# The initrd must not carry a copy of the driver: an early load from there would bypass updates/
+if [ -s "${MNT}/boot/initrd.img-${KVER}" ]; then
+  if chroot "$MNT" lsinitramfs "/boot/initrd.img-${KVER}" 2>/dev/null | grep -qE '(sprdwl_ng|uwe5622_bsp_sdio|sprdbt_tty)\.ko'; then
+    fail "initrd carries no UWE5622 module"
+  else
+    ok "initrd carries no UWE5622 module"
+  fi
+else
+  echo "# no /boot/initrd.img-${KVER} to list (only uInitrd)"
+fi
+grep -vE '^[[:space:]]*(#|$)' "${MNT}/etc/modules" 2>/dev/null | sed 's/^/# \/etc\/modules: /' || true
+
 # --- size ---
 used_mb="$(( $(df --output=used -B1 "$MNT" | tail -n1) / 1048576 ))"
 echo "# root filesystem: ${used_mb} MiB used, $(chroot "$MNT" dpkg-query -W -f='.\n' 2>/dev/null | wc -l) packages"
@@ -87,8 +168,6 @@ du -xm -d 4 "${MNT}/usr" "${MNT}/var" "${MNT}/opt" 2>/dev/null | sort -rn | head
 [ "$used_mb" -le "$MAX_MB" ] && ok "root filesystem <= ${MAX_MB} MiB" || fail "root filesystem <= ${MAX_MB} MiB (${used_mb})"
 
 # --- the lockdown, checked by the image's own tools ---
-for m in dev dev/pts proc sys; do mount --bind "/${m}" "${MNT}/${m}"; done
-mount -t tmpfs tmpfs "${MNT}/run"
 if chroot "$MNT" /usr/local/sbin/opi-selfcheck --image; then ok "opi-selfcheck --image"; else fail "opi-selfcheck --image"; fi
 
 [ "$FAILED" -eq 0 ] && echo "# image inspection: all passed" || echo "# image inspection: FAILED"

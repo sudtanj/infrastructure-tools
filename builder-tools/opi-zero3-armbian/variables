@@ -8,3 +8,15 @@ ARMBIAN_COMMIT="23ca24aec803e0bb17607f75bbb0516f151277a5"
 BOARD="orangepizero3"
 KERNEL_BRANCH="current"
 RELEASE="trixie"
+
+# Wi-Fi/Bluetooth driver for the onboard UWE5622. Both images are always built and tested:
+#   armbian   Armbian's in-tree driver (the image as Armbian builds it)
+#   mainline  github.com/sudtanj/uwe5622-mainline at UWE5622_COMMIT, built against the image's
+#             exact kernel and installed to /lib/modules/<ver>/updates/uwe5622 (overrides the
+#             in-tree modules for that kernel version only)
+# UWE5622_DRIVER picks which of the two is published under the plain image name; the other
+# gets a -uwe5622-<driver> suffix. The weekly run moves UWE5622_COMMIT to the driver's main
+# head once the mainline image passes every test (see README "Wi-Fi driver").
+UWE5622_REPO="https://github.com/sudtanj/uwe5622-mainline"
+UWE5622_COMMIT="3bb1b0c868435157a060d3fd737f5f6ca49789aa"
+UWE5622_DRIVER="armbian"

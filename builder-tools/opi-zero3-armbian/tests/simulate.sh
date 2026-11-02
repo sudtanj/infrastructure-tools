@@ -17,6 +17,8 @@
 #   SIM_MEMORY (default 1024, MiB)  SIM_CPUS (4)  SIM_ACCEL (tcg; kvm uses -cpu host)
 #   SIM_MIN_AVAILABLE_MB  fail when less memory is available with Docker + Dozzle up (default 400)
 #   SIM_SKIP_UPGRADE=1    skip the upgrade + reboot round
+#   SIM_UWE5622_SRC=dir   build the uwe5622-mainline driver in dir against the simulation kernel
+#                         and run SIM_UWE5622_ROUNDS (10) load/unload rounds without the chip
 
 set -euo pipefail
 
@@ -98,6 +100,20 @@ kmods="${WORK}/kpkg/usr/lib/modules/${KVER}"
 cp -a "$kmods" "${MNT}/usr/lib/modules/"
 cp "${WORK}/kpkg/boot/vmlinuz-${KVER}" "${WORK}/vmlinuz"
 in_chroot depmod "$KVER"
+if [ -n "${SIM_UWE5622_SRC:-}" ]; then
+  # The same driver commit as the board image, built against the simulation kernel's headers
+  # (Debian's, in a container of the image's release) and installed the way the image has it
+  release="$(sed -n 's/^VERSION_CODENAME=//p' "${MNT}/usr/lib/os-release")"
+  mkdir -p "${WORK}/uwe5622"
+  docker run --rm -v "$(cd "$SIM_UWE5622_SRC" && pwd):/src:ro" -v "${HERE}/../uwe5622:/tools:ro" \
+    -v "${WORK}/uwe5622:/out" "debian:${release}" bash -euc \
+    "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+       linux-headers-${KVER} make gcc binutils kmod >/dev/null && /tools/build-modules.sh /src /usr/src/linux-headers-${KVER} /out"
+  install -d -m 755 "${MNT}/usr/lib/modules/${KVER}/updates/uwe5622"
+  install -m 644 "${WORK}/uwe5622/"*.ko "${MNT}/usr/lib/modules/${KVER}/updates/uwe5622/"
+  in_chroot depmod "$KVER"
+  echo "# uwe5622-mainline modules built for the simulation kernel ${KVER}"
+fi
 # MODULES=most: the virt machine's disk/net drivers must be in the initrd
 cp -r "${MNT}/etc/initramfs-tools" "${MNT}/tmp/sim-initramfs-conf"
 sed -i 's/^MODULES=.*/MODULES=most/' "${MNT}/tmp/sim-initramfs-conf/initramfs.conf"
@@ -171,6 +187,49 @@ checks() {  # round
     || fail "memory available >= ${MIN_AVAIL} MiB (${r}: ${avail})"
 }
 
+# The uwe5622-mainline driver with no UWE5622 present: what the board's driver does when the chip
+# doesn't answer. Proves the integration (modprobe finds updates/, dependencies, blacklist) and
+# robustness (probe fails cleanly, unload frees everything, no oops/WARN/BUG), not Wi-Fi itself.
+uwe5622_rounds() {
+  local rounds="${SIM_UWE5622_ROUNDS:-10}" i loaded=0 unloaded=0 before taint0 taint1 bad
+  local mods='uwe5622_bsp_sdio|sprdwl_ng|sprdbt_tty'
+  echo "# --- uwe5622-mainline without hardware: ${rounds} load/unload rounds ---"
+  if vm_sudo "modinfo -n sprdwl_ng" 2>/dev/null | grep -q '/updates/uwe5622/sprdwl_ng\.ko$'; then
+    ok "modprobe finds sprdwl_ng in updates/uwe5622"
+  else
+    fail "modprobe finds sprdwl_ng in updates/uwe5622"
+  fi
+  before="$(vm_sudo "dmesg" | wc -l)"
+  taint0="$(vm "cat /proc/sys/kernel/tainted")"
+  for i in $(seq 1 "$rounds"); do
+    # sprdbt_tty is blacklisted with "install ... /bin/true"; --ignore-install loads it anyway
+    timeout 300 vm_sudo "sh -c 'modprobe sprdwl_ng; modprobe --ignore-install sprdbt_tty'" \
+      >> "${WORK}/uwe5622-rounds.log" 2>&1 || echo "# round ${i}: load returned an error" >> "${WORK}/uwe5622-rounds.log"
+    [ "$(vm "lsmod" | grep -cE "^(${mods}) ")" -eq 3 ] && loaded=$((loaded + 1))
+    timeout 300 vm_sudo "sh -c 'rmmod sprdbt_tty; rmmod sprdwl_ng; rmmod uwe5622_bsp_sdio'" \
+      >> "${WORK}/uwe5622-rounds.log" 2>&1 || echo "# round ${i}: unload returned an error" >> "${WORK}/uwe5622-rounds.log"
+    [ "$(vm "lsmod" | grep -cE "^(${mods}) ")" -eq 0 ] && unloaded=$((unloaded + 1))
+  done
+  [ "$loaded" -eq "$rounds" ] && ok "all three modules load without hardware (${loaded}/${rounds})" \
+    || { fail "all three modules load without hardware (${loaded}/${rounds})"; tail -n 40 "${WORK}/uwe5622-rounds.log"; }
+  [ "$unloaded" -eq "$rounds" ] && ok "all three modules unload (${unloaded}/${rounds})" \
+    || { fail "all three modules unload (${unloaded}/${rounds})"; tail -n 40 "${WORK}/uwe5622-rounds.log"; }
+  vm_sudo "dmesg" | tail -n +"$((before + 1))" > "${WORK}/uwe5622-dmesg.log" || true
+  echo "# kernel log of the rounds ($(wc -l < "${WORK}/uwe5622-dmesg.log") lines), first round:"
+  head -n 40 "${WORK}/uwe5622-dmesg.log" | sed 's/^/#   /'
+  bad="$(grep -E 'Oops|BUG:|WARNING:|Call trace:|Unable to handle|Kernel panic|refcount_t:|list_(add|del) corruption|use-after-free|soft lockup|hung_task|blocked for more than' \
+         "${WORK}/uwe5622-dmesg.log" || true)"
+  [ -z "$bad" ] && ok "no oops, WARN or BUG in the kernel log" \
+    || { fail "no oops, WARN or BUG in the kernel log"; grep -B 5 -A 30 -m 3 -E 'Oops|BUG:|WARNING:|Call trace:' "${WORK}/uwe5622-dmesg.log" | sed 's/^/#   /'; }
+  # Taint flags new since the rounds: D (died, 128), W (warning, 512), B (bad page, 32),
+  # L (soft lockup, 16384). O and E (out-of-tree, unsigned module) are expected.
+  taint1="$(vm "cat /proc/sys/kernel/tainted")"
+  [ $(( (taint1 & ~taint0) & (128 | 512 | 32 | 16384) )) -eq 0 ] && ok "kernel not tainted by a crash or warning (${taint0} -> ${taint1})" \
+    || fail "kernel not tainted by a crash or warning (${taint0} -> ${taint1})"
+  vm_sudo "modprobe sprdbt_tty" >/dev/null 2>&1 || true
+  if vm "lsmod" | grep -q '^sprdbt_tty '; then fail "Bluetooth blacklist still applies (modprobe sprdbt_tty is a no-op)"; else ok "Bluetooth blacklist still applies (modprobe sprdbt_tty is a no-op)"; fi
+}
+
 boot_vm first
 
 echo "# --- first boot ---"
@@ -195,6 +254,11 @@ else
 fi
 
 checks "first boot"
+
+if [ -n "${SIM_UWE5622_SRC:-}" ]; then
+  uwe5622_rounds
+  checks "after the uwe5622 rounds"
+fi
 
 if [ -z "${SIM_SKIP_UPGRADE:-}" ]; then
   echo "# --- upstream updates ---"
