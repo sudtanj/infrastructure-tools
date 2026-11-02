@@ -163,6 +163,8 @@ echo "# root filesystem: ${used_mb} MiB used, $(chroot "$MNT" dpkg-query -W -f='
 echo "# largest packages (MiB installed):"
 chroot "$MNT" dpkg-query -W -f='${Installed-Size}\t${Package}\n' 2>/dev/null | sort -rn | head -n 25 \
   | awk '{ printf "#   %7.1f  %s\n", $1 / 1024, $2 }' || true
+echo "# firmware actually on disk (dpkg Installed-Size of armbian-firmware is the unfiltered package, see README Optimization log):"
+du -xm -d 1 "${MNT}/usr/lib/firmware" 2>/dev/null | sort -rn | head -n 12 | sed "s|${MNT}||; s/^/#   /" || true
 echo "# largest directories (MiB):"
 du -xm -d 4 "${MNT}/usr" "${MNT}/var" "${MNT}/opt" 2>/dev/null | sort -rn | head -n 25 \
   | sed "s|${MNT}||; s/^/#   /" || true

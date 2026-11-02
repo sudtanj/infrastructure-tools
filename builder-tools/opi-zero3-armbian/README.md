@@ -175,6 +175,35 @@ To run them locally (needs Docker and root, and an arm64 machine for the image t
 Requires Settings → Actions → General → Workflow permissions → "Read and write" (for the pin
 commit), the same as the Padavan builder.
 
+## Optimization log
+
+Every run measures the default image (`metrics` job, `metrics.json`, table in the run summary).
+Simulation numbers come from QEMU/TCG on a CI runner: they are noisy (the kernel part of the boot
+varied 27.5 s to 14.6 s between two runs of the same kernel), so compare the userspace part
+(`boot_multi_user_s - boot_kernel_s`) and sizes, and treat small idle differences as noise.
+
+| # | Run | Change | Result |
+|---|---|---|---|
+| 0 | 41471790012 | Baseline | 204.8 MiB image, 818 MiB used, 260 packages, 241 MiB used idle with Docker + Dozzle, 0.65% idle CPU, 68 KiB written to the root disk in 5 min, `/var/log` in zram, userspace boot 98.7 s |
+| 1 | 41481935071 | Mask `keyboard-setup` and `console-setup` (VT keymap/font; headless board, serial console only) | 2 fewer enabled services, userspace boot 96.4 s (about 2 s faster, within noise), size and memory unchanged |
+
+Looked at and left alone:
+
+- **Root disk writes:** 32 to 68 KiB per 5 minutes, only the ext4 journal thread. `noatime` or a
+  longer commit interval would save nothing measurable (Armbian already mounts with `commit=120`
+  and keeps `/var/log` in zram).
+- **Idle CPU and wakeups:** under 1% busy; the interrupt rate is dominated by the emulated machine.
+- **Memory:** dockerd, containerd and Dozzle are most of the 240 MiB; the host side is already
+  about 8 services.
+- **`armbian-firmware` "434 MiB":** a sizing artefact. That is dpkg's `Installed-Size` of the
+  unfiltered package. The image excludes firmware this board can't have (`dpkg-firmware.conf` and
+  `customize-image.sh`), and what is on disk is 78 MiB under `/usr/lib/firmware` (inspect logs the
+  breakdown). What remains is firmware for USB Wi-Fi/Bluetooth dongles (kept on purpose) and the
+  board's own `uwe5622/wcnmodem.bin` and `wifi_2355b001_1ant.ini`, which the inspection requires.
+  No further safe trim was found.
+- **Kernel modules (125 MiB) and the initrd (15 MiB):** Armbian's kernel; trimming modules risks
+  breaking Docker networking or USB dongles and was not attempted.
+
 ## Flash and provision
 
 1. Download the artifact, check it with `sha256sum -c Armbian-*.img.xz.sha`, then flash it:
