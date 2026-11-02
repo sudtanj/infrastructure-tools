@@ -52,6 +52,78 @@ Debian trixie with the `current` kernel, cut down to a box that only runs Docker
   per source address, pristine conffiles, services, firewall, sysctl, Docker). The build and the
   tests run the same script.
 
+## Wi-Fi driver
+
+The Zero 3's onboard Wi-Fi/Bluetooth chip is a Unisoc UWE5622 on SDIO. Every build produces
+two images that differ only in its driver:
+
+| Image | Driver | Status |
+|---|---|---|
+| `Armbian-unofficial_..._minimal.img.xz` | Armbian's in-tree driver (modules `uwe5622_bsp_sdio`, `sprdwl_ng`, `sprdbt_tty` in `/lib/modules/<ver>/kernel/`) | default, in daily use on Armbian |
+| `Armbian-unofficial_..._minimal-uwe5622-mainline.img.xz` | [uwe5622-mainline](https://github.com/sudtanj/uwe5622-mainline) at `UWE5622_COMMIT`, same module names, in `/lib/modules/<ver>/updates/uwe5622/` | candidate, not yet tested on a board |
+
+- **How the mainline image is made** ([`uwe5622/`](uwe5622/)): after the Armbian build, the
+  `build-uwe5622` job installs Armbian's own `linux-headers` package of the image's kernel on the
+  arm64 runner (its postinst restores the kernel's build-time config), builds the three modules
+  natively ([`build-modules.sh`](uwe5622/build-modules.sh): modpost resolves every symbol against
+  the kernel's `Module.symvers`, and the vermagic must be the image's kernel release), copies them
+  into `updates/uwe5622/` of the image and runs `depmod` for that kernel inside it
+  ([`make-image.sh`](uwe5622/make-image.sh)). `updates/` takes precedence over `kernel/` for
+  modules of the same name. Nothing else differs; the Bluetooth blacklist applies to both.
+  `/lib/modules/<ver>/updates/uwe5622/SOURCE` records the driver commit. The modules, the build
+  log and the kernel's `Module.symvers` are also uploaded as `uwe5622-mainline-modules-<ver>`.
+- **Switching the default:** `UWE5622_DRIVER` in [`variables`](variables) (`armbian` or
+  `mainline`) picks which of the two images gets the plain name; the other one gets a
+  `-uwe5622-mainline` or `-uwe5622-armbian` suffix. Both are always built and tested. Keep
+  `armbian` until the mainline image has been confirmed on a board.
+- **Fallback on kernel upgrades:** the modules are only valid for the kernel they were built
+  for, and `updates/` is per kernel version. After `apt upgrade` installs a new Armbian kernel,
+  `/lib/modules/<new>/updates/` doesn't exist, so the board boots with Armbian's in-tree driver
+  automatically (flash a newer mainline image to get the mainline driver back). If Armbian ever
+  rebuilt a kernel package without changing its version, the old modules would still be picked
+  up; the kernel then refuses them if the symbol versions changed (`dmesg`: `disagrees about
+  version of symbol`), and the rollback below applies.
+- **Weekly update:** the scheduled run also checks the driver's `main`. When it differs from
+  `UWE5622_COMMIT`, that commit is built into the mainline image as a candidate and the pin is
+  only committed when `inspect-uwe5622` and `simulate-uwe5622` pass (the same gate as Armbian's).
+- **What CI proves:** `inspect-uwe5622` checks the modules are in `updates/`, their vermagic,
+  that every symbol they import resolves (`depmod -e` against the kernel's `System.map` or
+  `Module.symvers`), that `modprobe sprdwl_ng` resolves to `updates/`, that the firmware the
+  driver loads is there (`uwe5622/wcnmodem.bin`, `wifi_2355b001_1ant.ini`), that the Bluetooth
+  blacklist is unchanged and still makes `modprobe sprdbt_tty` a no-op, that the initrd carries no
+  copy of the driver, and `opi-selfcheck --image`. `simulate-uwe5622` builds the same commit
+  against the simulation's Debian kernel and loads and unloads the modules ten times with no chip
+  present: the probe must fail cleanly, everything must unload, the kernel log must show no
+  oops, WARN or BUG and no new taint, and afterwards selfcheck, Docker, Dozzle and the memory
+  check must still pass. This proves the integration and the driver's robustness when the chip
+  doesn't answer. It does **not** prove that Wi-Fi works: QEMU has no UWE5622 and no H618 SDIO
+  controller, so firmware upload, scanning and association are only tested on a board.
+
+### Testing on the board
+
+Flash the `-uwe5622-mainline` image (with a serial console on the 3-pin UART header if you can:
+a crash in a driver takes the network with it), provision it as usual, then:
+
+```bash
+cat /lib/modules/$(uname -r)/updates/uwe5622/SOURCE      # which driver commit
+modinfo -n sprdwl_ng                                     # .../updates/uwe5622/sprdwl_ng.ko
+sudo dmesg | grep -iE 'wcn|sprd|marlin|sdio|mmc1|unisoc' | tail -n 50
+iw dev                                                   # expect wlan0
+sudo ip link set wlan0 up && sudo iw wlan0 scan | grep -E 'SSID|signal' | head
+```
+
+Then connect through `/etc/netplan` (or `WIFI_SSID` / `WIFI_PASSWORD` in the provisioning file) and keep it
+running for a while (`ping` across the tailnet, a reboot, a Docker pull over Wi-Fi). If that all
+works, set `UWE5622_DRIVER="mainline"`.
+
+**Rollback** to Armbian's driver on a running board, without reflashing:
+
+```bash
+sudo rm -r /lib/modules/$(uname -r)/updates/uwe5622
+sudo depmod -a
+sudo reboot
+```
+
 ## Build
 
 [`builder-tools-opi-zero3-armbian.yml`](../../.github/workflows/builder-tools-opi-zero3-armbian.yml)
@@ -87,6 +159,9 @@ finished. The workflow copies `bash-scripts/opi-init-tailscale-docker.sh` into t
 | `unit` | [Firewall with real packets](tests/firewall-netns.sh), using network namespaces for the board, a LAN/internet client and a tailnet peer. LAN v4/v6 and `tailscale0` get in. Public v4/v6, and CGNAT addresses outside `tailscale0`, are dropped. Replies, ICMP and reloads work | runner, root |
 | `inspect` | [The built image](tests/image-inspect.sh): U-Boot SPL (`eGON.BT0`) at 8 KiB for the H618 boot ROM, boot script, Zero 3 device tree, kernel, initrd and `rootdev` UUID. Also: the board kernel's config has what Docker needs, the root filesystem fits the size budget (with a report of the largest packages and directories), and `opi-selfcheck --image` passes inside the image (no user, no secret, no autologin, ...) | arm64 runner, loop mount + chroot |
 | `simulate` | [Zero 3 simulation](tests/simulate.sh): the image's root filesystem booted with systemd in QEMU on 4× Cortex-A53 / 1 GiB (TCG). Covers first boot with a provisioning file, host key regeneration, filesystem growth, SSH by key and by password (from the LAN), no root login, sudo needing the password, `opi-selfcheck`, Docker with `no-new-privileges`, a real deploy of `bash-scripts/init-dozzle.sh`, and memory left. Then a real run of `opi-security-upgrade.service`, `apt dist-upgrade` from all repos, a reinstall of every package next to our files, a reboot, and all checks again | arm64 runner |
+| `build-uwe5622` | uwe5622-mainline built against the image kernel's `linux-headers` package (modpost against `Module.symvers`, vermagic = image kernel) and injected into the `-uwe5622-mainline` image. See [Wi-Fi driver](#wi-fi-driver) | arm64 runner |
+| `inspect-uwe5622` | The same inspection on the mainline image, plus: modules in `updates/uwe5622`, vermagic, `depmod -e` symbol check, `modprobe --show-depends sprdwl_ng` resolves to `updates/`, firmware present, Bluetooth blacklist unchanged, no driver copy in the initrd | arm64 runner, loop mount + chroot |
+| `simulate-uwe5622` | The mainline image in the simulation, with the same driver commit built for the Debian simulation kernel: 10 load/unload rounds without the chip (clean probe failure, no oops/WARN/BUG, no new taint), then all `simulate` checks except the upgrade round. Integration and robustness only, not radio function | arm64 runner |
 
 QEMU can't emulate the H618, and Armbian's board kernel has no virtio or PL011 drivers. So the
 simulation boots Debian's arm64 kernel of the same release (unpacked outside dpkg) with the
