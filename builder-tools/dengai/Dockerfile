@@ -10,6 +10,7 @@
 
 ARG DENGAI_REPO=https://github.com/sudtanj/dengai
 ARG DENGAI_REF=
+ARG DENGAI_REVISION=unknown
 ARG RUST_IMAGE=rust:1-bookworm
 # distroless/cc: glibc + libgcc + CA certificates (needed for Steam's TLS) and
 # nothing else. Runs as uid 65532.
@@ -59,6 +60,10 @@ RUN set -eux; \
 
 FROM ${RUNTIME_IMAGE}
 
+ARG DENGAI_REVISION
+LABEL org.opencontainers.image.source="https://github.com/sudtanj/dengai" \
+      org.opencontainers.image.revision="${DENGAI_REVISION}"
+
 COPY --from=builder /usr/local/bin/dengai /usr/local/bin/dengai
 COPY --from=builder --chown=65532:65532 /data /data
 
@@ -67,6 +72,8 @@ COPY --from=builder --chown=65532:65532 /data /data
 ENV DENGAI_DATA_DIR=/data \
     DENGAI_API_BIND=0.0.0.0:8737
 
+# No HEALTHCHECK: distroless has no shell or curl, and dengai has no probe subcommand
+# (only --help and --version). The deploy script polls docker state instead.
 USER 65532:65532
 EXPOSE 8737
 VOLUME /data

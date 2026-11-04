@@ -183,6 +183,17 @@ jobs:
           case "$platforms" in *arm64*|*arm/*) echo "needs_qemu=true" >> "$GITHUB_OUTPUT" ;; *) echo "needs_qemu=false" >> "$GITHUB_OUTPUT" ;; esac
           echo "Platforms for ${FOLDER}: ${platforms}"
 
+      - name: Resolve source revision
+        id: source
+        if: matrix.folder == 'dengai'
+        run: |
+          set -euo pipefail
+          # The Dockerfile fetches dengai from its own repo; pinning the commit makes every dengai
+          # push rebuild and puts the commit in the image's revision label.
+          sha=$(git ls-remote https://github.com/sudtanj/dengai HEAD | cut -f1)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve dengai HEAD" >&2; exit 1; }
+          printf 'build_args<<EOF\nDENGAI_REF=%s\nDENGAI_REVISION=%s\nEOF\n' "$sha" "$sha" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -203,6 +214,7 @@ jobs:
           platforms: ${{ steps.platforms.outputs.platforms }}
           push: true
           pull: true
+          build-args: ${{ steps.source.outputs.build_args }}
           tags: |
             ${{ env.DOCKERHUB_NAMESPACE }}/${{ matrix.folder }}:latest
             ${{ env.DOCKERHUB_NAMESPACE }}/${{ matrix.folder }}:${{ steps.tag.outputs.new_version }}
