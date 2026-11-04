@@ -519,6 +519,7 @@ if ! run_out=$(docker run -d --name "$CONTAINER_NAME" --restart always \
   -e CLAUDE_CODE_MAX_OUTPUT_TOKENS="$CLAUDE_MAX_OUTPUT_TOKENS" \
   -e BASH_DEFAULT_TIMEOUT_MS=120000 \
   -e BASH_MAX_TIMEOUT_MS=600000 \
+  -e CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 \
   ${opt_env[@]+"${opt_env[@]}"} \
   "$IMAGE" 2>&1); then
   echo "[x] docker run failed:" >&2
