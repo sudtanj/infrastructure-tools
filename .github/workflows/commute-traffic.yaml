@@ -94,6 +94,8 @@ on:
 
 permissions:
   contents: read
+  # Only to see which other runs are using the Chrome profile.
+  actions: read
 
 concurrency:
   group: commute-traffic
@@ -102,7 +104,7 @@ concurrency:
 jobs:
   traffic:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     env:
       COMMUTE_TZ: ${{ secrets.COMMUTE_TZ || 'Asia/Jakarta' }}
       PREDICT_TIME: '11:00'
@@ -202,6 +204,12 @@ jobs:
       - name: Install Playwright (CDP client only)
         if: steps.gate.outputs.run == 'true'
         run: npm ci --prefix private/commute_traffic --no-audit --no-fund --loglevel=error
+
+      # One Chrome on the saved profile at a time, across workflows (see the action).
+      - name: Wait for the Chrome profile
+        if: steps.gate.outputs.run == 'true'
+        timeout-minutes: 30
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # Same encrypted profile and format as chrome-cdp-session.yaml, restored
       # as in tokopedia-search.yaml (before the VPN: faster).

@@ -1,0 +1,102 @@
+name: "Deploy Apify Actors (private repo)"
+
+# Pushes every Apify Actor in the PRIVATE repo's `apify/` folder to the Apify
+# platform with `apify push`, which uploads the source and builds it on Apify.
+# An Actor is any folder holding `.actor/actor.json`; its name there is the
+# Actor's name on Apify, created on first push.
+#
+# This repo is public: steps print counts only, never Actor names, paths or
+# build output. A failed push sends its log tail to Telegram instead.
+#
+# SETUP
+#   secret APIFY_TOKEN         required; Apify Console > Settings > API & Integrations
+#   secret PRIVATE_REPO        "owner/name" (shared with the other private-repo workflows)
+#   secret PRIVATE_REPO_TOKEN  read access to the private repo (shared)
+#   secret BUILD_REF           optional branch, defaults to main (shared)
+#   secret TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   failure alerts (shared)
+#
+# Pricing (pay per event) and Store publication are set once per Actor in
+# Apify Console > Actor > Publication; `apify push` does not change them.
+#
+# ponytail: manual only and pushes every Actor each run. Add polling and
+# changed-folder detection (as in deno-private-deploy.yaml) once there are
+# several Actors or builds cost noticeable compute.
+
+on:
+  workflow_dispatch:
+    inputs:
+      actor:
+        description: "Push only the Actor in apify/<folder>; empty for all"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apify-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check secrets
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          [ -n "$APIFY_TOKEN" ] || { echo "::error::APIFY_TOKEN secret is not set."; exit 1; }
+          [ -n "$PRIVATE_REPO" ] || { echo "::error::PRIVATE_REPO secret is not set."; exit 1; }
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Push Actors
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          ONLY: ${{ inputs.actor }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+          npm install -g apify-cli > /tmp/npm.log 2>&1 || { echo "::error::Installing apify-cli failed."; tail -n 20 /tmp/npm.log; exit 1; }
+          apify login --token "$APIFY_TOKEN" > /dev/null 2>&1 || { echo "::error::apify login failed; check APIFY_TOKEN."; exit 1; }
+
+          cd private/apify 2>/dev/null || { echo "::notice::No apify/ folder in the private repo; nothing to deploy."; exit 0; }
+          mapfile -t dirs < <(find . -path '*/node_modules' -prune -o -name actor.json -path '*/.actor/*' -print | sed 's#/\.actor/actor\.json$##' | sort)
+          if [ -n "$ONLY" ]; then
+            [[ "$ONLY" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid actor folder name."; exit 1; }
+            dirs=(); [ -f "./$ONLY/.actor/actor.json" ] && dirs=("./$ONLY")
+          fi
+          [ "${#dirs[@]}" -gt 0 ] || { echo "::notice::No Actors found; nothing to deploy."; exit 0; }
+
+          ok=0; failed=0
+          for d in "${dirs[@]}"; do
+            if (cd "$d" && apify push --force > /tmp/push.log 2>&1); then
+              ok=$((ok + 1))
+            else
+              failed=$((failed + 1))
+              # The log names private files and the Actor; it goes to Telegram only.
+              if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+                text="Apify push failed for ${d#./}:
+          $(tail -n 30 /tmp/push.log | cut -c1-300)"
+                curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                  --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text:0:4000}" || true
+              fi
+            fi
+          done
+          echo "Apify: ${ok} pushed, ${failed} failed."
+          [ "$failed" -eq 0 ] || { echo "::error::${failed} Actor push(es) failed; details sent to Telegram."; exit 1; }

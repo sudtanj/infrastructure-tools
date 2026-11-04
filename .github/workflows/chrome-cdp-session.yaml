@@ -56,7 +56,7 @@ name: "Chrome CDP session over Tailscale"
 #   over CDP), or until nothing has been connected to VNC or CDP for
 #   `idle_minutes` (default 30, counted from start too). An open VNC viewer or
 #   CDP connection keeps it alive. Only a crash restarts Chrome.
-#   One GitHub job can run at most 360 minutes, so at 320 minutes the run
+#   One GitHub job can run at most 360 minutes, so at 230 minutes (90 spare for waiting on the Chrome profile) the run
 #   saves and, if anything was connected in the last `idle_minutes`, starts a
 #   new run that restores the same profile at the same tailnet IP (a few
 #   minutes' gap while it boots).
@@ -153,6 +153,12 @@ jobs:
           # profile (or a new Tailscale node) would later be saved over the
           # good state.
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' > /tmp/state-assets.txt
+
+      # One Chrome on the saved profile at a time, across workflows (see the action).
+      # Up to a worker run with tech_short in it.
+      - name: Wait for the Chrome profile
+        timeout-minutes: 90
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`. The
       # manifest is uploaded last, so only sets with one are complete.
@@ -314,7 +320,7 @@ jobs:
           idle_min="${IDLE_MINUTES%%.*}"
           [[ "$idle_min" =~ ^[0-9]+$ ]] && [ "$idle_min" -gt 0 ] || idle_min=30
           # Leaves room under the 360 minute job limit to pack and upload the profile.
-          cap_min=320
+          cap_min=230
           mkdir -p "$PROFILE_DIR"
           export LANG="${LOCALE//-/_}.UTF-8" LANGUAGE="${LOCALE//-/_}"
 

@@ -1,0 +1,30 @@
+name: Wait for the Chrome profile
+description: >
+  One Chrome on the saved chrome-cdp-state profile at a time, across workflows.
+  Two at once look like one Google login on two machines, and the last to save
+  overwrites the cookies the other one refreshed (which can sign the accounts
+  out). Waits until no older in-progress run of a workflow below is left; older
+  runs never wait for newer ones, so runs go one after another in start order.
+  The caller needs `permissions: actions: read` and should set
+  `timeout-minutes` on the step.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        # The workflows that start their own Chrome on the saved profile.
+        WORKFLOWS: chrome-cdp-session|typescript-worker-run|commute-traffic|job-hunter|search-engine-register|job-apply|shopee-search|tokopedia-search
+      run: |
+        set -euo pipefail
+        me="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" -q .created_at)"
+        # One request a minute: GITHUB_TOKEN allows 1,000 an hour per repo.
+        while :; do
+          ahead="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?status=in_progress&per_page=100" -q "[.workflow_runs[]
+            | select(.path | test(\"workflows/(${WORKFLOWS})\\\\.ya?ml\"))
+            | select(.id != ${GITHUB_RUN_ID} and (.created_at < \"${me}\" or (.created_at == \"${me}\" and .id < ${GITHUB_RUN_ID})))] | length")"
+          [ "$ahead" -eq 0 ] && break
+          echo "Another run is using the Chrome profile; waiting."
+          sleep 60
+        done

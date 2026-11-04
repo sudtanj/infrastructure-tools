@@ -236,6 +236,8 @@ on:
 
 permissions:
   contents: read
+  # Only to see which other runs are using the Chrome profile.
+  actions: read
 
 concurrency:
   # `secrets` is NOT available in `concurrency`, so this is keyed on this repo.
@@ -527,9 +529,9 @@ jobs:
     # covers the "folder exists but holds no .ts" case.
     if: ${{ needs.discover.outputs.count != '0' }}
     runs-on: ubuntu-latest
-    # Above the longest tick: setup, honeygain_lucky_pot (5 min) and tech_short (80 min), so
+    # Above the longest tick: up to 30 min waiting for the Chrome profile, setup, honeygain_lucky_pot (5 min) and tech_short (80 min), so
     # one slow script ends at its own timeout instead of GitHub killing the job and the scripts left in it.
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
@@ -666,6 +668,12 @@ jobs:
       # ---------------- Tailscale: install, join, verify ----------------
 
       # ------------- Chrome profile and install (before the VPN) -------------
+
+      # One Chrome on the saved profile at a time, across workflows (see the action).
+      - name: Wait for the Chrome profile
+        if: ${{ env.USE_BROWSER == 'true' }}
+        timeout-minutes: 30
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # Same encrypted profile and format as chrome-cdp-session.yaml: a set is
       # `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`, the manifest

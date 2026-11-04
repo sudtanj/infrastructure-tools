@@ -56,6 +56,8 @@ on:
 
 permissions:
   contents: read
+  # Only to see which other runs are using the Chrome profile.
+  actions: read
 
 concurrency:
   # The one Chrome profile and one CDP port: two applications at once would clash.
@@ -65,7 +67,7 @@ concurrency:
 jobs:
   apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
@@ -135,6 +137,11 @@ jobs:
           fi
           # Not a secret, but a real address in a public log.
           if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+
+      # One Chrome on the saved profile at a time, across workflows (see the action).
+      - name: Wait for the Chrome profile
+        timeout-minutes: 30
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # Same encrypted profile and format as chrome-cdp-session.yaml, restored
       # the same way as typescript-worker-run.yaml (before the VPN: faster).

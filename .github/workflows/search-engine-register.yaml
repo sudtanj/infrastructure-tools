@@ -87,6 +87,8 @@ on:
 
 permissions:
   contents: read
+  # Only to see which other runs are using the Chrome profile.
+  actions: read
 
 concurrency:
   group: search-engine-register
@@ -98,7 +100,7 @@ jobs:
     # Only from the default branch: a workflow edited on another branch cannot reach the secrets.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
@@ -154,6 +156,12 @@ jobs:
           fi
           # Not a secret, but a real address in a public log.
           if [ -n "${TAILSCALE_EXIT_NODE:-}" ]; then echo "::add-mask::${TAILSCALE_EXIT_NODE}"; fi
+
+      # One Chrome on the saved profile at a time, across workflows (see the action).
+      - name: Wait for the Chrome profile
+        if: ${{ env.SESSION_BROWSER != 'true' }}
+        timeout-minutes: 30
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # Same encrypted profile and format as chrome-cdp-session.yaml, restored
       # as in job-apply.yaml (before the VPN: faster).
