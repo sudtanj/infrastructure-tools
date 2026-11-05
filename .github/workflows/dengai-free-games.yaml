@@ -1,8 +1,8 @@
 name: "dengai Free Games"
 
-# Every 6 hours, collect Steam store links of free games from public feeds and hand them to dengai
-# on the Orange Pi (POST /addlicense over the tailnet). Ids dengai already answered are kept in the
-# Actions cache, so each one is sent once.
+# Every 6 hours, collect Steam store links of free games from public feeds and put them in dengai's
+# claim queue on the Orange Pi (POST /queue over the tailnet). dengai claims them at its own pace
+# (claims_per_hour, rate-limit back-off) and ignores ids it already claimed, rejected or queued.
 #
 # Sources (each may fail on its own; the rest still run):
 #   r/FreeGameFindings and r/FreeGamesOnSteam (Atom feeds): store.steampowered.com links in new posts
@@ -80,27 +80,10 @@ jobs:
             | sed -E 's#.*/app/#a/#; s#.*/sub/#sub/#' | sort -u > ids.txt
           echo "$(wc -l < ids.txt) Steam ids found"
 
-      - name: Restore sent ids
-        uses: actions/cache/restore@v4
-        with:
-          path: sent.txt
-          key: dengai-sent-${{ github.run_id }}
-          restore-keys: dengai-sent-
-
-      - name: Pick new ids
-        id: pick
-        run: |
-          set -euo pipefail
-          touch sent.txt
-          sort -u sent.txt -o sent.txt
-          comm -23 ids.txt sent.txt > new.txt
-          echo "count=$(wc -l < new.txt)" >> "$GITHUB_OUTPUT"
-          echo "New: $(paste -sd' ' new.txt)"
-
       - name: Join the tailnet
-        if: steps.pick.outputs.count != '0'
         run: |
           set -euo pipefail
+          [ -s ids.txt ] || { echo "Nothing to send"; exit 0; }
           curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
           HOST="gh-dengai-free-${GITHUB_RUN_ID}"
           if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
@@ -112,32 +95,21 @@ jobs:
               --hostname="$HOST" --accept-routes >/dev/null 2>&1
           fi
 
-      - name: Claim through dengai
-        if: steps.pick.outputs.count != '0'
+      - name: Queue in dengai
         run: |
           set +e
+          [ -s ids.txt ] || exit 0
           api="http://${OPI_TAILSCALE_IP}:${DENGAI_PORT:-8737}"
-          # dengai waits 5 s between items and answers within 120 s, so 15 per request fits.
-          split -l 15 new.txt batch.
+          split -l 50 ids.txt batch.
           for f in batch.*; do
             body=$(jq -Rn '{ids: [inputs]}' < "$f")
-            if ! reply=$(curl -sS --max-time 150 -H "Authorization: Bearer ${DENGAI_API_TOKEN}" \
-                -H 'Content-Type: application/json' -d "$body" "$api/addlicense"); then
+            if ! reply=$(curl -sS --max-time 130 -H "Authorization: Bearer ${DENGAI_API_TOKEN}" \
+                -H 'Content-Type: application/json' -d "$body" "$api/queue"); then
               echo "::warning::dengai could not be reached"; break
             fi
             if ! jq -e '.results' <<<"$reply" >/dev/null 2>&1; then
               echo "::warning::dengai: $(jq -r '.error // "unexpected reply"' <<<"$reply" 2>/dev/null)"; break
             fi
             jq -r '.results[] | "\(.id)\t\(.result)"' <<<"$reply"
-            # Settled answers are not sent again; rate limits and retries are.
-            jq -r '.results[] | select(.ok or (.result | startswith("rejected"))) | .id' <<<"$reply" >> sent.txt
-            jq -e 'any(.results[]; .result | test("rate limited|claim limit"))' <<<"$reply" >/dev/null && break
           done
           true
-
-      - name: Save sent ids
-        if: always() && steps.pick.outputs.count != '0'
-        uses: actions/cache/save@v4
-        with:
-          path: sent.txt
-          key: dengai-sent-${{ github.run_id }}
