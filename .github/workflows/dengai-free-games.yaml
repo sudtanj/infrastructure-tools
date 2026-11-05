@@ -5,7 +5,7 @@ name: "dengai Free Games"
 # Actions cache, so each one is sent once.
 #
 # Sources (each may fail on its own; the rest still run):
-#   r/FreeGameFindings and r/FreeGamesOnSteam: posts linking store.steampowered.com, minus expired ones
+#   r/FreeGameFindings and r/FreeGamesOnSteam (Atom feeds): store.steampowered.com links in new posts
 #   GamerPower: active Steam game giveaways, redirect followed to the store page
 #
 # Repo secrets (this repo and its logs are public; none of these values is printed):
@@ -62,16 +62,12 @@ jobs:
 
       - name: Collect free games
         run: |
-          set -uo pipefail
+          set +e
           : > found.txt
           for sub in FreeGameFindings FreeGamesOnSteam; do
-            if json=$(curl -fsS --max-time 30 -A "$UA" "https://www.reddit.com/r/${sub}/new.json?limit=100"); then
-              jq -r '.data.children[].data
-                | select((.link_flair_text // "" | ascii_downcase | test("expired|ended")) | not)
-                | "\(.url) \(.selftext)"' <<<"$json" >> found.txt
-            else
-              echo "::warning::r/${sub} could not be read"
-            fi
+            # The JSON API answers 403 to datacenter IPs; the Atom feed does not.
+            curl -fsS --max-time 30 -A "$UA" "https://www.reddit.com/r/${sub}/new/.rss?limit=100" >> found.txt \
+              || echo "::warning::r/${sub} could not be read"
           done
           if json=$(curl -fsS --max-time 30 -A "$UA" "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"); then
             jq -r '.[]?.open_giveaway_url // empty' <<<"$json" | head -n 30 | while read -r url; do
@@ -119,7 +115,7 @@ jobs:
       - name: Claim through dengai
         if: steps.pick.outputs.count != '0'
         run: |
-          set -uo pipefail
+          set +e
           api="http://${OPI_TAILSCALE_IP}:${DENGAI_PORT:-8737}"
           # dengai waits 5 s between items and answers within 120 s, so 15 per request fits.
           split -l 15 new.txt batch.
