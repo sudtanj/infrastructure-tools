@@ -1,0 +1,43 @@
+name: Lighthouse
+
+# Runs Lighthouse (mobile, all categories) in headless Chrome over CDP on each
+# page listed in `.lighthouse-urls` at the root of the private repo (separated by
+# spaces or newlines; secrets PRIVATE_REPO and PRIVATE_REPO_TOKEN).
+# This repo is public: the log shows page numbers, scores, metrics and the ids
+# of failing audits, never the URLs.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Audit
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          set -u
+          URLS=$(gh api "repos/$PRIVATE_REPO/contents/.lighthouse-urls" -H 'Accept: application/vnd.github.raw' 2>/dev/null) || URLS=
+          [ -n "$URLS" ] || { echo "No page list found"; exit 1; }
+          for u in $URLS; do echo "::add-mask::$u"; done
+          n=0
+          for u in $URLS; do
+            n=$((n + 1))
+            if ! npx -y lighthouse@12 "$u" --quiet --output=json --output-path=lh.json \
+                --chrome-flags="--headless=new --no-sandbox" >/dev/null 2>&1; then
+              echo "page $n: Lighthouse failed"
+              continue
+            fi
+            jq -r --arg n "$n" '
+              "page \($n): " + ([.categories[] | "\(.id) \(.score * 100 | round)"] | join(", ")),
+              "  " + ([.audits["first-contentful-paint", "largest-contentful-paint", "total-blocking-time",
+                        "cumulative-layout-shift", "speed-index"] | "\(.id)=\(.displayValue)"] | join(" ")),
+              (.audits[] | select(.score != null and .score < 0.9
+                                  and (.scoreDisplayMode == "binary" or .scoreDisplayMode == "numeric" or .scoreDisplayMode == "metricSavings"))
+                         | "  fail \(.id) (\(.score)) \(.displayValue // "")")' lh.json
+          done
