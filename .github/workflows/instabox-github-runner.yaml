@@ -222,6 +222,10 @@ jobs:
           D=docker; docker info >/dev/null 2>&1 || D="sudo -n docker"
           echo "== up since"; uptime -s; uptime
           echo "== memory (MB)"; free -m
+          echo "== disk"; df -h / | tail -n +2; $D system df
+          echo "== images"; $D images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | sort
+          echo "== biggest host processes (RSS MB)"
+          ps -eo rss=,comm= | sort -rn | head -n 15 | awk '{printf "%6d %s\n", $1/1024, $2}'
           echo "== containers"; $D ps -a --format '{{.Names}}\t{{.Status}}' | sort
           echo "== usage"; $D stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' | sort
           for c in $($D ps --format '{{.Names}}' | grep -E '^gh-runner-job' | sort); do
