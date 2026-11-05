@@ -20,7 +20,7 @@ Image: [`sudtanj/dengai`](https://hub.docker.com/r/sudtanj/dengai)
 
 First-time setup, no Steam password in any config:
 
-1. Set `DENGAI_API_TOKEN` (at least 16 characters, `openssl rand -hex 24`). On the Orange Pi,
+1. Set `DENGAI_API_TOKEN` (at least 12 characters, `openssl rand -hex 24`). On the Orange Pi,
    add it as a repo secret.
 2. Start dengai (`docker compose ... up -d`, or run `init-dengai`).
 3. Open the setup page. With no saved session and no `DENGAI_PASSWORD`, dengai waits in

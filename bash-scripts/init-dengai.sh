@@ -15,7 +15,7 @@
 # after `docker run`.
 #
 # Env (only the DENGAI_* variables that are set reach the container):
-#   DENGAI_API_TOKEN            required: bearer token for the setup page and the HTTP API (16+ characters)
+#   DENGAI_API_TOKEN            required: bearer token for the setup page and the HTTP API (12+ characters)
 #   DENGAI_USERNAME             optional, Steam account name for a headless login
 #   DENGAI_PASSWORD             optional, Steam password for a headless login (not recommended)
 #   DENGAI_SHARED_SECRET        optional, Steam Guard shared secret (otherwise approve the login in the Steam app)
@@ -81,8 +81,8 @@ esac
 if [ "$BIND" = "0.0.0.0" ] && [ "${DENGAI_ALLOW_ANY:-0}" != "1" ]; then
   fail "DENGAI_BIND=0.0.0.0 exposes the API on every interface; set DENGAI_ALLOW_ANY=1 if that is intended"
 fi
-if [ "${#DENGAI_API_TOKEN}" -lt 16 ]; then
-  warn "DENGAI_API_TOKEN is under 16 characters: dengai will reject it in a coming release"
+if [ "${#DENGAI_API_TOKEN}" -lt 12 ]; then
+  warn "DENGAI_API_TOKEN is under 12 characters: dengai will reject it in a coming release"
 fi
 if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
    && ! "${DOCKER[@]}" inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
