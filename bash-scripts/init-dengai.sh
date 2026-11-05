@@ -6,26 +6,28 @@
 #   - read-only rootfs, all caps dropped, no-new-privileges, 64 MB RAM cap without swap, 0.5 CPU
 #   - state (the Steam refresh token) lives in the named volume dengai-data mounted at /data
 #
-# DENGAI_PASSWORD is only needed until the first login has saved a refresh token in /data;
-# after that it can be removed from the repo secrets (the script then simply does not pass it).
+# First run: dengai starts in needs_login and serves a setup page on the API port. Sign in there
+# (username, password, Steam Guard code); the session and username persist in /data. DENGAI_USERNAME,
+# DENGAI_PASSWORD and DENGAI_GUARD_CODE are optional, for headless logins only.
 #
 # Security model (this repo and its Actions logs are public): secret values are never printed
 # and never put on a command line; they reach docker through a 0600 env file deleted right
 # after `docker run`.
 #
 # Env (only the DENGAI_* variables that are set reach the container):
-#   DENGAI_USERNAME             Steam account name (required)
-#   DENGAI_PASSWORD             Steam password, see above
-#   DENGAI_SHARED_SECRET        Steam Guard shared secret (otherwise approve the login in the Steam app)
-#   DENGAI_GUARD_CODE           one-off Steam Guard code
-#   DENGAI_API_TOKEN            bearer token for the HTTP API (empty = API disabled; 16+ characters)
+#   DENGAI_API_TOKEN            required: bearer token for the setup page and the HTTP API (16+ characters)
+#   DENGAI_USERNAME             optional, Steam account name for a headless login
+#   DENGAI_PASSWORD             optional, Steam password for a headless login (not recommended)
+#   DENGAI_SHARED_SECRET        optional, Steam Guard shared secret (otherwise approve the login in the Steam app)
+#   DENGAI_GUARD_CODE           optional, one-off Steam Guard code (not recommended)
 #   DENGAI_BACKFILL_URL         optional backfill source URL
 #   DENGAI_CLAIMS_PER_HOUR, DENGAI_SKIP_DEMOS, DENGAI_SKIP_PLAYTESTS, DENGAI_COUNTRY, DENGAI_LOG,
 #   DENGAI_AUTO_CLAIM_APPS, DENGAI_BACKFILL_INTERVAL_SECS   see builder-tools/dengai/.env.example
 # Script-only settings (not passed to the container):
 #   DENGAI_BIND                 host address to publish on, default 127.0.0.1
 #   DENGAI_PORT                 host port, default 8737 (container always listens on 8737)
-#   DENGAI_IMAGE                default sudtanj/dengai:latest; pin a release (sudtanj/dengai:v0.1.2) so a
+#   DENGAI_IMAGE                default sudtanj/dengai:latest; pin a release (sudtanj/dengai:v0.1.4; git tag
+#                               dengai-v0.1.4 is pushed to Docker Hub as v0.1.4) so a
 #                               rebuilt :latest cannot reach the account unreviewed
 # Anything else starting with DENGAI_ that is set is passed through too.
 #
@@ -68,7 +70,7 @@ status "init dengai start"
 # 1. Preflight
 # ---------------------------------------------------------------------------
 step "preflight checks"
-[ -n "${DENGAI_USERNAME:-}" ] || fail "DENGAI_USERNAME is not set (add it as a repo secret)"
+[ -n "${DENGAI_API_TOKEN:-}" ] || fail "DENGAI_API_TOKEN is not set: it is needed for the setup page (add it as a repo secret, openssl rand -hex 24)"
 "${DOCKER[@]}" info >/dev/null 2>&1 || fail "docker daemon is not available"
 case "$(uname -m)" in
   x86_64|aarch64|arm64) ;;
@@ -79,9 +81,7 @@ esac
 if [ "$BIND" = "0.0.0.0" ] && [ "${DENGAI_ALLOW_ANY:-0}" != "1" ]; then
   fail "DENGAI_BIND=0.0.0.0 exposes the API on every interface; set DENGAI_ALLOW_ANY=1 if that is intended"
 fi
-if [ -z "${DENGAI_API_TOKEN:-}" ]; then
-  warn "DENGAI_API_TOKEN unset: the HTTP API is disabled"
-elif [ "${#DENGAI_API_TOKEN}" -lt 16 ]; then
+if [ "${#DENGAI_API_TOKEN}" -lt 16 ]; then
   warn "DENGAI_API_TOKEN is under 16 characters: dengai will reject it in a coming release"
 fi
 if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :${PORT}" 2>/dev/null | grep -q . \
@@ -187,7 +187,11 @@ fi
 # ---------------------------------------------------------------------------
 # Logs may mention the account: mask the username, the known secret values exactly, and anything token-like.
 show_logs() {
-  local line s v secrets=()
+  local line s v secrets=() user_sed=""
+  # An empty sed pattern fails, so mask the username only when it is set.
+  if [ -n "${DENGAI_USERNAME:-}" ]; then
+    user_sed="s/$(printf '%s' "$DENGAI_USERNAME" | sed 's/[][\.*^$/|+?(){}]/\\&/g')/<user>/g; "
+  fi
   for v in DENGAI_PASSWORD DENGAI_SHARED_SECRET DENGAI_API_TOKEN DENGAI_GUARD_CODE; do
     [ -n "${!v:-}" ] && secrets+=("${!v}")
   done
@@ -196,11 +200,12 @@ show_logs() {
         for s in "${secrets[@]}"; do line="${line//"$s"/<redacted>}"; done
         printf '%s\n' "$line"
       done \
-    | sed -E "s/$(printf '%s' "$DENGAI_USERNAME" | sed 's/[][\.*^$/|+?(){}]/\\&/g')/<user>/g; s/[A-Za-z0-9_-]{32,}/<redacted>/g; s/^/$2 /" || true
+    | sed -E "${user_sed}s/[A-Za-z0-9_-]{32,}/<redacted>/g; s/^/$2 /" || true
 }
 
 inspect_dengai() { "${DOCKER[@]}" inspect -f "$1" "$CONTAINER_NAME" 2>/dev/null || echo "$2"; }
 
+# Only the container state counts, so "running, waiting for login" (needs_login) passes.
 step "checking ${CONTAINER_NAME} stays up for ${CHECK_SECS}s"
 if [ "$RECREATED" = "1" ]; then RESTARTS_BEFORE=0; else RESTARTS_BEFORE="$(inspect_dengai '{{.RestartCount}}' 0)"; fi
 STABLE=1
@@ -249,4 +254,5 @@ echo "[*] published: ${BIND}:${PORT} (container port ${CPORT})"
 echo "[*] storage: volume ${VOLUME_NAME} at /data"
 echo "[*] limits: cpu ${CPU_LIMIT}, memory ${MEMORY_LIMIT} (no swap), pids ${PIDS_LIMIT}"
 echo "[*] memory: ${MEM:-unknown}"
+echo "[*] first run: open the setup page via ssh -L ${PORT}:127.0.0.1:${PORT} <board>, then http://127.0.0.1:${PORT}/"
 ok "init dengai done"

@@ -18,18 +18,28 @@ Image: [`sudtanj/dengai`](https://hub.docker.com/r/sudtanj/dengai)
 
 ## Quick start
 
+First-time setup, no Steam password in any config:
+
+1. Set `DENGAI_API_TOKEN` (at least 16 characters, `openssl rand -hex 24`). On the Orange Pi,
+   add it as a repo secret.
+2. Start dengai (`docker compose ... up -d`, or run `init-dengai`).
+3. Open the setup page. With no saved session and no `DENGAI_PASSWORD`, dengai waits in
+   `needs_login` and serves it at `GET /` on port 8737. It asks for the API token.
+   - SSH tunnel: `ssh -L 8737:127.0.0.1:8737 <board>`, then <http://127.0.0.1:8737/>.
+   - Tailscale: set `DENGAI_BIND` to the tailnet IP and open `http://<tailnet-ip>:8737/`.
+4. Enter the username, password and Steam Guard code there. A guard code no longer has to
+   survive a GitHub deploy. The session and username are kept in `/data`.
+
+A `shared_secret` can be entered on the page too, so later re-logins need no code.
+
+`DENGAI_USERNAME`, `DENGAI_PASSWORD`, `DENGAI_SHARED_SECRET` and `DENGAI_GUARD_CODE` still work
+for headless use, but are optional and not recommended: they put the credentials in your secrets.
+
 ```bash
 cp .env.example .env && $EDITOR .env
 docker compose -f docker-compose.hub.yml up -d     # published image
 docker compose up -d --build                       # or build from source
 docker logs -f dengai
-```
-
-Without `DENGAI_SHARED_SECRET`, approve the first login in the Steam mobile app.
-You can also set a one-off `DENGAI_GUARD_CODE`.
-After the first login, the refresh token in `/data` is enough and `DENGAI_PASSWORD` can be removed.
-
-```bash
 curl -H "Authorization: Bearer $DENGAI_API_TOKEN" http://127.0.0.1:8737/status
 ```
 
@@ -52,10 +62,10 @@ The API binds `0.0.0.0` inside the container. Compose publishes it on
 [`bash-scripts/init-dengai.sh`](../../bash-scripts/init-dengai.sh) does the same with
 tighter limits (64 MB, 0.5 CPU), runnable from the Orange Pi workflow
 (`orangepi-bash-script-runner`, script `init-dengai`).
-Repo secrets to add: `DENGAI_USERNAME`, `DENGAI_PASSWORD`, `DENGAI_SHARED_SECRET`,
-`DENGAI_API_TOKEN`, and optionally `DENGAI_BACKFILL_URL`. Remove `DENGAI_PASSWORD`
-once the refresh token is saved. `DENGAI_BIND` (e.g. the Tailscale IP) overrides the
-`127.0.0.1` publish address.
+Required repo secret: `DENGAI_API_TOKEN` (the script fails without it). Optional: `DENGAI_BACKFILL_URL`,
+and for headless logins only `DENGAI_USERNAME`, `DENGAI_PASSWORD`, `DENGAI_SHARED_SECRET`,
+`DENGAI_GUARD_CODE`. After a run, the script prints the SSH tunnel hint for the setup page.
+`DENGAI_BIND` (e.g. the Tailscale IP) overrides the `127.0.0.1` publish address.
 
 ### Deploy safety (init-dengai.sh)
 
@@ -63,7 +73,7 @@ once the refresh token is saved. `DENGAI_BIND` (e.g. the Tailscale IP) overrides
   Steam login cannot restart-loop into an account lock. After five failed restarts it
   stays down. It also means a clean stop (or a host reboot after one) does not bring it
   back by itself: rerun the workflow.
-- Pin the image instead of following `:latest`: `DENGAI_IMAGE=sudtanj/dengai:v0.1.2`.
+- Pin the image instead of following `:latest`: `DENGAI_IMAGE=sudtanj/dengai:v0.1.4`.
   The publish workflow pushes `:latest` and `:vX.Y.Z` (the git tag is `dengai-vX.Y.Z`,
   the Docker tag drops the `dengai-` prefix).
 - Rollback: the running image is tagged `dengai:previous` before the pull. If the new
