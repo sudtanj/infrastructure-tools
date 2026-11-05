@@ -1,0 +1,147 @@
+name: "dengai Free Games"
+
+# Every 6 hours, collect Steam store links of free games from public feeds and hand them to dengai
+# on the Orange Pi (POST /addlicense over the tailnet). Ids dengai already answered are kept in the
+# Actions cache, so each one is sent once.
+#
+# Sources (each may fail on its own; the rest still run):
+#   r/FreeGameFindings and r/FreeGamesOnSteam: posts linking store.steampowered.com, minus expired ones
+#   GamerPower: active Steam game giveaways, redirect followed to the store page
+#
+# Repo secrets (this repo and its logs are public; none of these values is printed):
+#   OPI_TAILSCALE_IP    the device's Tailscale IP / MagicDNS name
+#   DENGAI_API_TOKEN    dengai's bearer token
+#   DENGAI_PORT         optional, default 8737
+#   Tailscale for the runner (same as the other workflows here), one of:
+#     TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS
+#     TAILSCALE_AUTH_KEY
+on:
+  schedule:
+    - cron: "41 */6 * * *"   # every 6 hours (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dengai-free-games
+  cancel-in-progress: false
+
+env:
+  OPI_TAILSCALE_IP: ${{ secrets.OPI_TAILSCALE_IP }}
+  DENGAI_API_TOKEN: ${{ secrets.DENGAI_API_TOKEN }}
+  DENGAI_PORT: ${{ secrets.DENGAI_PORT }}
+  TAILSCALE_OAUTH_CLIENT_SECRET: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+  TAILSCALE_TAGS: ${{ secrets.TAILSCALE_TAGS }}
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  UA: "dengai-free-games/1.0 (github.com/sudtanj/infrastructure-tools)"
+
+jobs:
+  claim:
+    name: "Find and claim"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verify required config
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in OPI_TAILSCALE_IP DENGAI_API_TOKEN; do
+            [ -z "${!v:-}" ] && missing+=("$v") || true
+          done
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            [ -n "${TAILSCALE_TAGS:-}" ] || missing+=("TAILSCALE_TAGS")
+          elif [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+            missing+=("TAILSCALE_OAUTH_CLIENT_SECRET or TAILSCALE_AUTH_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "::add-mask::${OPI_TAILSCALE_IP}"
+
+      - name: Collect free games
+        run: |
+          set -uo pipefail
+          : > found.txt
+          for sub in FreeGameFindings FreeGamesOnSteam; do
+            if json=$(curl -fsS --max-time 30 -A "$UA" "https://www.reddit.com/r/${sub}/new.json?limit=100"); then
+              jq -r '.data.children[].data
+                | select((.link_flair_text // "" | ascii_downcase | test("expired|ended")) | not)
+                | "\(.url) \(.selftext)"' <<<"$json" >> found.txt
+            else
+              echo "::warning::r/${sub} could not be read"
+            fi
+          done
+          if json=$(curl -fsS --max-time 30 -A "$UA" "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"); then
+            jq -r '.[]?.open_giveaway_url // empty' <<<"$json" | head -n 30 | while read -r url; do
+              curl -sS -o /dev/null --max-time 20 -L -A "$UA" -w '%{url_effective}\n' "$url" || true
+            done >> found.txt
+          else
+            echo "::warning::GamerPower could not be read"
+          fi
+          grep -oE 'store\.steampowered\.com/(app|sub)/[0-9]+' found.txt \
+            | sed -E 's#.*/app/#a/#; s#.*/sub/#sub/#' | sort -u > ids.txt
+          echo "$(wc -l < ids.txt) Steam ids found"
+
+      - name: Restore sent ids
+        uses: actions/cache/restore@v4
+        with:
+          path: sent.txt
+          key: dengai-sent-${{ github.run_id }}
+          restore-keys: dengai-sent-
+
+      - name: Pick new ids
+        id: pick
+        run: |
+          set -euo pipefail
+          touch sent.txt
+          sort -u sent.txt -o sent.txt
+          comm -23 ids.txt sent.txt > new.txt
+          echo "count=$(wc -l < new.txt)" >> "$GITHUB_OUTPUT"
+          echo "New: $(paste -sd' ' new.txt)"
+
+      - name: Join the tailnet
+        if: steps.pick.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          HOST="gh-dengai-free-${GITHUB_RUN_ID}"
+          if [ -n "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]; then
+            secret="$(printf '%s' "$TAILSCALE_OAUTH_CLIENT_SECRET" | tr -d '[:space:]')"
+            sudo tailscale up --authkey="${secret}?ephemeral=true&preauthorized=true" \
+              --advertise-tags="$TAILSCALE_TAGS" --hostname="$HOST" --accept-routes >/dev/null 2>&1
+          else
+            sudo tailscale up --authkey="$(printf '%s' "$TAILSCALE_AUTH_KEY" | tr -d '[:space:]')" \
+              --hostname="$HOST" --accept-routes >/dev/null 2>&1
+          fi
+
+      - name: Claim through dengai
+        if: steps.pick.outputs.count != '0'
+        run: |
+          set -uo pipefail
+          api="http://${OPI_TAILSCALE_IP}:${DENGAI_PORT:-8737}"
+          # dengai waits 5 s between items and answers within 120 s, so 15 per request fits.
+          split -l 15 new.txt batch.
+          for f in batch.*; do
+            body=$(jq -Rn '{ids: [inputs]}' < "$f")
+            if ! reply=$(curl -sS --max-time 150 -H "Authorization: Bearer ${DENGAI_API_TOKEN}" \
+                -H 'Content-Type: application/json' -d "$body" "$api/addlicense"); then
+              echo "::warning::dengai could not be reached"; break
+            fi
+            if ! jq -e '.results' <<<"$reply" >/dev/null 2>&1; then
+              echo "::warning::dengai: $(jq -r '.error // "unexpected reply"' <<<"$reply" 2>/dev/null)"; break
+            fi
+            jq -r '.results[] | "\(.id)\t\(.result)"' <<<"$reply"
+            # Settled answers are not sent again; rate limits and retries are.
+            jq -r '.results[] | select(.ok or (.result | startswith("rejected"))) | .id' <<<"$reply" >> sent.txt
+            jq -e 'any(.results[]; .result | test("rate limited|claim limit"))' <<<"$reply" >/dev/null && break
+          done
+          true
+
+      - name: Save sent ids
+        if: always() && steps.pick.outputs.count != '0'
+        uses: actions/cache/save@v4
+        with:
+          path: sent.txt
+          key: dengai-sent-${{ github.run_id }}
