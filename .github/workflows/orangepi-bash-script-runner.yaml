@@ -443,9 +443,10 @@ jobs:
 
           # Payload: `export KEY='value'` lines, a sudo shim, then the script itself.
           {
-            # zilong-router defaults (not secrets); any MINI_ROUTER_ repo secret exported
-            # below overrides them.
+            # zilong-router and dengai defaults (not secrets): reachable on the LAN. Any
+            # MINI_ROUTER_ / DENGAI_ repo secret exported below overrides them.
             printf 'export ZILONG_ROUTER_BIND=0.0.0.0\nexport ZILONG_ROUTER_ALLOW_ANY=1\n'
+            printf 'export DENGAI_BIND=0.0.0.0\nexport DENGAI_ALLOW_ANY=1\n'
             IFS=',' read -ra PREFIXES <<< "$SECRET_FILTER"
             for p in "${PREFIXES[@]}"; do export_prefix "$p"; done
             # The device's own Tailscale reuses the runner's OAuth client, so only
