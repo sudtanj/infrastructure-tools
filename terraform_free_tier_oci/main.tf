@@ -20,7 +20,7 @@ provider "oci" {
 
   # "Out of host capacity" is a retryable 500 to the provider, which by default
   # keeps retrying for 600s, past the job's timeout. Give up after a minute;
-  # workflow-cron starts the next attempt 30 minutes later.
+  # workflow-cron starts the next attempt 10 minutes later.
   retry_duration_seconds = 60
 }
 
