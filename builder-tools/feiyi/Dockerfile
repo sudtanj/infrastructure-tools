@@ -14,6 +14,9 @@ ARG CLAUDE_CODE_VERSION=latest
 # "latest" or an exact Codex release (e.g. 0.46.0 -> tag rust-v0.46.0).
 ARG CODEX_VERSION=latest
 ARG GH_VERSION=2.63.2
+# jadx decompiles Android apps for the feiyi-reverse-engineering skill.
+ARG JADX_VERSION=1.5.6
+ARG JADX_SHA256=545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974
 # feiyi release asset (built by sudtanj/feiyi CI, static musl).
 # "latest" is a rolling release of main; pin with a release tag if one exists.
 ARG FEIYI_RELEASE=latest
@@ -47,7 +50,10 @@ RUN mkdir -p /out \
     fi \
  && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH:-amd64}.tar.gz" \
     | tar -xz -C /tmp \
- && install -m755 "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH:-amd64}/bin/gh" /out/gh
+ && install -m755 "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH:-amd64}/bin/gh" /out/gh \
+ && curl -fsSL -o /tmp/jadx.zip "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
+ && echo "${JADX_SHA256}  /tmp/jadx.zip" | sha256sum -c - \
+ && mkdir -p /opt/jadx && unzip -q /tmp/jadx.zip -d /opt/jadx && chmod 755 /opt/jadx/bin/jadx
 
 # ---------- Stage 2: runtime ----------
 FROM alpine:${ALPINE_VERSION}
@@ -56,11 +62,16 @@ FROM alpine:${ALPINE_VERSION}
 # Claude's search tools, and the C++ runtime the native Claude binary links.
 # tini reaps orphaned grandchildren; su-exec drops root -> paseo. docker-cli
 # drives the host Docker when the deploy shares its socket (PASEO_DOCKER_SOCKET=1).
+# The second line backs feiyi's reverse-engineering skill: binaries (binutils,
+# radare2), archives and HAR (unzip, jq), captures (tshark), APKs (jadx on the JRE).
 RUN apk add --no-cache bash git openssh-client ca-certificates libgcc libstdc++ ripgrep tini su-exec docker-cli docker-cli-compose \
+      binutils file xxd unzip jq radare2 tshark openjdk17-jre-headless \
+ && ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx \
  && adduser -D -u 1000 -h /home/paseo -s /bin/bash paseo \
  && mkdir -p /workspace && chown paseo:paseo /workspace
 
 COPY --from=agents /out/feiyi /usr/local/bin/feiyi
+COPY --from=agents /opt/jadx /opt/jadx
 COPY --from=agents /out/ /usr/local/lib/agents/
 RUN rm -f /usr/local/lib/agents/feiyi
 
@@ -101,7 +112,8 @@ ENV HOME=/home/paseo \
     DISABLE_BUG_COMMAND=1 \
     DISABLE_COST_WARNINGS=1 \
     GH_PROMPT_DISABLED=1 \
-    GH_NO_UPDATE_NOTIFIER=1
+    GH_NO_UPDATE_NOTIFIER=1 \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 
 WORKDIR /workspace
 EXPOSE 6768
