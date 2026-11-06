@@ -502,7 +502,10 @@ jobs:
               # file beats the project's gradle.properties.
               mkdir -p "$HOME/.gradle"
               echo 'org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> "$HOME/.gradle/gradle.properties"
-              run_quiet "flutter build apk" flutter build apk "${flags[@]}"
+              # shortcut: arm64-only APK (about a third of the fat APK), drops sideload
+              # on 32-bit ARM and x86_64; add --split-per-abi if those are needed.
+              # The AAB keeps every ABI; Play serves each device its own split.
+              run_quiet "flutter build apk" flutter build apk "${flags[@]}" --target-platform android-arm64
               run_quiet "flutter build appbundle" flutter build appbundle "${flags[@]}"
               ;;
             ios)
