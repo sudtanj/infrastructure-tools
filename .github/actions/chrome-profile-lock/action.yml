@@ -8,7 +8,14 @@ description: >
   Queued runs count too (one may get its runner after a newer run), and a re-run
   is ordered by when it started again, not when the run was first made.
   The caller needs `permissions: actions: read` and should set
-  `timeout-minutes` on the step.
+  `timeout-minutes` on the step. Other saved states (the Android ones) pass
+  their own `workflows`.
+
+inputs:
+  workflows:
+    description: Workflow file names (no .yaml) sharing the state, `|`-separated.
+    # The workflows that start their own Chrome on the saved profile.
+    default: chrome-cdp-session|typescript-worker-run|commute-traffic|job-hunter|search-engine-register|job-apply|shopee-search|tokopedia-search
 
 runs:
   using: composite
@@ -16,8 +23,7 @@ runs:
     - shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        # The workflows that start their own Chrome on the saved profile.
-        WORKFLOWS: chrome-cdp-session|typescript-worker-run|commute-traffic|job-hunter|search-engine-register|job-apply|shopee-search|tokopedia-search
+        WORKFLOWS: ${{ inputs.workflows }}
       run: |
         set -euo pipefail
         me="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" -q .run_started_at)"
@@ -28,6 +34,6 @@ runs:
             | select(.path | test(\"workflows/(${WORKFLOWS})\\\\.ya?ml\"))
             | select(.id != ${GITHUB_RUN_ID} and (.run_started_at < \"${me}\" or (.run_started_at == \"${me}\" and .id < ${GITHUB_RUN_ID})))] | length")"
           [ "$ahead" -eq 0 ] && break
-          echo "Another run is using the Chrome profile; waiting."
+          echo "Another run is using the saved state; waiting."
           sleep 60
         done

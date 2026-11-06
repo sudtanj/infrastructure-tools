@@ -106,11 +106,8 @@ on:
 
 permissions:
   contents: read
-
-# One emulator at a time: two runs would race to save over each other's state.
-concurrency:
-  group: android-emulator-session
-  cancel-in-progress: false
+  # The state lock lists this workflow's runs.
+  actions: read
 
 env:
   STATE_TAG: android-emulator-state
@@ -160,6 +157,15 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      # One run at a time, in start order; two would race to save over each
+      # other's state. Unlike a concurrency group, queued runs are not dropped.
+      - name: Wait for the saved state
+        # A VNC session can hold it for hours.
+        timeout-minutes: 300
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
+        with:
+          workflows: android-emulator-session
 
       - name: Prepare state release
         run: |

@@ -59,11 +59,8 @@ on:
 
 permissions:
   contents: read
-
-# Two runs would race to save over each other's state.
-concurrency:
-  group: android-redroid-session
-  cancel-in-progress: false
+  # The state lock lists this workflow's runs.
+  actions: read
 
 env:
   STATE_TAG: android-redroid-state
@@ -137,6 +134,15 @@ jobs:
             fi
           fi
           grep binder /proc/filesystems || true
+
+      # One run at a time, in start order; two would race to save over each
+      # other's state. Unlike a concurrency group, queued runs are not dropped.
+      - name: Wait for the saved state
+        # A VNC session can hold it for hours.
+        timeout-minutes: 300
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
+        with:
+          workflows: android-redroid-session
 
       - name: Prepare state release
         run: |

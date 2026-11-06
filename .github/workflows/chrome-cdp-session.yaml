@@ -142,6 +142,13 @@ jobs:
           # gh error text can include the repo path; keep it out of the public log.
           echo "::add-mask::${PRIVATE_REPO}"
 
+      # One Chrome on the saved profile at a time, across workflows (see the action),
+      # before the state is listed, so the list has the previous run's save.
+      # Up to a worker run with tech_short in it.
+      - name: Wait for the Chrome profile
+        timeout-minutes: 90
+        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
+
       - name: Prepare state release
         run: |
           set -euo pipefail
@@ -153,12 +160,6 @@ jobs:
           # profile (or a new Tailscale node) would later be saved over the
           # good state.
           gh release view "$STATE_TAG" -R "$PRIVATE_REPO" --json assets -q '.assets[].name' > /tmp/state-assets.txt
-
-      # One Chrome on the saved profile at a time, across workflows (see the action).
-      # Up to a worker run with tech_short in it.
-      - name: Wait for the Chrome profile
-        timeout-minutes: 90
-        uses: sudtanj/infrastructure-tools/.github/actions/chrome-profile-lock@main
 
       # A set is `state-<run_id>.part-NNN` plus `state-<run_id>.sha256`. The
       # manifest is uploaded last, so only sets with one are complete.
