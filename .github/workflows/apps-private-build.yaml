@@ -705,8 +705,17 @@ jobs:
           const { app, BrowserWindow } = require('electron');
           const path = require('path');
           const webDir = process.env.WEB_DIR_PLACEHOLDER;
+          // Native-feeling defaults: the window appears only once painted, in the
+          // app's background color (Capacitor's backgroundColor), so there is no
+          // white flash; the Windows/Linux menu bar hides until Alt is pressed.
           function createWindow() {
-            const win = new BrowserWindow({ width: 1100, height: 760, webPreferences: { contextIsolation: true } });
+            const win = new BrowserWindow({
+              width: 1100, height: 760, minWidth: 360, minHeight: 480,
+              show: false, backgroundColor: process.env.BG_PLACEHOLDER,
+              autoHideMenuBar: true,
+              webPreferences: { contextIsolation: true },
+            });
+            win.once('ready-to-show', () => win.show());
             win.loadFile(path.join(__dirname, '..', webDir, 'index.html'));
           }
           app.whenReady().then(createWindow);
@@ -726,7 +735,7 @@ jobs:
             if (!fs.existsSync(f)) continue;
             const raw = fs.readFileSync(f, 'utf8');
             if (f.endsWith('.json')) { cap = JSON.parse(raw); break; }
-            for (const k of ['appId', 'appName', 'webDir']) {
+            for (const k of ['appId', 'appName', 'webDir', 'backgroundColor']) {
               const m = raw.match(new RegExp(k + "\\s*:\\s*['\"]([^'\"]+)['\"]"));
               if (m) cap[k] = m[1];
             }
@@ -740,7 +749,8 @@ jobs:
           // Fill in the default shell's web folder, if that is what is in use.
           const main = 'electron/main.cjs';
           fs.writeFileSync(main, fs.readFileSync(main, 'utf8')
-            .replace('process.env.WEB_DIR_PLACEHOLDER', JSON.stringify(webDir)));
+            .replace('process.env.WEB_DIR_PLACEHOLDER', JSON.stringify(webDir))
+            .replace('process.env.BG_PLACEHOLDER', JSON.stringify(cap.backgroundColor || '#ffffff')));
 
           const { APP_NAME, VERSION_NAME, VERSION_CODE } = process.env;
           const stem = `${APP_NAME}-${VERSION_NAME}-build${VERSION_CODE}-desktop`;
