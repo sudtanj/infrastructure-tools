@@ -46,7 +46,8 @@ name: "Build Flutter apps: Android, iOS, Windows, macOS, Linux (private repo)"
 # SECURITY MODEL -- read before enabling:
 #   * This file is in a PUBLIC repo, and so are its run logs. Install and
 #     build output names private files, so steps print nothing on success
-#     and only a fixed message on failure. Nothing is uploaded with actions/upload-artifact,
+#     and only a fixed message on failure. Failure output goes to a "build-logs"
+#     prerelease in the private repo. Nothing is uploaded with actions/upload-artifact,
 #     because artifacts on a public repo are downloadable by anyone. Cache keys
 #     are public too, so they hold no secret-derived values.
 #   * The release token can write to the private repo. Anyone who can push to
@@ -412,7 +413,7 @@ jobs:
               rm -f "$log"; return 0
             fi
             echo "::error::$label failed (output suppressed to protect private source)"
-            rm -f "$log"; return 1
+            cat "$log" >> "$RUNNER_TEMP/failure.log"; rm -f "$log"; return 1
           }
 
           run_quiet "flutter create" flutter create --org com.tanoitcorp --platforms="$PLATFORM" .
@@ -443,7 +444,7 @@ jobs:
               rm -f "$log"; return 0
             fi
             echo "::error::$label failed (output suppressed to protect private source)"
-            rm -f "$log"; return 1
+            cat "$log" >> "$RUNNER_TEMP/failure.log"; rm -f "$log"; return 1
           }
 
           run_quiet "flutter analyze" flutter analyze --no-fatal-infos
@@ -475,7 +476,7 @@ jobs:
               rm -f "$log"; return 0
             fi
             echo "::error::$label failed (output suppressed to protect private source)"
-            rm -f "$log"; return 1
+            cat "$log" >> "$RUNNER_TEMP/failure.log"; rm -f "$log"; return 1
           }
 
           # Tooling may echo --dart-define as base64, which Actions does not
@@ -609,6 +610,26 @@ jobs:
               || gh release view "$TAG" -R "$REPO" >/dev/null
           fi
           gh release upload "$TAG" release-files/* -R "$REPO" --clobber >/dev/null
+
+      # Failure output names private files, so it goes to a prerelease in the
+      # private repo, never to this public log or an artifact.
+      - name: Save failure log to private repo
+        if: ${{ failure() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MOBILE_RELEASE_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          SHA: ${{ needs.poll.outputs.sha }}
+          NAME: ${{ matrix.app.tag }}-${{ matrix.target.id }}.log
+        run: |
+          set -uo pipefail
+          [ -s "$RUNNER_TEMP/failure.log" ] || exit 0
+          cp "$RUNNER_TEMP/failure.log" "$RUNNER_TEMP/$NAME"
+          gh release view build-logs -R "$REPO" >/dev/null 2>&1 \
+            || gh release create build-logs -R "$REPO" --prerelease --target "$SHA" \
+                 --title "Build failure logs" --notes "Latest failure output per app and platform." >/dev/null 2>&1
+          gh release upload build-logs "$RUNNER_TEMP/$NAME" -R "$REPO" --clobber >/dev/null 2>&1 \
+            || echo "::warning::could not save failure log"
 
   # ------------------------------------------------------------------
   # Job 4: remember the commit that was actually built
