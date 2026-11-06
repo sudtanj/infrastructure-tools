@@ -190,32 +190,20 @@ jobs:
 
       # The same packages and safeguards as typescript-worker-run.yaml, so the
       # consoles see the browser they saw at login.
+      - name: Download Chrome
+        if: ${{ env.SESSION_BROWSER != 'true' }}
+        run: curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
       - name: Install Chrome and a virtual display
         if: ${{ env.SESSION_BROWSER != 'true' }}
         timeout-minutes: 15
+        uses: sudtanj/infrastructure-tools/.github/actions/apt-install@main
+        with:
+          packages: /tmp/chrome.deb xvfb openbox libgl1-mesa-dri libegl1 libgles2 pulseaudio fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
+      - name: Start the virtual display
+        if: ${{ env.SESSION_BROWSER != 'true' }}
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 --retry-all-errors --max-time 180 -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
-          # and dpkg fsyncs each file. Neither matters on a throwaway runner.
-          sudo rm -f /var/lib/man-db/auto-update
-          echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
-          sudo timeout -k 15 300 apt-get update -qq >/dev/null
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
-          # Quiet; the last try's output tail is printed if all fail.
-          apt_install() {
-            for attempt in 1 2 3; do
-              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
-                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" >/tmp/apt.log 2>&1 && return 0
-              echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
-              sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
-            done
-            tail -n 20 /tmp/apt.log
-            return 1
-          }
-          apt_install /tmp/chrome.deb xvfb openbox \
-            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
-            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
           # The fonts package downloads from SourceForge and can hang; it is optional.
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           timeout 120 fc-cache -f >/dev/null || true

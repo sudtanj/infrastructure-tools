@@ -219,6 +219,8 @@ jobs:
               quiet sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
                 -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$@" && return 0
               echo "::warning::apt-get install did not finish (try ${attempt}); retrying."
+              # The Azure mirror can stall for most of an hour: the runner's next mirror is archive.ubuntu.com.
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt 2>/dev/null || true
               sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
             done
             return 1

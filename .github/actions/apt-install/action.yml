@@ -1,0 +1,40 @@
+name: Install apt packages
+description: >
+  apt-get install on a GitHub-hosted Ubuntu runner without hanging the job. The
+  Azure mirror the runners use first can stall a download for most of an hour
+  (2026-11-06: one run waited 55 minutes, others hit their timeouts). Runs that
+  hold the Chrome profile lock while installing then make every other profile
+  workflow wait too. So each try is bounded, and after a failed try the Azure
+  mirror is dropped, leaving the runner's own fallback, archive.ubuntu.com.
+
+inputs:
+  packages:
+    description: Packages or local .deb paths, space-separated.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        # Ubuntu runners stall in dpkg: man-db rebuilds its index on every install,
+        # and dpkg fsyncs each file. Neither matters on a throwaway runner.
+        sudo rm -f /var/lib/man-db/auto-update
+        echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
+        sudo timeout -k 15 300 apt-get update -qq >/dev/null
+        read -ra packages <<<"$PACKAGES"
+        for attempt in 1 2 3; do
+          # -k: apt-get ignores SIGTERM while dpkg runs, so follow up with SIGKILL.
+          sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "${packages[@]}" \
+            >/tmp/apt-install.log 2>&1 && exit 0
+          echo "::warning::apt-get install did not finish (try ${attempt}); retrying on the next mirror."
+          # The package lists are keyed by the mirror+file URI, so no apt-get update is needed after this.
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 120 dpkg --configure -a >/dev/null 2>&1 || true
+        done
+        tail -n 20 /tmp/apt-install.log
+        exit 1

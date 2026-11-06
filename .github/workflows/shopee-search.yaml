@@ -144,15 +144,16 @@ jobs:
 
       # The same packages as chrome-cdp-session.yaml, so Shopee sees the
       # browser it saw at login (real GL, audio device, desktop fonts).
+      - name: Download Chrome
+        run: curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
       - name: Install Chrome and a virtual display
+        uses: sudtanj/infrastructure-tools/.github/actions/apt-install@main
+        with:
+          packages: /tmp/chrome.deb xvfb openbox libgl1-mesa-dri libegl1 libgles2 pulseaudio fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core
+      - name: Start the virtual display
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update -qq >/dev/null
           echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections
-          sudo apt-get install -y -qq /tmp/chrome.deb xvfb openbox \
-            libgl1-mesa-dri libegl1 libgles2 pulseaudio \
-            fonts-noto-color-emoji fonts-noto-cjk fonts-liberation fonts-dejavu-core >/dev/null
           # The fonts package downloads from SourceForge and can hang; it is optional.
           sudo timeout -k 15 180 apt-get install -y -qq fonts-ubuntu ttf-mscorefonts-installer >/dev/null 2>&1 || echo "::warning::Microsoft core fonts not installed."
           fc-cache -f >/dev/null
