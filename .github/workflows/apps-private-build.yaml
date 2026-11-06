@@ -208,16 +208,26 @@ jobs:
     steps:
       # By sha, not branch: a branch name equal to the BUILD_REF secret would
       # be blanked in the poll output.
+      # Plain git, not actions/checkout: that action logs the private commit
+      # subject ("HEAD is now at ..."). Fetching the sha without --depth brings
+      # its full history, so the push can be diffed against the last build.
       - name: Checkout private repo
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: ${{ secrets.PRIVATE_REPO }}
-          ref: ${{ needs.poll.outputs.sha }}
-          persist-credentials: false
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private
-          # Full history so the push can be diffed against the last build.
-          fetch-depth: 0
+        shell: bash
+        env:
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SHA: ${{ needs.poll.outputs.sha }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          git init -q private
+          if ! git -C private -c http.extraheader="AUTHORIZATION: basic $auth" \
+              fetch -q "https://github.com/$REPO" "$SHA" >/dev/null 2>&1 \
+            || ! git -C private checkout -q FETCH_HEAD >/dev/null 2>&1; then
+            echo "::error::checkout failed"
+            exit 1
+          fi
 
       - name: Restore last built commit
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -328,14 +338,24 @@ jobs:
           - { id: linux, os: ubuntu-latest }
 
     steps:
+      # Plain git, not actions/checkout: that action logs the private commit subject.
       - name: Checkout private repo
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: ${{ secrets.PRIVATE_REPO }}
-          ref: ${{ needs.poll.outputs.sha }}
-          persist-credentials: false
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private
+        shell: bash
+        env:
+          REPO: ${{ secrets.PRIVATE_REPO }}
+          TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SHA: ${{ needs.poll.outputs.sha }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          git init -q private
+          if ! git -C private -c http.extraheader="AUTHORIZATION: basic $auth" \
+              fetch -q --depth=1 "https://github.com/$REPO" "$SHA" >/dev/null 2>&1 \
+            || ! git -C private checkout -q FETCH_HEAD >/dev/null 2>&1; then
+            echo "::error::checkout failed"
+            exit 1
+          fi
 
       - name: Setup Java
         if: ${{ matrix.target.id == 'android' }}
@@ -396,6 +416,8 @@ jobs:
           }
 
           run_quiet "flutter create" flutter create --org com.tanoitcorp --platforms="$PLATFORM" .
+          # The generated sample test references a MyApp the app does not have.
+          git ls-files --error-unmatch test/widget_test.dart >/dev/null 2>&1 || rm -f test/widget_test.dart
           run_quiet "flutter pub get" flutter pub get
 
           # Needed for LAN access; the generated Info.plist lacks it.
