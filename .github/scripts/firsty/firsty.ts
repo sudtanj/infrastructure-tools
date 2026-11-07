@@ -21,6 +21,12 @@ const CAP_MB = 240; // Firsty: "a maximum of 240 MB of unused data at a time"
 const PER_AD_MB = 20;
 const MAX_ADS = 18; // per day
 const AD_MS = 150_000; // one ad, from tap to back in the app
+// Today's credited ads, kept on the device (saved with the AVD): "YYYY-MM-DD N"
+// plus " done" once the daily limit stopped crediting. The app shows neither.
+// ponytail: the day is WIB; if Firsty resets at another hour, a run between
+// the two midnights is skipped or tries in vain (two ads, a minute or two).
+const DAY_FILE = "/data/local/tmp/firsty-day";
+const today = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
@@ -122,13 +128,21 @@ async function main() {
   if (DEVICE.includes(":")) await promisify(execFile)("adb", ["connect", DEVICE]);
   await shell("input keyevent KEYCODE_WAKEUP");
   await shell("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
+  const [day, n, done] = (await shell(`cat ${DAY_FILE} 2>/dev/null`).catch(() => "")).trim().split(" ");
+  let ads = day === today() ? Number(n) || 0 : 0;
+  if (day === today() && (done || ads >= MAX_ADS)) {
+    log(`daily ad limit already reached (${ads} ads today); nothing to collect until tomorrow`);
+    return;
+  }
+  const save = (full = false) => shell(`echo '${today()} ${ads}${full ? " done" : ""}' > ${DAY_FILE}`);
   try {
     await launch();
     let h = await home();
     if (!h) return;
     const before = h.mb;
+    if (h.mb + PER_AD_MB > CAP_MB) log(`${h.mb} MB is at the ${CAP_MB} MB cap; nothing to collect`);
     let stalls = 0;
-    for (let ads = 0; ads < MAX_ADS && h.mb + PER_AD_MB <= CAP_MB; ) {
+    while (ads < MAX_ADS && h.mb + PER_AD_MB <= CAP_MB) {
       const ok = await watch(h.nodes);
       if (ok === undefined) break;
       if (!ok) await launch(); // lost in an ad: start over
@@ -139,8 +153,10 @@ async function main() {
       if (h.mb > mb) {
         ads++, (stalls = 0);
         log(`ad ${ads}: ${h.mb} MB`);
+        await save();
       } else if (++stalls >= 2) {
         log("no data credited twice; the daily limit is reached or no ads are available");
+        await save(ads > 0); // none at all today may just be no ads loading
         break;
       }
     }
