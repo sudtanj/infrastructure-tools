@@ -890,6 +890,8 @@ jobs:
           # Per-app keys a project's build may push to its Worker; empty when unset.
           NOTE_TAKER_AI_API_KEY: ${{ secrets.NOTE_TAKER_AI_API_KEY }}
           NOTE_TAKER_TELEGRAM_BOT_TOKEN: ${{ secrets.NOTE_TAKER_TELEGRAM_BOT_TOKEN }}
+          MIZHU_NOTETAKER_CLIENT_ID: ${{ secrets.MIZHU_NOTETAKER_CLIENT_ID }}
+          MIZHU_NOTETAKER_CLIENT_SECRET: ${{ secrets.MIZHU_NOTETAKER_CLIENT_SECRET }}
 
       - name: Summary
         if: always()
