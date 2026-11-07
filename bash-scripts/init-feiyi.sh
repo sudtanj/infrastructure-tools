@@ -47,7 +47,7 @@ sys_brief() {
 redact() {
   local t v s
   t=$(cat)
-  for v in CODEX_API_KEY GH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD; do
+  for v in CODEX_API_KEY GH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD FEIYI_BACKUP_TURSO_TOKEN FEIYI_BACKUP_PASSPHRASE; do
     s="${!v:-}"
     if [ -n "$s" ]; then t="${t//"$s"/***}"; fi
   done
@@ -85,6 +85,12 @@ PASEO_APP_BASE_URL="${PASEO_APP_BASE_URL:-}"
 # zilong-router MCP gateway for every Claude Code and Codex agent (http://<router>:20128/mcp).
 # Its API key is CODEX_API_KEY, the same router key Codex's custom base URL uses.
 PASEO_ZILONG_MCP_URL="${PASEO_ZILONG_MCP_URL:-}"
+# Optional encrypted backup to Turso; URL, token and passphrase must all be set to enable it.
+# The daemon reads them once at start and drops them from its env, so agents never inherit them.
+FEIYI_BACKUP_TURSO_URL="${FEIYI_BACKUP_TURSO_URL:-}"
+FEIYI_BACKUP_TURSO_TOKEN="${FEIYI_BACKUP_TURSO_TOKEN:-}"
+FEIYI_BACKUP_PASSPHRASE="${FEIYI_BACKUP_PASSPHRASE:-}"
+FEIYI_BACKUP_INTERVAL_SECS="${FEIYI_BACKUP_INTERVAL_SECS:-}"
 
 # --- Resources (host safety first: sshd/tailscale must always stay reachable) ---
 # The daemon itself needs a few MB; the cap is for the agent CLIs it runs.
@@ -229,8 +235,8 @@ host_snapshot
 # ---------- config summary (debug only; never prints secret values) ----------
 dbg "config: image=${IMAGE} container=${CONTAINER_NAME} port=${PASEO_PORT} rev=${CONFIG_REV}"
 dbg "limits: cpus=${CPU_LIMIT} mem=${MEM_MB}m swap=${CONTAINER_SWAP_MB}m (zram ${ZRAM_MB}m) host_reserve=${HOST_RESERVE_MB}m agent_mb=${AGENT_MB} bun=${BUN_OPTIONS} jsc_ram=${BUN_JSC_FORCE_RAM} mimalloc_purge=${MIMALLOC_PURGE_DELAY} subagents=${CLAUDE_MAX_SUBAGENTS} pids=${PIDS_LIMIT} claude_max_live=${CLAUDE_MAX_LIVE} claude_idle=${CLAUDE_IDLE_SECS}s codex_idle=${CODEX_IDLE_SECS}s"
-dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD")"
-dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL") PASEO_ZILONG_MCP_URL host=$(url_host "$PASEO_ZILONG_MCP_URL")"
+dbg "secrets: CODEX_API_KEY=$(present "$CODEX_API_KEY") GH_TOKEN=$(present "$GH_TOKEN") ANTHROPIC_API_KEY=$(present "$ANTHROPIC_API_KEY") ANTHROPIC_AUTH_TOKEN=$(present "$ANTHROPIC_AUTH_TOKEN") CLAUDE_CODE_OAUTH_TOKEN=$(present "$CLAUDE_CODE_OAUTH_TOKEN") PASEO_PASSWORD=$(present "$PASEO_PASSWORD") FEIYI_BACKUP_TURSO_TOKEN=$(present "$FEIYI_BACKUP_TURSO_TOKEN") FEIYI_BACKUP_PASSPHRASE=$(present "$FEIYI_BACKUP_PASSPHRASE")"
+dbg "settings: CODEX_BASE_URL host=$(url_host "$CODEX_BASE_URL") CODEX_MODEL=${CODEX_MODEL:-<default>} ANTHROPIC_BASE_URL host=$(url_host "$ANTHROPIC_BASE_URL") ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<default>} GH_USERNAME=$(present "$GH_USERNAME") GH_EMAIL=$(present "$GH_EMAIL") PASEO_ZILONG_MCP_URL host=$(url_host "$PASEO_ZILONG_MCP_URL") FEIYI_BACKUP_TURSO_URL host=$(url_host "$FEIYI_BACKUP_TURSO_URL")"
 
 # --- DNS64: only on IPv6-only VMs ---
 # DNS64 resolvers (nat64.net) let an IPv6-only host reach IPv4-only services like github.com.
@@ -367,6 +373,7 @@ CONFIG_HASH=$(printf '%s\n' "$NEW_ID" "$CODEX_BASE_URL" "$CODEX_API_KEY" "$CODEX
   "$ANTHROPIC_BASE_URL" "$ANTHROPIC_MODEL" "$CLAUDE_CODE_OAUTH_TOKEN" \
   "$PASEO_PORT" "$PASEO_PASSWORD" ${PASEO_APP_BASE_URL:+"$PASEO_APP_BASE_URL"} ${PASEO_ZILONG_MCP_URL:+"$PASEO_ZILONG_MCP_URL"} "$CPU_LIMIT" "$MEM_MB" "$CONTAINER_SWAP_MB" "$AGENT_MB" "$BUN_OPTIONS" "$BUN_JSC_FORCE_RAM" "$MIMALLOC_PURGE_DELAY" "$CLAUDE_MAX_SUBAGENTS" "$PIDS_LIMIT" \
   "$CLAUDE_MAX_LIVE" "$CLAUDE_IDLE_SECS" "$CODEX_IDLE_SECS" "$CONFIG_REV" "$DNS_HASH" \
+  "$FEIYI_BACKUP_TURSO_URL" "$FEIYI_BACKUP_TURSO_TOKEN" "$FEIYI_BACKUP_PASSPHRASE" "$FEIYI_BACKUP_INTERVAL_SECS" \
   "$PASEO_DOCKER_SOCKET" "$DOCKER_SOCK" "$SOCK_GID" \
   | sha256sum | cut -d' ' -f1)
 CUR_HASH=$(docker inspect -f '{{ index .Config.Labels "init.hash" }}' "$CONTAINER_NAME" 2>/dev/null || echo "")
@@ -452,7 +459,8 @@ dbg "volumes ready: ${HOME_VOLUME}, ${WORKSPACE_VOLUME}"
 opt_env=()
 opt_names=()
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD PASEO_APP_BASE_URL PASEO_ZILONG_MCP_URL CODEX_MODEL; do
+         ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_TOKEN PASEO_PASSWORD PASEO_APP_BASE_URL PASEO_ZILONG_MCP_URL CODEX_MODEL \
+         FEIYI_BACKUP_TURSO_URL FEIYI_BACKUP_TURSO_TOKEN FEIYI_BACKUP_PASSPHRASE FEIYI_BACKUP_INTERVAL_SECS; do
   if [ -n "${!v:-}" ]; then opt_env+=(-e "$v=${!v}"); opt_names+=("$v"); fi
 done
 if [ -n "$PASEO_ZILONG_MCP_URL" ]; then

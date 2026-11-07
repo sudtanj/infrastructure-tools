@@ -264,7 +264,8 @@ jobs:
           # e.g. https://sudtanj.github.io/feiyi (the GitHub Pages build in sudtanj/feiyi).
           # PASEO_ZILONG_MCP_URL gives every feiyi agent the zilong-router MCP gateway (http://<router>:20128/mcp);
           # init-feiyi.sh sends CODEX_API_KEY as its key.
-          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,PASEO_ZILONG_MCP_URL,WORKFLOW_CRON_"
+          # FEIYI_BACKUP_ (TURSO_URL, TURSO_TOKEN, PASSPHRASE, optional INTERVAL_SECS) enables feiyi's encrypted Turso backup.
+          SECRET_FILTER: "CODEX_,GH_TOKEN,GH_USERNAME,GH_EMAIL,TAILSCALE_AUTH_KEY,TAILSCALE_PING_PEER,GH_RUNNER_,N8N_,ANTHROPIC_,CLAUDE_CODE_,DOZZLE_,PASEO_PASSWORD,PASEO_APP_BASE_URL,PASEO_ZILONG_MCP_URL,WORKFLOW_CRON_,FEIYI_BACKUP_"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -302,6 +303,10 @@ jobs:
           DOZZLE_REPLACE_PORTAINER: ${{ secrets.DOZZLE_REPLACE_PORTAINER }}
           DOZZLE_SHELL: ${{ secrets.DOZZLE_SHELL }}
           DOZZLE_USER: ${{ secrets.DOZZLE_USER }}
+          FEIYI_BACKUP_INTERVAL_SECS: ${{ secrets.FEIYI_BACKUP_INTERVAL_SECS }}
+          FEIYI_BACKUP_PASSPHRASE: ${{ secrets.FEIYI_BACKUP_PASSPHRASE }}
+          FEIYI_BACKUP_TURSO_TOKEN: ${{ secrets.FEIYI_BACKUP_TURSO_TOKEN }}
+          FEIYI_BACKUP_TURSO_URL: ${{ secrets.FEIYI_BACKUP_TURSO_URL }}
           GH_EMAIL: ${{ secrets.GH_EMAIL }}
           GH_RUNNER_APP_ID: ${{ secrets.GH_RUNNER_APP_ID }}
           GH_RUNNER_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
