@@ -124,6 +124,10 @@ if [ "${AUTOPLAY:-false}" = true ]; then
   # the page only says to come back tomorrow.
   DEVICE=emulator-5554 timeout 10m node .github/scripts/blibli/blibli.ts \
     || echo "::warning::The Blibli script ended with an error; going on."
+  # Firsty Free: ads until the data is at its 240 MB cap (18 ads a day max).
+  # It lasts 7 days, so topping up every run keeps it full.
+  DEVICE=emulator-5554 timeout 45m node .github/scripts/firsty/firsty.ts \
+    || echo "::warning::The Firsty script ended with an error; going on."
   # The 05:00 run is for the rocket alone.
   if [ "${PLAY_PINEDRAMA:-true}" = true ]; then
     DEVICE=emulator-5554 MAX_MINUTES="$minutes" \

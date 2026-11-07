@@ -33,15 +33,16 @@ name: "Android emulator session over Tailscale"
 #   GCP VM or Orange Pi, see below), or with `autoplay` on, the runner first launches EraSpace's rocket
 #   ("Luncurkan Roket") until it is out of tokens with
 #   .github/scripts/eraspace/eraspace.ts, does Blibli's daily check-in with
-#   .github/scripts/blibli/blibli.ts, then plays PineDrama itself with
+#   .github/scripts/blibli/blibli.ts, tops Firsty Free up to its 240 MB cap
+#   with ads (.github/scripts/firsty/firsty.ts), then plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
 #   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
 #   balance reaches it, plays until the coin timer at the top left is gone or
 #   `autoplay_minutes` pass, then saves; no stop file needed.
-#   Also daily at 05:00 UTC+7 for the EraSpace rocket and the Blibli check-in
+#   Also daily at 05:00 UTC+7 for the EraSpace rocket, the Blibli check-in and Firsty
 #   alone (`pinedrama` off).
 #   If a session is already running, the scheduled one waits for it.
-#   If EraSpace, Blibli or PineDrama turns out to be logged out (or EraSpace's
+#   If EraSpace, Blibli, Firsty or PineDrama turns out to be logged out (or EraSpace's
 #   rocket or Blibli's check-in can't be reached), a message goes to Telegram at the end of the run, once
 #   the exit node is off; log in again over VNC in a manual session.
 #
