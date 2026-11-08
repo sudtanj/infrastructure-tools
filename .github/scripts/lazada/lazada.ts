@@ -126,8 +126,11 @@ async function webView(): Promise<Node | undefined> {
     nodes = await screen();
     const web = nodes.find((n) => n.id.endsWith(":id/lazada_windvane_webview"));
     if (web) return web;
+    // An expired session puts the login screen over the LazCoins page.
+    if (await loggedOut(nodes)) return void alert("Lazada is logged out; log in again over VNC in a Redroid session.");
     await clearInterruptions(nodes);
   }
+  alert("Lazada: the LazCoins page's WebView was not found.");
   log("no WebView on screen;", (await focused()).trim(), [...new Set(nodes.map((n) => n.id.split("/")[1]).filter(Boolean))].slice(0, 15).join(" "));
 }
 
@@ -148,7 +151,7 @@ async function checkIn(): Promise<void> {
       return; // already checked in today
     }
     const web = await webView();
-    if (!web) return alert("Lazada: the LazCoins page's WebView was not found.");
+    if (!web) return;
     // A short press: the page ignores some instant taps.
     const x = Math.round(web.x0 + b.x * b.dpr), y = Math.round(web.y0 + b.y * b.dpr);
     await shell(`input swipe ${x} ${y} ${x} ${y} 150`);
