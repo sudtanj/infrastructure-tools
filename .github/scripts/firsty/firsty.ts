@@ -73,6 +73,15 @@ const consentAlert = () => alert("Firsty asks for ad consent; answer it once ove
 // Ad close/skip controls (AdMob and others; English and Indonesian).
 const CLOSE = /^(close|close ad|interstitial close button|skip|skip ad|skip video|lewati|tutup|x|×)$/i;
 
+// "<app> isn't responding": the launcher's keeps coming back after a cold
+// boot while Wait is pressed, so close that one (it restarts); wait for others.
+async function clearAnr(nodes: Node[]): Promise<boolean> {
+  const title = nodes.find((n) => n.text.endsWith("isn't responding"));
+  const button = title && nodes.find((n) => n.text === (title.text.includes("Launcher") ? "Close app" : "Wait"));
+  if (button) await tap(button);
+  return !!button;
+}
+
 // The home screen with its balance, or undefined after alerting.
 async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
   for (const end = Date.now() + 120_000; Date.now() < end; await sleep(3_000)) {
@@ -85,6 +94,7 @@ async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
       alert("Firsty is logged out; log in again over VNC.");
       return;
     }
+    if (await clearAnr(nodes)) continue;
     const mb = balance(nodes);
     if (mb !== undefined && nodes.some((n) => n.text.startsWith("Watch ad"))) return { mb, nodes };
     // Another tab: back to Data. Out of the app (an ad left it): reopen it.

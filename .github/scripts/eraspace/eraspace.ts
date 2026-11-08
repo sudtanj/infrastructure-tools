@@ -71,12 +71,27 @@ async function tap(n: Node) {
   await shell(`input tap ${n.x} ${n.y}`);
 }
 
-// Clears what can cover the app: its App info page, the location prompt, a
-// marketing pop-up, the "leave the app?" prompt. True if something was cleared.
+// Clears what can cover the app: an "isn't responding" dialog, its App info
+// page (and the launcher Back from it can leave), the location prompt, a marketing pop-up, the "leave the app?" prompt.
+// True if something was cleared.
 async function clearInterruptions(nodes: Node[]): Promise<boolean> {
+  // "Pixel Launcher isn't responding" keeps coming back after a cold boot
+  // while Wait is pressed; closing it is harmless (it restarts). Any other
+  // app is given time.
+  const anr = byId(nodes, "alertTitle")?.text.includes("Launcher") ? byId(nodes, "aerr_close") : byId(nodes, "aerr_wait");
+  if (anr) {
+    await tap(anr);
+    return true;
+  }
   const f = await focused();
   if (f.includes("com.android.settings/")) {
     await shell("input keyevent KEYCODE_BACK");
+    return true;
+  }
+  // EraSpace opens its App info page on a cold start, in Settings' own task,
+  // so Back from there can land on the launcher: bring EraSpace back.
+  if (f.includes("launcher")) {
+    await shell(`monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
     return true;
   }
   const deny = byId(nodes, "permission_deny_button");

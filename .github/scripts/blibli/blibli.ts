@@ -67,9 +67,12 @@ async function tap(n: Node) {
 // hangs for a while after a cold boot), a permission prompt (denied; never
 // granted on the owner's behalf). True if something was cleared.
 async function clearInterruptions(nodes: Node[]): Promise<boolean> {
-  const wait = byId(nodes, "aerr_wait");
-  if (wait) {
-    await tap(wait);
+  // "Pixel Launcher isn't responding" keeps coming back after a cold boot
+  // while Wait is pressed; closing it is harmless (it restarts). Any other
+  // app is given time.
+  const anr = byId(nodes, "alertTitle")?.text.includes("Launcher") ? byId(nodes, "aerr_close") : byId(nodes, "aerr_wait");
+  if (anr) {
+    await tap(anr);
     return true;
   }
   const deny = byId(nodes, "permission_deny_button");
