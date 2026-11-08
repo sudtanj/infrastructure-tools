@@ -8,8 +8,8 @@
 //
 // Env: DEVICE (default android-emulator:5555; emulator-5554 on the runner).
 //
-// Never answers the ad-consent prompt or anything else on the owner's behalf:
-// it stops and alerts instead.
+// Accepts Firsty's ad-consent prompt (the owner asked for that, 2026-11-08);
+// answers nothing else on the owner's behalf.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -69,7 +69,14 @@ function balance(nodes: Node[]): number | undefined {
   }
 }
 const CONSENT = /asks for your consent|^Consent$|Manage options/;
-const consentAlert = () => alert("Firsty asks for ad consent; answer it once over VNC, then the ads can run.");
+// Taps "Consent" on the ad-consent prompt: true if tapped, false if no prompt,
+// undefined (after alerting) if the prompt has no Consent button.
+async function consent(nodes: Node[]): Promise<boolean | undefined> {
+  if (!nodes.some((n) => CONSENT.test(n.text))) return false;
+  const button = nodes.find((n) => n.text === "Consent");
+  if (button) return tap(button).then(() => true);
+  alert("Firsty's ad-consent prompt has no Consent button; answer it over VNC.");
+}
 // Ad close/skip controls (AdMob and others; English and Indonesian).
 const CLOSE = /^(close|close ad|interstitial close button|skip|skip ad|skip video|lewati|tutup|x|×)$/i;
 
@@ -86,10 +93,9 @@ async function clearAnr(nodes: Node[]): Promise<boolean> {
 async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
   for (const end = Date.now() + 120_000; Date.now() < end; await sleep(3_000)) {
     const nodes = await screen();
-    if (nodes.some((n) => CONSENT.test(n.text))) {
-      consentAlert();
-      return;
-    }
+    const c = await consent(nodes);
+    if (c === undefined) return;
+    if (c) continue;
     if (LOGIN_ACTIVITY.test(await focused()) || nodes.some((n) => LOGIN_LABEL.test(n.text))) {
       alert("Firsty is logged out; log in again over VNC.");
       return;
@@ -107,7 +113,7 @@ async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
 }
 
 // One ad: tap "Watch ad", wait for it to play, close it once it allows.
-// True if it got back to the app; undefined at the consent prompt.
+// True if it got back to the app; undefined at an unanswerable consent prompt.
 async function watch(nodes: Node[]): Promise<boolean | undefined> {
   await tap(nodes.find((n) => n.text.startsWith("Watch ad"))!);
   const start = Date.now();
@@ -115,7 +121,9 @@ async function watch(nodes: Node[]): Promise<boolean | undefined> {
   for (; Date.now() - start < AD_MS; await sleep(5_000)) {
     const app = await inApp();
     const now = await screen();
-    if (now.some((n) => CONSENT.test(n.text))) return void consentAlert();
+    const c = await consent(now);
+    if (c === undefined) return;
+    if (c) continue;
     // Still on the app's own screen with the button: not started (yet).
     if (app && !left && now.some((n) => n.text.startsWith("Watch ad"))) {
       if (Date.now() - start > 30_000) return true; // no ad loaded
