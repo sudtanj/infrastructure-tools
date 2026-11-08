@@ -118,6 +118,19 @@ async function button(evaluate: (e: string) => Promise<any>) {
   return null;
 }
 
+// One dump can fail (uiautomator wants an idle screen, and the page animates)
+// or a dialog can cover it, so retry for a while.
+async function webView(): Promise<Node | undefined> {
+  let nodes: Node[] = [];
+  for (const end = Date.now() + 30_000; Date.now() < end; await sleep(2_000)) {
+    nodes = await screen();
+    const web = nodes.find((n) => n.id.endsWith(":id/lazada_windvane_webview"));
+    if (web) return web;
+    await clearInterruptions(nodes);
+  }
+  log("no WebView on screen;", (await focused()).trim(), [...new Set(nodes.map((n) => n.id.split("/")[1]).filter(Boolean))].slice(0, 15).join(" "));
+}
+
 async function checkIn(): Promise<void> {
   let evaluate: ((e: string) => Promise<any>) | undefined;
   for (const end = Date.now() + 60_000; !evaluate && Date.now() < end; ) {
@@ -134,7 +147,7 @@ async function checkIn(): Promise<void> {
       log(i ? "checked in" : "already checked in today");
       return; // already checked in today
     }
-    const web = (await screen()).find((n) => n.id.endsWith(":id/lazada_windvane_webview"));
+    const web = await webView();
     if (!web) return alert("Lazada: the LazCoins page's WebView was not found.");
     // A short press: the page ignores some instant taps.
     const x = Math.round(web.x0 + b.x * b.dpr), y = Math.round(web.y0 + b.y * b.dpr);
