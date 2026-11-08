@@ -18,7 +18,8 @@ name: "ATS CV: PDF from the job hunter's CV"
 # SECRETS: the same as job-hunter.yaml, minus the search and Chrome ones:
 #   PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read and write), BUILD_REF
 #   (optional), NINEROUTER_BASE_URL, NINEROUTER_MODEL, NINEROUTER_API_KEY
-#   (optional), TAILSCALE_EXIT_NODE (optional), and
+#   (optional), CV_PHONE (optional: also writes `<first name>_cv_phone.pdf`
+#   with that number in the header), TAILSCALE_EXIT_NODE (optional), and
 #   TAILSCALE_OAUTH_CLIENT_SECRET + TAILSCALE_TAGS or
 #   TAILSCALE_AUTH_KEY.
 #
@@ -177,6 +178,7 @@ jobs:
           JOB_HUNTER_GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           JOB_HUNTER_REPO: ${{ secrets.PRIVATE_REPO }}
           JOB_HUNTER_BRANCH: ${{ secrets.BUILD_REF || 'main' }}
+          CV_PHONE: ${{ secrets.CV_PHONE }}
         run: node private/job-hunter/ats_cv.ts
 
       - name: Leave the tailnet
