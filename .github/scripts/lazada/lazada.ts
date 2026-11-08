@@ -102,11 +102,18 @@ async function page(): Promise<(expr: string) => Promise<any>> {
     });
 }
 
-// The check-in button's label ("Check-in", then "Dapatkan lebih") and centre
-// in CSS pixels, once rendered.
-const BUTTON = `(() => { const b = document.querySelector(".lazcoins-check-in-date-button");
-  if (!b) return null; const r = b.getBoundingClientRect();
-  return { text: b.innerText.trim(), x: r.x + r.width / 2, y: r.y + r.height / 2, dpr: devicePixelRatio }; })()`;
+// The check-in control and its centre in CSS pixels, once rendered: the old
+// button ("Check-in", then "Dapatkan lebih"), or since November 2026 today's
+// card in the streak row ("Hari ini"), whose class gains "checked" once done.
+const BUTTON = `(() => { let b = document.querySelector(".lazcoins-check-in-date-button"), text;
+  if (b) text = b.innerText.trim();
+  else {
+    b = [...document.querySelectorAll(".lazcoins-checkin-card")].find((c) => /Hari ini/.test(c.textContent));
+    if (!b) return null;
+    text = /checked/.test(b.className) ? "checked" : "Check-in";
+  }
+  const r = b.getBoundingClientRect();
+  return { text, x: r.x + r.width / 2, y: r.y + r.height / 2, dpr: devicePixelRatio }; })()`;
 // Unanchored: the label is a carousel, so it may hold "Check-in" twice.
 const CHECK_IN = /check-?\s?in/i;
 
