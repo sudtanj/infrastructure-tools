@@ -18,5 +18,5 @@ RELEASE="trixie"
 # gets a -uwe5622-<driver> suffix. The weekly run moves UWE5622_COMMIT to the driver's main
 # head once the mainline image passes every test (see README "Wi-Fi driver").
 UWE5622_REPO="https://github.com/sudtanj/uwe5622-mainline"
-UWE5622_COMMIT="3bb1b0c868435157a060d3fd737f5f6ca49789aa"
+UWE5622_COMMIT="69e2c41260e504bede5e5db748811193a19e6e58"
 UWE5622_DRIVER="armbian"
