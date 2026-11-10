@@ -31,7 +31,7 @@ const today = () => new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 1
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
-type Node = { text: string; x: number; y: number };
+type Node = { text: string; x: number; y: number; x1: number };
 
 async function adb(...args: string[]): Promise<string> {
   const { stdout } = await promisify(execFile)("adb", ["-s", DEVICE, ...args], { maxBuffer: 16 << 20 });
@@ -50,7 +50,7 @@ async function screen(): Promise<Node[]> {
     if (!b) continue;
     const [x0, y0, x1, y1] = b.slice(1).map(Number);
     const text = (attr("text") || attr("content-desc")).replace(/&#10;/g, "\n").trim();
-    if (text) nodes.push({ text, x: (x0 + x1) >> 1, y: (y0 + y1) >> 1 });
+    if (text) nodes.push({ text, x: (x0 + x1) >> 1, y: (y0 + y1) >> 1, x1 });
   }
   return nodes;
 }
@@ -79,6 +79,8 @@ async function consent(nodes: Node[]): Promise<boolean | undefined> {
 }
 // Ad close/skip controls (AdMob and others; English and Indonesian).
 const CLOSE = /^(close|close ad|interstitial close button|skip|skip ad|skip video|lewati|tutup|x|×)$/i;
+// AdMob's "Reward granted ×" pill: the × is an unlabelled image right of the text.
+const GRANTED = /^(reward granted|hadiah diberikan)$/i;
 
 // "<app> isn't responding": the launcher's keeps coming back after a cold
 // boot while Wait is pressed, so close that one (it restarts); wait for others.
@@ -90,8 +92,12 @@ async function clearAnr(nodes: Node[]): Promise<boolean> {
 }
 
 // The home screen with its balance, or undefined after alerting.
+// The app hides "Watch ad" until an ad has loaded, which can take minutes, and
+// (likely) once the day's ads are used up: neither is worth an alert.
 async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
-  for (const end = Date.now() + 120_000; Date.now() < end; await sleep(3_000)) {
+  let mb: number | undefined;
+  let relaunched = false;
+  for (const end = Date.now() + 300_000; Date.now() < end; await sleep(3_000)) {
     const nodes = await screen();
     const c = await consent(nodes);
     if (c === undefined) return;
@@ -101,14 +107,21 @@ async function home(): Promise<{ mb: number; nodes: Node[] } | undefined> {
       return;
     }
     if (await clearAnr(nodes)) continue;
-    const mb = balance(nodes);
+    mb = balance(nodes);
     if (mb !== undefined && nodes.some((n) => n.text.startsWith("Watch ad"))) return { mb, nodes };
+    // Halfway with the balance but no button: a fresh start reloads the ad.
+    if (mb !== undefined && !relaunched && end - Date.now() < 150_000) {
+      await launch(), (relaunched = true);
+      continue;
+    }
     // Another tab: back to Data. Out of the app (an ad left it): reopen it.
     // No Back while it loads; that closes it.
-    const data = nodes.find((n) => n.text === "Data");
+    const data = mb === undefined && nodes.find((n) => n.text === "Data");
     if (data) await tap(data);
     else if (!(await inApp())) await launch(true);
   }
+  if (mb !== undefined) return log(`${mb} MB, but no ad offered for 5 min (none loading, or today's limit reached)`);
+  log("on screen:", await focused(), JSON.stringify((await screen()).map((n) => n.text).slice(0, 30)));
   alert('Firsty: the "Watch ad" button did not show, so no free data was collected.');
 }
 
@@ -124,15 +137,16 @@ async function watch(nodes: Node[]): Promise<boolean | undefined> {
     const c = await consent(now);
     if (c === undefined) return;
     if (c) continue;
-    // Still on the app's own screen with the button: not started (yet).
-    if (app && !left && now.some((n) => n.text.startsWith("Watch ad"))) {
-      if (Date.now() - start > 30_000) return true; // no ad loaded
+    // Still on the app's own screen (the button hides while the ad loads): not started yet.
+    if (app && !left) {
+      if (Date.now() - start > 45_000) return true; // no ad loaded
       continue;
     }
     left = true;
     if (app && now.some((n) => balance([n]) !== undefined)) return true;
     // Rewarded ads only offer a close control once the reward is earned.
-    const close = now.find((n) => CLOSE.test(n.text));
+    const granted = now.find((n) => GRANTED.test(n.text));
+    const close = now.find((n) => CLOSE.test(n.text)) ?? (granted && { ...granted, x: granted.x1 + 35 });
     if (close) await tap(close);
     // An ad may open the store or a browser; never act there, just go back.
     else if (!/com\.firsty\.app/.test(await focused()) || Date.now() - start > 40_000) {
