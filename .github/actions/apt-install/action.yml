@@ -6,6 +6,8 @@ description: >
   hold the Chrome profile lock while installing then make every other profile
   workflow wait too. So each try is bounded, and after a failed try the Azure
   mirror is dropped, leaving the runner's own fallback, archive.ubuntu.com.
+  Downloaded packages are cached, so a run during an Ubuntu archive outage
+  (2026-11-11: DNS failures and stalls on every mirror) installs from the cache.
 
 inputs:
   packages:
@@ -15,6 +17,23 @@ inputs:
 runs:
   using: composite
   steps:
+    - id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      # ImageOS and ImageVersion are runner variables, not in the env context.
+      run: |
+        prefix="apt-${ImageOS}-$(sha256sum <<<"$PACKAGES" | cut -c1-16)-"
+        echo "prefix=${prefix}" >>"$GITHUB_OUTPUT"
+        echo "key=${prefix}${ImageVersion}" >>"$GITHUB_OUTPUT"
+    # Public Ubuntu packages only, nothing private. Each runner image saves its own
+    # cache; a cache from an older image still serves the packages that did not change.
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
     - shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
@@ -24,13 +43,21 @@ runs:
         # and dpkg fsyncs each file. Neither matters on a throwaway runner.
         sudo rm -f /var/lib/man-db/auto-update
         echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io >/dev/null
-        sudo timeout -k 15 300 apt-get update -qq >/dev/null
+        mkdir -p ~/apt-archives/partial
+        # The image ships package lists, so a failed update can still install from the cache.
+        sudo timeout -k 15 300 apt-get update -qq >/dev/null \
+          || echo "::warning::apt-get update did not finish; using the image's package lists."
         read -ra packages <<<"$PACKAGES"
         for attempt in 1 2 3; do
           # -k: apt-get ignores SIGTERM while dpkg runs, so follow up with SIGKILL.
           sudo DEBIAN_FRONTEND=noninteractive timeout -k 15 300 apt-get install -y -q \
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "${packages[@]}" \
-            >/tmp/apt-install.log 2>&1 && exit 0
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 \
+            -o Dir::Cache::archives="$HOME/apt-archives" "${packages[@]}" \
+            >/tmp/apt-install.log 2>&1 && {
+            # apt leaves root-only files (lock, partial/) that the cache save cannot read.
+            sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+            exit 0
+          }
           echo "::warning::apt-get install did not finish (try ${attempt}); retrying on the next mirror."
           # The package lists are keyed by the mirror+file URI, so no apt-get update is needed after this.
           sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt 2>/dev/null || true
@@ -38,3 +65,9 @@ runs:
         done
         tail -n 20 /tmp/apt-install.log
         exit 1
+    # shortcut: old package versions pile up across images; prune (apt-get autoclean) if the repo cache nears 10 GB.
+    - if: steps.restore.outputs.cache-matched-key != steps.key.outputs.key
+      uses: actions/cache/save@v4
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.key.outputs.key }}
