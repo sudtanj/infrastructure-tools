@@ -1,0 +1,92 @@
+name: "Tour aggregator: scrape the tour sites into tours.json"
+
+# ---------------------------------------------------------------------------
+# Every two days, scrapes the six Indonesian tour sites for the tour search
+# (cloudflare-projects/tour-aggregator in the PRIVATE repo) and commits
+# public/tours.json there. cloudflare-private-deploy.yaml then deploys the
+# folder like any other push.
+#
+# HOW THIS WORKS
+#   1. The tour-aggregator folder is checked out from the PRIVATE repo and its
+#      parser and scraper tests run (`node --test *.test.mjs`).
+#   2. `node scrape.mjs` loads every site directly (no proxy), fetches each
+#      tour's itinerary and writes public/tours.json. A site that fails keeps
+#      its tours from the previous file and is marked stale; the step fails
+#      only when every site failed.
+#   3. tours.json is committed and pushed to the private repo when it changed.
+#
+# SECRETS: PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read and write: it
+#   pushes tours.json), BUILD_REF (optional branch, default main).
+#
+# Runs on a GitHub-hosted runner, as the other private-repo jobs do: it is a
+# plain scrape and needs no tailnet. The scraper's log prints counts and URLs only.
+# ---------------------------------------------------------------------------
+
+on:
+  # Dispatched by workflow-cron on the GCP VM or Orange Pi (builder-tools/workflow-cron,
+  # bash-scripts/init-workflow-cron.sh): GitHub's own `schedule:` starts late or skips runs.
+  # Without that device, put this back:
+  # schedule:
+  #   # Every two days (twice in a row at a month's end).
+  #   - cron: '23 20 */2 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tour-aggregator-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ secrets.BUILD_REF || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # Kept in .git/config: the commit step pushes with it.
+          persist-credentials: true
+          sparse-checkout: cloudflare-projects/tour-aggregator
+          path: private
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.19'
+
+      - name: Test
+        working-directory: private/cloudflare-projects/tour-aggregator
+        run: node --test *.test.mjs
+
+      - name: Scrape
+        working-directory: private/cloudflare-projects/tour-aggregator
+        run: node scrape.mjs
+
+      - name: Commit and push tours.json
+        working-directory: private
+        run: |
+          set -euo pipefail
+          file=cloudflare-projects/tour-aggregator/public/tours.json
+          if [ -z "$(git status --porcelain -- "$file")" ]; then
+            exit 0
+          fi
+          git add "$file"
+          # In the repo config, not `-c`: the rebase below re-commits when main has moved.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "tour-aggregator: refresh tours.json"
+          for attempt in 1 2 3; do
+            git pull -q --rebase
+            if git push -q; then
+              exit 0
+            fi
+            echo "push failed (attempt ${attempt}/3)"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::could not push tours.json"
+          exit 1
