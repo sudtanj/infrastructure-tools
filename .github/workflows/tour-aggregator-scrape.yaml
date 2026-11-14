@@ -71,15 +71,16 @@ jobs:
         working-directory: private
         run: |
           set -euo pipefail
-          file=cloudflare-projects/tour-aggregator/public/tours.json
-          if [ -z "$(git status --porcelain -- "$file")" ]; then
+          dir=cloudflare-projects/tour-aggregator/public
+          # -A also stages removed destination pages.
+          git add -A -- "$dir/tours.json" "$dir/price-history.json" "$dir/tours" "$dir/sitemap.xml" "$dir/robots.txt"
+          if git diff --cached --quiet; then
             exit 0
           fi
-          git add "$file"
           # In the repo config, not `-c`: the rebase below re-commits when main has moved.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -q -m "tour-aggregator: refresh tours.json"
+          git commit -q -m "tour-aggregator: refresh tours, price history and destination pages"
           for attempt in 1 2 3; do
             git pull -q --rebase
             if git push -q; then
