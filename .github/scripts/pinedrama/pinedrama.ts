@@ -46,6 +46,8 @@ const PLAY_TIMEOUT_MS = 45_000;
 const DISMISS = /^(skip|not now|later|close|cancel|got it|no thanks|don.t allow|maybe later)$/i;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Paced like a person: a random whole number from min to max.
+const between = (min: number, max: number) => Math.round(min + Math.random() * (max - min));
 
 type Player = { piid: string; state: string };
 
@@ -139,9 +141,11 @@ async function dismissPopups(d: AndroidDevice) {
   }
 }
 
+// A thumb's flick: never the same path or speed twice. 720x1280 screen; starts
+// above the nav bar, ends below the status bar.
 async function swipeUp(d: AndroidDevice) {
-  // 720x1280 screen; start above the nav bar and below the status bar.
-  await shell(d, "input swipe 360 1000 360 250 250");
+  const x = between(300, 420);
+  await shell(d, `input swipe ${x} ${between(940, 1060)} ${x + between(-40, 40)} ${between(200, 330)} ${between(180, 420)}`);
 }
 
 async function tapCenter(d: AndroidDevice) {
@@ -228,11 +232,14 @@ async function main() {
     if (await shouldStop(d)) break;
     const p = await waitForPlayback(d, uid);
     if (!p) {
+      await sleep(between(2_000, 5_000));
       await swipeUp(d);
       continue;
     }
     await watch(d, uid);
     if (stopReason) break;
+    // A moment before the next one, and now and then a longer pause.
+    await sleep(n % between(6, 12) === 0 ? between(15_000, 45_000) : between(800, 3_500));
     if (await inForeground(d)) await swipeUp(d);
   }
   // Watching can unlock more (watch-time milestones).
