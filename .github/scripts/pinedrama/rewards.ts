@@ -24,12 +24,15 @@ const PKG = "com.ss.android.ttmd.video";
 const PAGE = "com.bytedance.hybrid.spark.page.SparkActivity";
 // The coin tab, and the bottom bar holding it as a fallback (ids are obfuscated
 // and can change with an app update).
-const TAB_ID = "d9p";
-const BAR_ID = "jui";
+const TAB_ID = "ccx";
+const BAR_ID = "huz";
 // Buttons that collect something. "Tonton" (watch) and "Mulai" (start, ads)
 // begin tasks instead, so they are left alone.
 const COLLECT = /check\s*in|klaim/i;
 const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, accepted by the owner
+// The "Selamat, kamu dapat ..." reward popup, which covers the page. OCR can
+// read a stray character before it ("é OK").
+const OK = /(^|\s)ok$/i;
 const MAX_PRESSES = 6;
 // Exchanging: at most once per run, and only when the Tukar page offers both
 // DANA and Rp500. Nothing is ever typed: if it asks to link DANA or for a
@@ -272,8 +275,14 @@ async function loggedOut(d: AndroidDevice): Promise<boolean> {
   return true;
 }
 
-async function waitFor(d: AndroidDevice, what: string, ms: number): Promise<boolean> {
-  for (const end = Date.now() + ms; Date.now() < end; await sleep(2_000)) if ((await focused(d)).includes(what)) return true;
+// Since 47.7 the page is a Lynx view inside the feed's activity, no longer
+// its own SparkActivity; either counts.
+async function onPage(d: AndroidDevice): Promise<boolean> {
+  return (await focused(d)).includes(PAGE) || (await shell(d, "dumpsys activity top")).includes("com.lynx.tasm.");
+}
+
+async function waitForPage(d: AndroidDevice, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(2_000)) if (await onPage(d)) return true;
   return false;
 }
 
@@ -289,7 +298,7 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
     }
     if (!tab) return log("coin tab not found; skipping");
     await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
-    if (!(await waitFor(d, PAGE, 60_000))) {
+    if (!(await waitForPage(d, 60_000))) {
       if (!(await loggedOut(d))) log("the rewards page did not open; skipping");
       return;
     }
@@ -306,21 +315,30 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       if (redButtons(s).length || (await words(s)).some((w) => ACCEPT.test(w.text))) break;
     }
 
-    let presses = 0, scrolls = 0, accepts = 0;
+    let presses = 0, scrolls = 0, accepts = 0, oks = 0;
     const tried = new Set<string>();
     // A refusal ("something went wrong") comes from the server, so another
     // button with the same label would be refused too.
     const refused = new Set<string>();
     while (presses < MAX_PRESSES) {
       const s = await screenshot(device);
-      const accept = (await words(s)).find((w) => ACCEPT.test(w.text));
+      const ws = await words(s);
+      const accept = ws.find((w) => ACCEPT.test(w.text));
       if (accept && accepts < 2) {
         accepts++;
         await press(d, accept.x, accept.y);
         await sleep(5_000);
         continue;
       }
-      const target = (await buttons(s)).find(
+      const btns = await buttons(s);
+      const ok = btns.find((b) => OK.test(b.label));
+      if (ok && oks < MAX_PRESSES) {
+        oks++;
+        await press(d, ok.x, ok.y);
+        await sleep(3_000);
+        continue;
+      }
+      const target = btns.find(
         (b) => COLLECT.test(b.label) && !refused.has(b.label) && !tried.has(`${scrolls}:${b.label}:${b.y}`),
       );
       if (!target) {
@@ -350,7 +368,7 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
     await worker?.terminate().catch(() => {});
     worker = undefined;
     // Back to the feed (from the Tukar page too).
-    for (let i = 0; i < 4 && (await focused(d).catch(() => "")).includes(PAGE); i++) {
+    for (let i = 0; i < 4 && (await onPage(d).catch(() => false)); i++) {
       await shell(d, "input keyevent KEYCODE_BACK").catch(() => {});
       await sleep(3_000);
     }

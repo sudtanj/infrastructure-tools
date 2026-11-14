@@ -10,7 +10,7 @@
 // Env: DEVICE (default 100.113.219.108:5555), MAX_VIDEOS (0 = forever),
 // MAX_WATCH_SECONDS (swipe anyway after this, for videos that loop),
 // MAX_MINUTES (stop after this, 0 = never), COIN_ID (stop once this view is
-// gone; default qz8, the coin timer on the left, empty to ignore it),
+// gone; default o4r, the coin timer on the left, empty to ignore it),
 // REWARDS (default 1: check in and claim on the rewards page before and
 // after scrolling, see rewards.ts; 0 to skip), REDEEM (default 1: exchange
 // Rp500 to DANA once the balance has it; 0 to skip).
@@ -34,7 +34,7 @@ const DEVICE = process.env.DEVICE ?? "100.113.219.108:5555";
 const MAX_VIDEOS = Number(process.env.MAX_VIDEOS ?? 0);
 const MAX_WATCH_MS = Number(process.env.MAX_WATCH_SECONDS ?? 240) * 1000;
 const MAX_MINUTES = Number(process.env.MAX_MINUTES ?? 0);
-const COIN_ID = process.env.COIN_ID ?? "qz8";
+const COIN_ID = process.env.COIN_ID ?? "o4r";
 const REWARDS = process.env.REWARDS !== "0";
 const COIN_CHECK_MS = 30_000;
 const POLL_MS = 2_000;
@@ -81,7 +81,7 @@ const playing = (ps: Player[]) => ps.find((p) => p.state === "started");
 // Whether view app:id/<id> is shown: in the app's `dumpsys activity top` tree
 // with a size and every ancestor visible. Selector lookups take minutes here,
 // this a few seconds. Lines look like
-// "  android.widget.FrameLayout{5c8d9ac V.E...... ........ 0,268-128,440 #7f0a59b2 app:id/qz8}".
+// "  android.widget.FrameLayout{5c8d9ac V.E...... ........ 0,268-128,440 #7f0a59b2 app:id/o4r}".
 async function viewShown(d: AndroidDevice, id: string): Promise<boolean> {
   const out = await shell(d, "dumpsys activity top");
   const from = out.indexOf(`ACTIVITY ${PKG}/`);
