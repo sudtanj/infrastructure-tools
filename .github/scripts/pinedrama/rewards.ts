@@ -1,6 +1,8 @@
 // PineDrama's rewards page: open it from the coin tab in the middle of the
-// bottom bar, check in, and press every "Klaim" (claim) button on it. Once the
-// balance ("Poin Anda") reaches Rp500, exchange Rp500 to DANA with "Tukar".
+// bottom bar, check in, press every "Klaim" (claim) button on it, and watch the
+// daily ads ("Tonton iklan", button "Mulai"). Once the balance ("Your Stars",
+// before 47.7 "Poin Anda") reaches Rp500, exchange Rp500 to DANA with "Redeem"
+// ("Tukar").
 //
 // The page (SparkActivity) is a Lynx page: nothing on it is in the
 // accessibility tree, so uiautomator and Playwright selectors see no text and
@@ -26,9 +28,15 @@ const PAGE = "com.bytedance.hybrid.spark.page.SparkActivity";
 // and can change with an app update).
 const TAB_ID = "ccx";
 const BAR_ID = "huz";
-// Buttons that collect something. "Tonton" (watch) and "Mulai" (start, ads)
-// begin tasks instead, so they are left alone.
+// Buttons that collect something. "Tonton" (watch) opens the feed, so it is
+// left alone.
 const COLLECT = /check\s*in|klaim/i;
+// "Mulai" starts a 30 s ad (159 coins, 30 a day) in RewardAdActivity; its ×
+// (app:id/l2g) closes it and the page shows "159 points Claimed".
+const AD = /mulai/i;
+const ADS = Number(process.env.ADS ?? 15); // per run; the schedule runs twice a day
+const AD_ACTIVITY = "RewardAdActivity";
+const AD_CLOSE_ID = "l2g";
 const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, accepted by the owner
 // The "Selamat, kamu dapat ..." reward popup, which covers the page. OCR can
 // read a stray character before it ("é OK").
@@ -216,13 +224,13 @@ async function redeem(d: AndroidDevice, device: string) {
   }
   await sleep(2_000);
   const ws = await words(await screenshot(device));
-  const poin = ws.find((w) => /^poin$/i.test(w.text));
+  const poin = ws.find((w) => /^(poin|stars)$/i.test(w.text));
   const rp = poin && ws.find((w) => /^rp/i.test(w.text) && w.y > poin.y && w.y - poin.y < 120);
   const amount = rp && rupiah(ws, rp);
   if (!rp || amount === undefined) return log("balance not found");
   if (amount < REDEEM_AT) return;
-  const tukar = ws.find((w) => /^tukar$/i.test(w.text) && Math.abs(w.y - rp.y) < 50);
-  if (!tukar) return log('"Tukar" not found');
+  const tukar = ws.find((w) => /^(tukar|redeem)$/i.test(w.text) && Math.abs(w.y - rp.y) < 50);
+  if (!tukar) return log('"Redeem" not found');
   await press(d, tukar.x, tukar.y);
 
   // A web page; it can take a while.
@@ -286,6 +294,26 @@ async function waitForPage(d: AndroidDevice, ms: number): Promise<boolean> {
   return false;
 }
 
+// Presses "Mulai", watches the ad past its 30 s and closes it. False if no ad
+// opened or it would not close.
+async function watchAd(d: AndroidDevice, x: number, y: number): Promise<boolean> {
+  await press(d, x, y);
+  let opened = false;
+  for (let i = 0; i < 10 && !opened; i++) {
+    await sleep(2_000);
+    opened = (await focused(d)).includes(AD_ACTIVITY);
+  }
+  if (!opened) return false;
+  await sleep(32_000 + Math.random() * 12_000);
+  for (let i = 0; i < 3; i++) {
+    const close = await viewBox(d, AD_CLOSE_ID);
+    await shell(d, close ? `input tap ${close.x + (close.w >> 1)} ${close.y + (close.h >> 1)}` : "input keyevent KEYCODE_BACK");
+    await sleep(4_000);
+    if (!(await focused(d)).includes(AD_ACTIVITY)) return true;
+  }
+  return false;
+}
+
 // Opens the rewards page from the feed, collects what it can, and goes back.
 // Never throws: a failure here only skips the rewards.
 export async function claimRewards(d: AndroidDevice, device: string): Promise<void> {
@@ -315,7 +343,7 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       if (redButtons(s).length || (await words(s)).some((w) => ACCEPT.test(w.text))) break;
     }
 
-    let presses = 0, scrolls = 0, accepts = 0, oks = 0;
+    let presses = 0, scrolls = 0, accepts = 0, oks = 0, ads = 0;
     const tried = new Set<string>();
     // A refusal ("something went wrong") comes from the server, so another
     // button with the same label would be refused too.
@@ -336,6 +364,16 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
         oks++;
         await press(d, ok.x, ok.y);
         await sleep(3_000);
+        continue;
+      }
+      const ad = ads < ADS && btns.find((b) => AD.test(b.label));
+      if (ad) {
+        ads++;
+        if (!(await watchAd(d, ad.x, ad.y))) {
+          log(`ad ${ads} did not open or close; no more ads this run`);
+          ads = ADS;
+        }
+        await sleep(3_000 + Math.random() * 5_000);
         continue;
       }
       const target = btns.find(
