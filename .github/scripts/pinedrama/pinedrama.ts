@@ -12,8 +12,9 @@
 // MAX_MINUTES (stop after this, 0 = never), COIN_ID (stop once this view is
 // gone; default o4r, the coin timer on the left, empty to ignore it),
 // REWARDS (default 1: check in and claim on the rewards page before and
-// after scrolling, see rewards.ts; 0 to skip), REDEEM (default 1: exchange
-// Rp500 to DANA once the balance has it; 0 to skip).
+// after scrolling, see rewards.ts; 0 to skip), ADS (default 30: reward ads
+// per rewards visit; the page comes back every ~11 min for the timed reward
+// and ads that were cooling down).
 //
 // PineDrama's window is FLAG_SECURE (screenshots are black) and a playing
 // video keeps uiautomator from going idle, so the screen can't tell us when a
@@ -37,6 +38,9 @@ const MAX_MINUTES = Number(process.env.MAX_MINUTES ?? 0);
 const COIN_ID = process.env.COIN_ID ?? "o4r";
 const REWARDS = process.env.REWARDS !== "0";
 const COIN_CHECK_MS = 30_000;
+// The timed reward ("reward berwaktu") and the reward ad can wait up to ~10
+// min for their next claim, so the rewards page is visited again this often.
+const REWARDS_EVERY_MS = 11 * 60_000;
 const POLL_MS = 2_000;
 const END_GRACE_MS = 6_000;
 // Arm64 app under translation on an x86_64 emulator: cold start takes minutes.
@@ -105,17 +109,21 @@ let deadline = Infinity;
 let nextCoinCheck = 0;
 let coinMisses = 0;
 let stopReason = "";
+const COIN_GONE = "the coin is gone";
+// Playing the full series for its reward, once the feed's coin is gone. Its
+// player has no coin.
+let series = false;
 
 // Checked between polls; the coin is looked up at most every COIN_CHECK_MS
 // and must be missing twice in a row (a swipe or an ad can hide it briefly).
 async function shouldStop(d: AndroidDevice): Promise<boolean> {
   if (stopReason) return true;
   if (Date.now() >= deadline) stopReason = `${MAX_MINUTES} minutes are up`;
-  else if (COIN_ID && Date.now() >= nextCoinCheck) {
+  else if (COIN_ID && !series && Date.now() >= nextCoinCheck) {
     nextCoinCheck = Date.now() + COIN_CHECK_MS;
     if (await inForeground(d)) {
       coinMisses = (await viewShown(d, COIN_ID)) ? 0 : coinMisses + 1;
-      if (coinMisses >= 2) stopReason = "the coin is gone";
+      if (coinMisses >= 2) stopReason = COIN_GONE;
     }
   }
   return stopReason !== "";
@@ -226,10 +234,33 @@ async function main() {
     if (!(await inForeground(d))) await launch(d);
     await claimRewards(d, DEVICE);
   }
+  let rewardsAt = Date.now();
 
   for (let n = 1; MAX_VIDEOS === 0 || n <= MAX_VIDEOS; n++) {
     if (!(await inForeground(d))) await launch(d);
-    if (await shouldStop(d)) break;
+    if (await shouldStop(d)) {
+      // The feed pays no more today; the full series still does.
+      if (stopReason !== COIN_GONE || !REWARDS || series) break;
+      series = true;
+      stopReason = "";
+      rewardsAt = 0;
+    }
+    if (REWARDS && Date.now() - rewardsAt > REWARDS_EVERY_MS + between(0, 120_000)) {
+      const { opened } = await claimRewards(d, DEVICE, series);
+      rewardsAt = Date.now();
+      if (series && !opened) {
+        // Only the timed reward can be left, one claim every 10 min: come
+        // back until a visit finds nothing.
+        do {
+          await sleep(REWARDS_EVERY_MS);
+          if (await shouldStop(d)) break;
+          if (!(await inForeground(d))) await launch(d);
+        } while ((await claimRewards(d, DEVICE)).collected);
+        stopReason ||= `${COIN_GONE}, no series is left to watch and nothing more to claim`;
+        break;
+      }
+      if (!(await inForeground(d))) await launch(d);
+    }
     const p = await waitForPlayback(d, uid);
     if (!p) {
       await sleep(between(2_000, 5_000));
@@ -237,7 +268,7 @@ async function main() {
       continue;
     }
     await watch(d, uid);
-    if (stopReason) break;
+    if (stopReason && stopReason !== COIN_GONE) break;
     // A moment before the next one, and now and then a longer pause.
     await sleep(n % between(6, 12) === 0 ? between(15_000, 45_000) : between(800, 3_500));
     if (await inForeground(d)) await swipeUp(d);

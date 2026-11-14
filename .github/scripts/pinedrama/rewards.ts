@@ -1,8 +1,6 @@
 // PineDrama's rewards page: open it from the coin tab in the middle of the
 // bottom bar, check in, press every "Klaim" (claim) button on it, and watch the
-// daily ads ("Tonton iklan", button "Mulai"). Once the balance ("Your Stars",
-// before 47.7 "Poin Anda") reaches Rp500, exchange Rp500 to DANA with "Redeem"
-// ("Tukar").
+// daily ads ("Tonton iklan", button "Mulai").
 //
 // The page (SparkActivity) is a Lynx page: nothing on it is in the
 // accessibility tree, so uiautomator and Playwright selectors see no text and
@@ -28,13 +26,19 @@ const PAGE = "com.bytedance.hybrid.spark.page.SparkActivity";
 // and can change with an app update).
 const TAB_ID = "ccx";
 const BAR_ID = "huz";
-// Buttons that collect something. "Tonton" (watch) opens the feed, so it is
-// left alone.
+// Buttons that collect something. "Tonton" (watch) opens a player, so it is
+// only pressed for the full series, see claimRewards.
 const COLLECT = /check\s*in|klaim/i;
 // "Mulai" starts a 30 s ad (159 coins, 30 a day) in RewardAdActivity; its ×
 // (app:id/l2g) closes it and the page shows "159 points Claimed".
 const AD = /mulai/i;
-const ADS = Number(process.env.ADS ?? 15); // per run; the schedule runs twice a day
+// "Tonton satu serial penuh dan dapatkan 1.800": its "Tonton" opens the series
+// (SeriesInnerFeedActivity) where it was left off; the 1.500 for the last
+// episode is then a "Klaim" on this page.
+const WATCH = /tonton/i;
+const SERIES = /serial/i;
+const SERIES_ACTIVITY = "SeriesInnerFeedActivity";
+const ADS = Number(process.env.ADS ?? 30); // per visit; the server stops at 30 a day
 const AD_ACTIVITY = "RewardAdActivity";
 const AD_CLOSE_ID = "l2g";
 const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, accepted by the owner
@@ -42,17 +46,6 @@ const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, acc
 // read a stray character before it ("é OK").
 const OK = /(^|\s)ok$/i;
 const MAX_PRESSES = 6;
-// Exchanging: at most once per run, and only when the Tukar page offers both
-// DANA and Rp500. Nothing is ever typed: if it asks to link DANA or for a
-// number or code, that is left to the owner.
-const REDEEM = process.env.REDEEM !== "0";
-const REDEEM_AT = 500; // rupiah
-const METHOD = /^dana$/i;
-const AMOUNT = /^(rp)?500$/i;
-const CONFIRM = /tukar|tarik|konfirmasi|lanjut/i;
-const NEEDS_OWNER = /^(masukkan|otp|hubungkan|tautkan|sambungkan|verifikasi)$/i;
-const RESULT = /berhasil|sukses|diproses|gagal|salah|tidak/i;
-let redeemed = false;
 let loginAlerted = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -183,94 +176,6 @@ async function buttons(s: Shot): Promise<{ label: string; x: number; y: number }
   return out;
 }
 
-// The words on w's line, left to right; long digit runs (account or phone
-// numbers) are hidden, since the log is public.
-function lineOf(ws: Word[], w: Word): string {
-  return ws
-    .filter((x) => Math.abs(x.y - w.y) < 15)
-    .sort((a, b) => a.x - b.x)
-    .map((x) => x.text)
-    .join(" ")
-    .replace(/\d{6,}/g, "…");
-}
-
-// "Rp155" (or "Rp1.155", or split into several words by the wide font) on
-// the Rp word's line, up to the "=" before the coin count. OCR can read the
-// whole line as one word, and the "=" as anything ("Rp155-#4.667",
-// "Rp1 55:-%4.667"): digits are read up to the first other character.
-function rupiah(ws: Word[], rp: Word): number | undefined {
-  let text = "", right = rp.x0;
-  for (const w of ws.filter((x) => Math.abs(x.y - rp.y) < 20 && x.x0 >= rp.x0).sort((a, b) => a.x0 - b.x0)) {
-    const t = w.text.match(/^(rp)?[\d.,]*/i)![0];
-    if (w.x0 - right > 45 || (w !== rp && !/\d/.test(t))) break;
-    text += t;
-    right = w.x1;
-    if (t !== w.text) break;
-  }
-  const n = text.replace(/^rp/i, "").split(",")[0].replace(/\./g, "");
-  return /^\d+$/.test(n) ? Number(n) : undefined;
-}
-
-async function keyboardShown(d: AndroidDevice): Promise<boolean> {
-  return (await shell(d, "dumpsys input_method | grep mInputShown")).includes("mInputShown=true");
-}
-
-// Exchanges Rp500 to DANA if the balance has it. On the rewards page.
-async function redeem(d: AndroidDevice, device: string) {
-  // The balance is near the top.
-  for (let i = 0; i < 3; i++) {
-    await shell(d, "input swipe 360 400 360 1100 300");
-    await sleep(1_000);
-  }
-  await sleep(2_000);
-  const ws = await words(await screenshot(device));
-  const poin = ws.find((w) => /^(poin|stars)$/i.test(w.text));
-  const rp = poin && ws.find((w) => /^rp/i.test(w.text) && w.y > poin.y && w.y - poin.y < 120);
-  const amount = rp && rupiah(ws, rp);
-  if (!rp || amount === undefined) return log("balance not found");
-  if (amount < REDEEM_AT) return;
-  const tukar = ws.find((w) => /^(tukar|redeem)$/i.test(w.text) && Math.abs(w.y - rp.y) < 50);
-  if (!tukar) return log('"Redeem" not found');
-  await press(d, tukar.x, tukar.y);
-
-  // A web page; it can take a while.
-  let page: Word[] = [];
-  for (let i = 0; i < 18 && !page.some((w) => METHOD.test(w.text)); i++) {
-    await sleep(5_000);
-    page = await words(await screenshot(device));
-  }
-  if (!page.some((w) => METHOD.test(w.text))) return log("the Tukar page did not load, or offers no DANA; not exchanging");
-  for (const [name, re] of [["DANA", METHOD], ["Rp500", AMOUNT]] as const) {
-    const w = page.find((x) => re.test(x.text.replace(/\s/g, "")));
-    if (!w) return log(`the Tukar page offers no ${name}; not exchanging`);
-    await press(d, w.x, w.y);
-    await sleep(2_500);
-    page = await words(await screenshot(device));
-  }
-
-  // Its button, then possibly a confirmation dialog's.
-  let last: { label: string; y: number } | undefined;
-  for (let i = 0; i < 2; i++) {
-    const b = (await buttons(await screenshot(device))).find((x) => CONFIRM.test(x.label));
-    if (!b) {
-      if (!last) return log("no button to confirm the exchange; not exchanging");
-      break;
-    }
-    // Still the same button: the first press was not accepted. Never press twice.
-    if (last && last.label === b.label && Math.abs(last.y - b.y) < 40) break;
-    redeemed = true;
-    await press(d, b.x, b.y);
-    last = b;
-    await sleep(3_000);
-    const after = await words(await screenshot(device));
-    if ((await keyboardShown(d)) || after.some((w) => NEEDS_OWNER.test(w.text)))
-      return log("PineDrama asks for details (linking DANA, a number or a code); do that once by hand over VNC");
-    const said = after.find((w) => RESULT.test(w.text));
-    if (said) return log(`exchange: "${lineOf(after, said)}"`);
-  }
-  log("exchange sent; no answer seen");
-}
-
 // A login screen instead of the rewards page, or after pressing a claim
 // button: the session expired. (Not OCR: "Masuk" is also check-in wording.)
 // Alerts once per run; true if logged out.
@@ -314,23 +219,37 @@ async function watchAd(d: AndroidDevice, x: number, y: number): Promise<boolean>
   return false;
 }
 
-// Opens the rewards page from the feed, collects what it can, and goes back.
-// Never throws: a failure here only skips the rewards.
-export async function claimRewards(d: AndroidDevice, device: string): Promise<void> {
+// Opens the rewards page from the feed (or the series), collects what it can,
+// and goes back; with `series`, opens the full series instead and returns
+// whether it did, and how many rewards it collected (ads included). Never
+// throws: a failure here only skips the rewards.
+export async function claimRewards(d: AndroidDevice, device: string, series = false): Promise<{ opened: boolean; collected: number }> {
+  let collected = 0;
   try {
-    // Right after a launch the feed (and its bottom bar) may still be loading.
-    let tab: Box | undefined;
-    for (let i = 0; i < 30 && !tab; i++) {
-      tab = (await viewBox(d, TAB_ID)) ?? (await viewBox(d, BAR_ID));
-      if (!tab) await sleep(2_000);
+    // The series was opened from the page: back to it.
+    if ((await focused(d)).includes(SERIES_ACTIVITY)) {
+      await shell(d, "input keyevent KEYCODE_BACK");
+      await sleep(4_000);
     }
-    if (!tab) return log("coin tab not found; skipping");
-    await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
-    if (!(await waitForPage(d, 60_000))) {
-      if (!(await loggedOut(d))) log("the rewards page did not open; skipping");
-      return;
+    // A previous run can leave the app on the page, where the tab isn't shown.
+    if (!(await onPage(d))) {
+      // Right after a launch the feed (and its bottom bar) may still be loading.
+      let tab: Box | undefined;
+      for (let i = 0; i < 30 && !tab; i++) {
+        tab = (await viewBox(d, TAB_ID)) ?? (await viewBox(d, BAR_ID));
+        if (!tab) await sleep(2_000);
+      }
+      if (!tab) {
+        log("coin tab not found; skipping");
+        return { opened: false, collected };
+      }
+      await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
+      if (!(await waitForPage(d, 60_000))) {
+        if (!(await loggedOut(d))) log("the rewards page did not open; skipping");
+        return { opened: false, collected };
+      }
+      await sleep(8_000); // the page loads its data after it shows
     }
-    await sleep(8_000); // the page loads its data after it shows
     // It reopens where it was last scrolled to; Check in is at the top.
     for (let i = 0; i < 3; i++) {
       await shell(d, "input swipe 360 400 360 1100 300");
@@ -372,6 +291,9 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
         if (!(await watchAd(d, ad.x, ad.y))) {
           log(`ad ${ads} did not open or close; no more ads this run`);
           ads = ADS;
+        } else {
+          collected++;
+          log(`ad ${ads} watched`);
         }
         await sleep(3_000 + Math.random() * 5_000);
         continue;
@@ -393,22 +315,48 @@ export async function claimRewards(d: AndroidDevice, device: string): Promise<vo
       // Collected only if the button is gone (or relabelled) once the page settles.
       await sleep(6_000);
       // Logged out, a claim opens the login screen.
-      if (await loggedOut(d)) return;
+      if (await loggedOut(d)) return { opened: false, collected };
       const still = (await buttons(await screenshot(device))).some(
         (b) => b.label === target.label && Math.abs(b.y - target.y) < 40,
       );
       if (still) refused.add(target.label);
+      else collected++;
     }
-    if (REDEEM && !redeemed) await redeem(d, device);
+    if (series) {
+      // The series task is last on the page; the scrolls above may stop short.
+      let watch: { label: string; x: number; y: number } | undefined;
+      for (let i = 0; i < 3 && !watch; i++) {
+        if (i) {
+          await shell(d, "input swipe 360 1000 360 400 600");
+          await sleep(3_000);
+        }
+        const s = await screenshot(device);
+        const ws = await words(s);
+        watch = (await buttons(s)).find(
+          (b) => WATCH.test(b.label) && ws.some((w) => SERIES.test(w.text) && w.x < b.x && Math.abs(w.y - b.y) < 80),
+        );
+      }
+      if (!watch) {
+        log("no series to watch (done today?)");
+        return { opened: false, collected };
+      }
+      await press(d, watch.x, watch.y);
+      for (let i = 0; i < 10; i++) {
+        await sleep(2_000);
+        if ((await focused(d)).includes(SERIES_ACTIVITY)) return { opened: true, collected };
+      }
+      log("the series did not open");
+    }
   } catch (e) {
     log("failed:", String(e).slice(0, 300));
   } finally {
     await worker?.terminate().catch(() => {});
     worker = undefined;
-    // Back to the feed (from the Tukar page too).
+    // Back to the feed.
     for (let i = 0; i < 4 && (await onPage(d).catch(() => false)); i++) {
       await shell(d, "input keyevent KEYCODE_BACK").catch(() => {});
       await sleep(3_000);
     }
   }
+  return { opened: false, collected };
 }

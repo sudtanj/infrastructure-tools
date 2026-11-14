@@ -35,10 +35,13 @@ name: "Android emulator session over Tailscale"
 #   .github/scripts/eraspace/eraspace.ts, does Blibli's daily check-in with
 #   .github/scripts/blibli/blibli.ts, tops Firsty Free up to its 240 MB cap
 #   with ads (.github/scripts/firsty/firsty.ts), then plays PineDrama itself with
-#   .github/scripts/pinedrama/pinedrama.ts: it checks in and presses every
-#   "Klaim" on the rewards page (rewards.ts), exchanges Rp500 to DANA once the
-#   balance reaches it, plays until the coin timer at the top left is gone or
-#   `autoplay_minutes` pass, then saves; no stop file needed.
+#   .github/scripts/pinedrama/pinedrama.ts: it checks in, watches the 30 daily
+#   reward ads and presses every "Klaim" on the rewards page (rewards.ts),
+#   coming back every ~11 min for the timed reward; plays the feed until the
+#   coin timer at the top left is gone, then the full series for its reward,
+#   then waits out the timed reward; stops when nothing is left to claim or
+#   `autoplay_minutes` (120) pass, then saves; no stop file needed. DANA is
+#   redeemed by hand.
 #   Also daily at 05:00 UTC+7 for the EraSpace rocket, the Blibli check-in and Firsty
 #   alone (`pinedrama` off).
 #   If a session is already running, the scheduled one waits for it.
@@ -97,9 +100,9 @@ on:
         type: boolean
         default: false
       autoplay_minutes:
-        description: 'With autoplay, stop after this many minutes even if the coin is still there'
+        description: 'With autoplay, stop after this many minutes even if rewards are left'
         type: number
-        default: 30
+        default: 120
       pinedrama:
         description: 'With autoplay, also play PineDrama after the rocket and the check-in (off: those only)'
         type: boolean
@@ -124,7 +127,7 @@ jobs:
       # A scheduled run has no inputs; these are its values.
       USE_EXIT_NODE: ${{ github.event_name == 'schedule' || inputs.exit_node }}
       AUTOPLAY: ${{ github.event_name == 'schedule' || inputs.autoplay }}
-      AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 30 }}
+      AUTOPLAY_MINUTES: ${{ inputs.autoplay_minutes || 120 }}
       # A null input (a schedule) loosely equals false, so test the event.
       PLAY_PINEDRAMA: ${{ github.event_name != 'workflow_dispatch' || inputs.pinedrama }}
       # The scripts queue alerts here (android-alert.ts); sent by "Send alerts".
