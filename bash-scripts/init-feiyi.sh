@@ -105,11 +105,11 @@ FEIYI_BACKUP_INTERVAL_SECS="${FEIYI_BACKUP_INTERVAL_SECS:-}"
 # Host gets its own disk swapfile below.
 HOST_MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
 HOST_CPUS=$(nproc 2>/dev/null || echo 1)
-# The VM is dedicated to feiyi: on a small host (<= 2 GB) the host
-# keeps 320 MB (kernel, sshd, tailscale, docker, with headroom so the host
-# never runs out), the container the rest (~647 MB on an e2-micro, two agents
-# with zram swap). HOST_RESERVE_MB overrides.
-if [ "$HOST_MEM_MB" -le 2048 ]; then AUTO_RESERVE_MB=320; else AUTO_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 )); fi
+# The VM is dedicated to feiyi. On a 1 GB host the host keeps 120 MB (kernel,
+# sshd, tailscale, docker, no headroom: three agents beat a safe margin, the
+# disk swapfile below catches spikes); up to 2 GB it keeps 320 MB; the container
+# gets the rest (~850 MB on an e2-micro). HOST_RESERVE_MB overrides.
+if [ "$HOST_MEM_MB" -le 1024 ]; then AUTO_RESERVE_MB=120; elif [ "$HOST_MEM_MB" -le 2048 ]; then AUTO_RESERVE_MB=320; else AUTO_RESERVE_MB=$(( HOST_MEM_MB / 8 > 384 ? HOST_MEM_MB / 8 : 384 )); fi
 HOST_RESERVE_MB="${HOST_RESERVE_MB:-$AUTO_RESERVE_MB}"
 AUTO_MEM_MB=$(( HOST_MEM_MB - HOST_RESERVE_MB > 640 ? HOST_MEM_MB - HOST_RESERVE_MB : 640 ))
 # Both shared vCPUs minus a quarter: --cpu-shares 128 below already lets the
@@ -140,9 +140,9 @@ PIDS_LIMIT="${PIDS_LIMIT:-$AUTO_PIDS_LIMIT}"
 CLAUDE_MAX_LIVE="${PASEO_CLAUDE_MAX_LIVE:-auto}"
 # Memory budget per agent for the auto capacity (a Claude Code process
 # measures ~160-270 MB resident, ~115-160 MB of it its own): see below.
-AGENT_MB="${PASEO_AGENT_MB:-135}"
+AGENT_MB="${PASEO_AGENT_MB:-210}"
 # Claude Code is a Bun executable: ~115-160 MB of its own per process (its ~85 MB
-# program file is shared between processes), so 135 MB per agent fits four
+# program file is shared between processes), so 210 MB per agent (the observed peak) fits three
 # at once in the container, zram swap taking the peaks (the daemon drops back
 # to three under memory pressure). Low-memory runtime settings, all overridable:
 # Bun's small-heap mode (GCs more often), JavaScriptCore sizing its heap for
