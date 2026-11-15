@@ -39,8 +39,8 @@ const AD = /mulai/i;
 const WATCH = /tonton/i;
 const SERIES = /serial/i;
 const SERIES_ACTIVITY = "SeriesInnerFeedActivity";
-// Per visit, so ads are spread between watching (a visit every ~11 min, 4-5
-// a 30 min run); the server stops at 30 a day.
+// Per visit, so ads are spread between watching (a visit every ~11 min,
+// about 5 in a 60 min run); the server stops at 30 a day.
 const ADS = Number(process.env.ADS ?? 5);
 const AD_ACTIVITY = "RewardAdActivity";
 const AD_CLOSE_ID = "l2g";
@@ -252,7 +252,8 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
       }
       // A tap during the launch (splash ad, feed still loading) is lost: retry.
       let open = false;
-      for (let i = 0; i < 3 && !open; i++) {
+      // Just after a launch taps can be ignored for about a minute.
+      for (let i = 0; i < 6 && !open; i++) {
         await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
         open = await waitForPage(d, 20_000);
       }
@@ -275,10 +276,10 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
     }
 
     let presses = 0, scrolls = 0, accepts = 0, oks = 0, ads = 0;
+    // Each button once. Not every button with a refused label: one refused
+    // "Klaim" can keep the series milestone's "Klaim" unpressed, and the series
+    // is then not found either (its button isn't "Tonton").
     const tried = new Set<string>();
-    // A refusal ("something went wrong") comes from the server, so another
-    // button with the same label would be refused too.
-    const refused = new Set<string>();
     while (presses < MAX_PRESSES) {
       const s = await screenshot(device);
       const ws = await words(s);
@@ -311,7 +312,7 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
         continue;
       }
       const target = btns.find(
-        (b) => COLLECT.test(b.label) && !refused.has(b.label) && !tried.has(`${scrolls}:${b.label}:${b.y}`),
+        (b) => COLLECT.test(b.label) && !tried.has(`${scrolls}:${b.label}:${b.y}`),
       );
       if (!target) {
         // Nothing (more) to collect here; look further down the page once or twice.
@@ -331,8 +332,7 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
       const still = (await buttons(await screenshot(device))).some(
         (b) => b.label === target.label && Math.abs(b.y - target.y) < 40,
       );
-      if (still) refused.add(target.label);
-      else collected++;
+      if (!still) collected++;
       log(`${target.label} at y ${target.y}: ${still ? "refused" : "collected"}`);
     }
     if (series) {

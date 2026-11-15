@@ -29,7 +29,7 @@ name: "Android emulator session over Tailscale"
 # app data and logins are never rolled back.
 #
 # PINEDRAMA AUTOPLAY
-#   Daily at 07, 11, 15, 19 and 23:00 UTC+7 for 30 min each (dispatched on time by workflow-cron on the
+#   Daily at 07, 12, 17 and 22:00 UTC+7 for up to 60 min each (dispatched on time by workflow-cron on the
 #   GCP VM or Orange Pi, see below), or with `autoplay` on, the runner first launches EraSpace's rocket
 #   ("Luncurkan Roket") until it is out of tokens with
 #   .github/scripts/eraspace/eraspace.ts, does Blibli's daily check-in with
@@ -40,7 +40,7 @@ name: "Android emulator session over Tailscale"
 #   coming back every ~11 min for the timed reward; plays the feed until the
 #   coin timer at the top left is gone, then the full series for its reward,
 #   then waits out the timed reward; stops when nothing is left to claim or
-#   `autoplay_minutes` pass (120 by hand, 30 when scheduled; each run picks up where the last left off), then saves; no stop file needed. DANA is
+#   `autoplay_minutes` pass (120 by hand, 60 when scheduled; each run picks up where the last left off), then saves; no stop file needed. DANA is
 #   redeemed by hand.
 #   Also daily at 05:00 UTC+7 for the EraSpace rocket, the Blibli check-in and Firsty
 #   alone (`pinedrama` off).
