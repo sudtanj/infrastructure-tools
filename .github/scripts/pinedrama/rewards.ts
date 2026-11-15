@@ -333,6 +333,7 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
       );
       if (still) refused.add(target.label);
       else collected++;
+      log(`${target.label} at y ${target.y}: ${still ? "refused" : "collected"}`);
     }
     if (series) {
       // The series task is last on the page; the scrolls above may stop short.
