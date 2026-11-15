@@ -73,6 +73,11 @@ env:
   # by redroid-script (ayasa520/redroid-script, stuff/mindthegapps.py).
   GAPPS_URL: https://github.com/s1204IT/MindTheGappsBuilder/releases/download/20240226/MindTheGapps-14.0.0-arm64-20240226.zip
   GAPPS_MD5: a0905cc7bf3f4f4f2e3f59a4e1fc789b
+  # The image's WebView (125, 2024) is too old for Google's sign-in check,
+  # which then spins forever; Chromium's own arm64 build replaces it. md5 as
+  # published by the bucket (storage/v1 object md5Hash).
+  WEBVIEW_URL: https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android_Arm64/1745022/chrome-android.zip
+  WEBVIEW_MD5: 7014c588e9101102406b67a2467e097e
   # Ubuntu's scrcpy is 1.25 (2022) and there is no Linux arm64 release build,
   # so the client is built once (with SDL3, which Ubuntu 24.04 lacks) and cached.
   SCRCPY_VERSION: v5.0.1
@@ -190,6 +195,13 @@ jobs:
           curl -fsSL -o gapps.zip "$GAPPS_URL"
           echo "$GAPPS_MD5  gapps.zip" | md5sum -c --quiet
           unzip -q gapps.zip 'system/*'
+          curl -fsSL -o webview.zip "$WEBVIEW_URL"
+          echo "$WEBVIEW_MD5  webview.zip" | md5sum -c --quiet
+          unzip -q -j webview.zip chrome-android/apks/SystemWebView.apk
+          mkdir -p system/product/app/webview && mv SystemWebView.apk system/product/app/webview/webview.apk
+          rm gapps.zip webview.zip
+          # The old APK's oat stays (no shell in the image to delete it); ART
+          # rejects it as out of date for the new APK.
           printf 'FROM %s\nCOPY system /system\n' "$REDROID_IMAGE" | docker build -q -t redroid-gapps -f - . >/dev/null
           cd - >/dev/null && rm -rf /tmp/gapps
           sudo apt-get update -qq >/dev/null
