@@ -505,20 +505,23 @@ jobs:
           set -euo pipefail
           if [ ! -e /tmp/android-started ]; then exit 0; fi
           id="${{ github.run_id }}"
-          # The Play Store only works for the GSF ID registered at
-          # google.com/android/uncertified; never replace the saved state with
-          # one carrying another ID (a `fresh` or empty /data makes a new one).
-          if [ -n "${REDROID_GSF_ID:-}" ]; then
-            gsf="$(docker exec redroid /system/bin/sqlite3 /data/data/com.google.android.gsf/databases/gservices.db \
-              "select value from main where name='android_id'" 2>/dev/null || true)"
-            if [ "$gsf" != "$REDROID_GSF_ID" ]; then
-              echo "::error::The GSF ID is not the registered one; state NOT saved, the last save is kept. Delete the REDROID_GSF_ID variable to replace it."
-              exit 1
-            fi
-          fi
           # A clean shutdown, so /data is consistent.
           timeout 30 adb -s 127.0.0.1:5555 shell sync >/dev/null 2>&1 || true
           docker stop -t 60 redroid >/dev/null 2>&1 || true
+          # The Play Store only works for the GSF ID registered at
+          # google.com/android/uncertified; never replace the saved state with
+          # one carrying another ID (a `fresh` or empty /data makes a new one).
+          # Read from a copy: sqlite would leave root-owned -shm files in /data.
+          if [ -n "${REDROID_GSF_ID:-}" ]; then
+            db="$DATA_DIR/data/com.google.android.gsf/databases/gservices.db"
+            mkdir -p /tmp/gsf && sudo sh -c "cp \"$db\"* /tmp/gsf/" && sudo chown -R "$(id -u)" /tmp/gsf || true
+            gsf="$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("select value from main where name=?", ("android_id",)).fetchone()[0])' \
+              /tmp/gsf/gservices.db 2>/dev/null || true)"
+            if [ "$gsf" != "$REDROID_GSF_ID" ]; then
+              echo "::error::The GSF ID is ${gsf:-unreadable}, not the registered one; state NOT saved, the last save is kept. Delete the REDROID_GSF_ID variable to replace it."
+              exit 1
+            fi
+          fi
           mkdir -p /tmp/save
           cd /tmp/save
           # Release assets cap at 2 GiB each.
