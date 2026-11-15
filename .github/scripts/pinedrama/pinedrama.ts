@@ -51,6 +51,7 @@ const DISMISS = /^(skip|not now|later|close|cancel|got it|no thanks|don.t allow|
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Paced like a person: a random whole number from min to max.
+const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const between = (min: number, max: number) => Math.round(min + Math.random() * (max - min));
 
 type Player = { piid: string; state: string };
@@ -242,12 +243,14 @@ async function main() {
       // The feed pays no more today; the full series still does.
       if (stopReason !== COIN_GONE || !REWARDS || series) break;
       series = true;
+      log("feed watch-time done; on to the series");
       stopReason = "";
       rewardsAt = 0;
     }
     if (REWARDS && Date.now() - rewardsAt > REWARDS_EVERY_MS + between(0, 120_000)) {
       const { opened } = await claimRewards(d, DEVICE, series);
       rewardsAt = Date.now();
+      if (series && opened) log("watching the series");
       if (series && !opened) {
         // Only the timed reward can be left, one claim every 10 min: come
         // back until a visit finds nothing.
@@ -278,6 +281,7 @@ async function main() {
     if (!(await inForeground(d))) await launch(d);
     await claimRewards(d, DEVICE);
   }
+  log(`stopped: ${stopReason || "MAX_VIDEOS reached"}`);
   await stop();
 }
 

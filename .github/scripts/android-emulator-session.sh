@@ -115,6 +115,15 @@ emulator_died() {
 # timer is gone or AUTOPLAY_MINUTES pass, then end the session so it saves.
 if [ "${AUTOPLAY:-false}" = true ]; then
   minutes="${AUTOPLAY_MINUTES:-120}"
+  # After boot the Pixel Launcher can stop responding for minutes; its
+  # "isn't responding" dialog covers every app and takes every tap, so a run
+  # can do nothing. Killing the launcher closes the dialog.
+  while sleep 20; do
+    adb shell dumpsys window 2>/dev/null \
+      | grep -q "mCurrentFocus.*Not Responding: com.google.android.apps.nexuslauncher" \
+      && adb shell am force-stop com.google.android.apps.nexuslauncher
+  done &
+  anr_watch=$!
   # EraSpace's daily rocket launch first: a few minutes at most.
   DEVICE=emulator-5554 timeout 15m node .github/scripts/eraspace/eraspace.ts \
     || echo "::warning::The EraSpace script ended with an error; going on."
@@ -134,6 +143,7 @@ if [ "${AUTOPLAY:-false}" = true ]; then
       timeout "$((minutes + 15))m" node .github/scripts/pinedrama/pinedrama.ts \
       || echo "::warning::The PineDrama script ended with an error; saving anyway."
   fi
+  kill "$anr_watch" 2>/dev/null || true
   pgrep -f qemu-system-x86_64 >/dev/null || emulator_died
   max=0
 fi

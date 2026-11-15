@@ -33,7 +33,7 @@ CPU_LIMIT="0.10"
 TZ_NAME="Asia/Jakarta"
 JOBS='
 0 *    * * *  typescript-worker-run.yaml
-0 7,12,17,22 * * *  android-emulator-session.yaml exit_node=true autoplay=true autoplay_minutes=60
+0 7,12,17,22 * * *  android-emulator-session.yaml exit_node=true autoplay=true autoplay_minutes=90
 0 5    * * *  android-emulator-session.yaml exit_node=true autoplay=true pinedrama=false
 0 6    * * *  android-redroid-session.yaml exit_node=true checkin=true
 0 8,11,17,18 * * 1-5  commute-traffic.yaml skip_off_days=true

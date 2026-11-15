@@ -40,7 +40,7 @@ const WATCH = /tonton/i;
 const SERIES = /serial/i;
 const SERIES_ACTIVITY = "SeriesInnerFeedActivity";
 // Per visit, so ads are spread between watching (a visit every ~11 min,
-// about 5 in a 60 min run); the server stops at 30 a day.
+// about 8 in a 90 min run); the server stops at 30 a day.
 const ADS = Number(process.env.ADS ?? 5);
 const AD_ACTIVITY = "RewardAdActivity";
 const AD_CLOSE_ID = "l2g";
