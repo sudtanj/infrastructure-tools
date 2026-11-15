@@ -112,15 +112,39 @@ async function clearInterruptions(nodes: Node[]): Promise<boolean> {
   return false;
 }
 
-// Waits for the first of `ids` to show, clearing interruptions meanwhile.
+const lastUpdate = () => shell(`dumpsys package ${PKG} | grep -m1 lastUpdateTime`);
+
+// Google Play's in-app update screen ("Update available: to use this app,
+// download the latest version") blocks the app until it is updated. Presses
+// Update, waits for the install, starts the app again. True if it did.
+async function updateIfAsked(nodes: Node[]): Promise<boolean> {
+  if (!(await focused()).includes("com.android.vending")) return false;
+  const update = nodes.find((n) => /^(update|perbarui)$/i.test(n.text.trim()) && n.w > 0 && n.h > 0);
+  if (!update) return false;
+  const before = await lastUpdate();
+  await tap(update);
+  for (const end = Date.now() + 5 * 60_000; Date.now() < end; await sleep(5_000)) {
+    if ((await lastUpdate()) !== before) {
+      log("updated from Google Play");
+      await shell(`monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
+      return true;
+    }
+  }
+  alert("EraSpace: Update was pressed on Google Play's update screen but the app was not updated in 5 minutes.");
+  return true;
+}
+
+// Waits for the first of `ids` to show, clearing interruptions meanwhile. An
+// update restarts the wait.
 async function waitFor(ids: string[], ms = WAIT_MS): Promise<{ id: string; node: Node; nodes: Node[] } | undefined> {
-  for (const end = Date.now() + ms; Date.now() < end; ) {
+  for (let end = Date.now() + ms; Date.now() < end; ) {
     const nodes = await screen();
     for (const id of ids) {
       const node = byId(nodes, id);
       if (node) return { id, node, nodes };
     }
-    if (!(await clearInterruptions(nodes))) await sleep(2_000);
+    if (await updateIfAsked(nodes)) end = Date.now() + ms;
+    else if (!(await clearInterruptions(nodes))) await sleep(2_000);
     else await sleep(3_000);
   }
   return undefined;

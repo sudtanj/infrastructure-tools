@@ -116,7 +116,7 @@ emulator_died() {
 if [ "${AUTOPLAY:-false}" = true ]; then
   minutes="${AUTOPLAY_MINUTES:-120}"
   # EraSpace's daily rocket launch first: a few minutes at most.
-  DEVICE=emulator-5554 timeout 10m node .github/scripts/eraspace/eraspace.ts \
+  DEVICE=emulator-5554 timeout 15m node .github/scripts/eraspace/eraspace.ts \
     || echo "::warning::The EraSpace script ended with an error; going on."
   # It lowers the screen density while it plays; PineDrama's taps assume 320.
   adb shell wm density reset || true
