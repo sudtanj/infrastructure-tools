@@ -192,9 +192,11 @@ async function loggedOut(d: AndroidDevice): Promise<boolean> {
 }
 
 // Since 47.7 the page is a Lynx view inside the feed's activity, no longer
-// its own SparkActivity; either counts.
+// its own SparkActivity; either counts. The feed itself holds a Lynx view or
+// two; the page has over a hundred.
 async function onPage(d: AndroidDevice): Promise<boolean> {
-  return (await focused(d)).includes(PAGE) || (await shell(d, "dumpsys activity top")).includes("com.lynx.tasm.");
+  if ((await focused(d)).includes(PAGE)) return true;
+  return (await shell(d, "dumpsys activity top")).split("com.lynx.tasm.").length > 20;
 }
 
 async function waitForPage(d: AndroidDevice, ms: number): Promise<boolean> {
@@ -246,8 +248,13 @@ export async function claimRewards(d: AndroidDevice, device: string, series = fa
         log("coin tab not found; skipping");
         return { opened: false, collected };
       }
-      await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
-      if (!(await waitForPage(d, 60_000))) {
+      // A tap during the launch (splash ad, feed still loading) is lost: retry.
+      let open = false;
+      for (let i = 0; i < 3 && !open; i++) {
+        await shell(d, `input tap ${tab.x + (tab.w >> 1)} ${tab.y + (tab.h >> 1)}`);
+        open = await waitForPage(d, 20_000);
+      }
+      if (!open) {
         if (!(await loggedOut(d))) log("the rewards page did not open; skipping");
         return { opened: false, collected };
       }
