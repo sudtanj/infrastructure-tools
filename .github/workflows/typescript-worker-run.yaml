@@ -299,14 +299,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The exit node's modem restarts for maintenance on Sundays at 06:15 UTC;
-          # skip that hour's tick (missed scripts catch up within their grace window).
-          if [ "$(date -u +%u%H)" = 706 ] && [ "${{ inputs.force || 'false' }}" != true ]; then
-            echo "Exit node maintenance window; skipping this run."
-            echo "count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           if [ ! -d "$TSWORKER_DIR" ]; then
             {
               echo "::error::No '${TSWORKER_DIR}/' folder at the root of the private repo."
