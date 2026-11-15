@@ -32,7 +32,7 @@ CPU_LIMIT="0.10"
 #   <min> <hour> <dom> <month> <dow> <workflow file> [input=value ...]
 TZ_NAME="Asia/Jakarta"
 JOBS='
-# Not Sundays 13:00-13:59: the exit node's home modem restarts for maintenance at 13:15.
+# Not Sundays 13:00-13:59: the exit node home modem restarts for maintenance at 13:15.
 0 *    * * 1-6  typescript-worker-run.yaml
 0 0-12,14-23 * * 0  typescript-worker-run.yaml
 0 7,12,17,22 * * 1-6  android-emulator-session.yaml exit_node=true autoplay=true autoplay_minutes=90
