@@ -39,7 +39,9 @@ const AD = /mulai/i;
 const WATCH = /tonton/i;
 const SERIES = /serial/i;
 const SERIES_ACTIVITY = "SeriesInnerFeedActivity";
-const ADS = Number(process.env.ADS ?? 30); // per visit; the server stops at 30 a day
+// Per visit, so ads are spread between watching (a visit every ~11 min, 4-5
+// a 30 min run); the server stops at 30 a day.
+const ADS = Number(process.env.ADS ?? 5);
 const AD_ACTIVITY = "RewardAdActivity";
 const AD_CLOSE_ID = "l2g";
 const ACCEPT = /^setuju$/i; // "Setuju dan lanjutkan": the 18+ terms prompt, accepted by the owner

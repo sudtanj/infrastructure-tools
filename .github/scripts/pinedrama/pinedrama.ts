@@ -12,7 +12,7 @@
 // MAX_MINUTES (stop after this, 0 = never), COIN_ID (stop once this view is
 // gone; default o4r, the coin timer on the left, empty to ignore it),
 // REWARDS (default 1: check in and claim on the rewards page before and
-// after scrolling, see rewards.ts; 0 to skip), ADS (default 30: reward ads
+// after scrolling, see rewards.ts; 0 to skip), ADS (default 5: reward ads
 // per rewards visit; the page comes back every ~11 min for the timed reward
 // and ads that were cooling down).
 //

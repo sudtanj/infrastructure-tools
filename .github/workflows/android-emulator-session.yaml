@@ -36,7 +36,7 @@ name: "Android emulator session over Tailscale"
 #   .github/scripts/blibli/blibli.ts, tops Firsty Free up to its 240 MB cap
 #   with ads (.github/scripts/firsty/firsty.ts), then plays PineDrama itself with
 #   .github/scripts/pinedrama/pinedrama.ts: it checks in, watches the 30 daily
-#   reward ads and presses every "Klaim" on the rewards page (rewards.ts),
+#   reward ads (5 a visit) and presses every "Klaim" on the rewards page (rewards.ts),
 #   coming back every ~11 min for the timed reward; plays the feed until the
 #   coin timer at the top left is gone, then the full series for its reward,
 #   then waits out the timed reward; stops when nothing is left to claim or
