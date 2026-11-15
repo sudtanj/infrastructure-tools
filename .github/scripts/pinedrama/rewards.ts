@@ -15,6 +15,7 @@
 
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { AndroidDevice } from "playwright-core";
 import { createWorker, PSM, type Worker } from "tesseract.js";
@@ -139,7 +140,9 @@ function redButtons(s: Shot): Box[] {
 
 let worker: Worker | undefined;
 async function ocr(): Promise<Worker> {
-  return (worker ??= await createWorker("eng", undefined, { cachePath: tmpdir() }));
+  // From npm, not tesseract's CDN default: that download fails behind the exit node.
+  const langPath = fileURLToPath(new URL("node_modules/@tesseract.js-data/eng/4.0.0_best_int", import.meta.url));
+  return (worker ??= await createWorker("eng", undefined, { langPath, cachePath: tmpdir() }));
 }
 
 async function words(s: Shot): Promise<Word[]> {
