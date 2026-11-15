@@ -16,7 +16,10 @@ name: "Tour aggregator: scrape the tour sites into tours.json"
 #   3. tours.json is committed and pushed to the private repo when it changed.
 #
 # SECRETS: PRIVATE_REPO, PRIVATE_REPO_TOKEN (Contents: read and write: it
-#   pushes tours.json), BUILD_REF (optional branch, default main).
+#   pushes tours.json), BUILD_REF (optional branch, default main),
+#   TRAVELPAYOUTS_TOKEN and TRAVELPAYOUTS_MARKER (optional: Aviasales fares
+#   for flights.json and the affiliate marker on its links; without the token
+#   the previous flights.json is kept).
 #
 # Runs on a GitHub-hosted runner, as the other private-repo jobs do: it is a
 # plain scrape and needs no tailnet. The scraper's log prints counts and URLs only.
@@ -65,6 +68,9 @@ jobs:
 
       - name: Scrape
         working-directory: private/cloudflare-projects/tour-aggregator
+        env:
+          TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
+          TRAVELPAYOUTS_MARKER: ${{ secrets.TRAVELPAYOUTS_MARKER }}
         run: node scrape.mjs
 
       - name: Commit and push tours.json
@@ -74,6 +80,8 @@ jobs:
           dir=cloudflare-projects/tour-aggregator/public
           # -A also stages removed destination pages.
           git add -A -- "$dir/tours.json" "$dir/price-history.json" "$dir/tours" "$dir/sitemap.xml" "$dir/robots.txt"
+          # flights.json does not exist until a run has the Travelpayouts token; git add fails on a missing path.
+          if [ -f "$dir/flights.json" ]; then git add -- "$dir/flights.json"; fi
           if git diff --cached --quiet; then
             exit 0
           fi
