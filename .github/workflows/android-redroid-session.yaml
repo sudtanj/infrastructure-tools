@@ -34,7 +34,7 @@ name: "Android (Redroid, arm64) session over Tailscale"
 #
 # Secrets: the emulator's (PRIVATE_REPO, PRIVATE_REPO_TOKEN,
 # TAILSCALE_OAUTH_CLIENT_SECRET, TAILSCALE_TAGS, STATE_KEY, VNC_PASSWORD,
-# TAILSCALE_EXIT_NODE; TELEGRAM_TOKEN, TELEGRAM_CHAT_ID optional).
+# TAILSCALE_EXIT_NODE; TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, REDROID_GSF_ID optional).
 # ---------------------------------------------------------------------------
 
 on:
@@ -92,6 +92,7 @@ jobs:
       GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
       PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
+      REDROID_GSF_ID: ${{ secrets.REDROID_GSF_ID }}
       USE_EXIT_NODE: ${{ inputs.exit_node }}
       CHECKIN: ${{ inputs.checkin }}
       # lazada.ts queues alerts here (android-alert.ts); sent by "Send alerts".
@@ -492,6 +493,17 @@ jobs:
           set -euo pipefail
           if [ ! -e /tmp/android-started ]; then exit 0; fi
           id="${{ github.run_id }}"
+          # The Play Store only works for the GSF ID registered at
+          # google.com/android/uncertified; never replace the saved state with
+          # one carrying another ID (a `fresh` or empty /data makes a new one).
+          if [ -n "${REDROID_GSF_ID:-}" ]; then
+            gsf="$(docker exec redroid /system/bin/sqlite3 /data/data/com.google.android.gsf/databases/gservices.db \
+              "select value from main where name='android_id'" 2>/dev/null || true)"
+            if [ "$gsf" != "$REDROID_GSF_ID" ]; then
+              echo "::error::The GSF ID is not the registered one; state NOT saved, the last save is kept. Unset the REDROID_GSF_ID secret to replace it."
+              exit 1
+            fi
+          fi
           # A clean shutdown, so /data is consistent.
           timeout 30 adb -s 127.0.0.1:5555 shell sync >/dev/null 2>&1 || true
           docker stop -t 60 redroid >/dev/null 2>&1 || true
