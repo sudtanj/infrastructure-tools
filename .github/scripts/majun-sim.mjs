@@ -107,8 +107,9 @@ const browser = await chromium.launch({
 });
 const results = [];
 for (const spec of cores) {
-  const [name, spec2] = spec.split('=');
-  const [dir, query] = spec2.split('?');
+  const eq = spec.indexOf('=');
+  const [dir, query] = spec.slice(eq + 1).split('?');
+  const name = spec.slice(0, eq);
   results.push(await runCore(browser, name, dir, query));
 }
 await browser.close();
