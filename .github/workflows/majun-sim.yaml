@@ -42,6 +42,10 @@ on:
         description: "Seconds to sample each core"
         required: false
         default: "90"
+      new_query:
+        description: "Extra query string for the new core only, e.g. set=EmuCore/Speedhacks/SyscallSpin=true"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -148,10 +152,11 @@ jobs:
       - name: Run both cores
         env:
           SECONDS_IN: ${{ inputs.seconds }}
+          NEW_QUERY: ${{ inputs.new_query }}
         run: |
           cd "$RUNNER_TEMP/play"
           node majun-sim.mjs "$RUNNER_TEMP/bios/bios.bin" "$RUNNER_TEMP/out" "${SECONDS_IN:-90}" \
-            "old=$SIM_DIR/old" "new=$SIM_DIR/new"
+            "old=$SIM_DIR/old" "new=$SIM_DIR/new?$NEW_QUERY"
 
       - name: Summary
         if: always()

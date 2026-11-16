@@ -35,7 +35,7 @@ function serve(root) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-async function runCore(browser, name, dir) {
+async function runCore(browser, name, dir, query) {
   const server = await serve(path.resolve(dir));
   const base = `http://127.0.0.1:${server.address().port}`;
   const result = { name, samples: [], problems: [], webgpu: null, log: '' };
@@ -55,7 +55,7 @@ async function runCore(browser, name, dir) {
     };
   });
   try {
-    await page.goto(`${base}/index.html?threads=1`, { waitUntil: 'load' });
+    await page.goto(`${base}/index.html?threads=1${query ? "&" + query : ""}`, { waitUntil: 'load' });
     result.webgpu = await page.evaluate(async () => !!(navigator.gpu && (await navigator.gpu.requestAdapter())));
     await page.waitForSelector('#bios-input', { state: 'attached', timeout: 60_000 });
     await page.setInputFiles('#bios-input', biosPath);
@@ -107,8 +107,9 @@ const browser = await chromium.launch({
 });
 const results = [];
 for (const spec of cores) {
-  const [name, dir] = spec.split('=');
-  results.push(await runCore(browser, name, dir));
+  const [name, spec2] = spec.split('=');
+  const [dir, query] = spec2.split('?');
+  results.push(await runCore(browser, name, dir, query));
 }
 await browser.close();
 
