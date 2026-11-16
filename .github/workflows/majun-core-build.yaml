@@ -1,0 +1,233 @@
+name: "Majun core build"
+
+# ---------------------------------------------------------------------------
+# Builds the TabStationToo PS2 core (PCSX2 for WebAssembly, GPL-3.0) from a
+# public upstream commit plus the patches kept in the PRIVATE majun repo
+# (cloudflare-projects/majun/core-src/patches). Same steps, pinned tool
+# versions and cache keys as that repo's majun-core.yml, which cannot run
+# there because the private repo is out of Actions minutes. Standard runners
+# on this PUBLIC repo are unmetered.
+#
+# WHAT COMES OUT
+#   Artifact `majun-core`: the assembled site plus build.txt (upstream sha,
+#   sha256 of every patch, build date). The core and the patches are GPL, so
+#   the artifact is not secret. Only the private repo's name and the rest of
+#   its tree must stay out of this public log.
+#   Caches are per repository: this repo starts with cold emsdk, deps and
+#   ccache caches (the first run is slow), then reuses its own.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo: visible to everyone, and forkable.
+#   * PRIVATE_REPO_TOKEN can READ the private repo. Only
+#     cloudflare-projects/majun/core-src is checked out (sparse), and the
+#     token is not left in .git/config.
+#   * Compiler output is captured. Only on failure is the last 200 lines
+#     shown, with runner paths removed and the patch folder shortened to
+#     core-src/, so the patch author still gets file:line.
+#
+# SETUP
+#   secret PRIVATE_REPO_TOKEN      read access to the private repo (required)
+#   secret PRIVATE_REPO            "owner/name" (defaults to this repo)
+#   secret BUILD_REF               not used here: set monorepo_ref instead
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream TabStationToo commit, tag or branch to build"
+        required: false
+        default: 5a9a7b489e428f3cea87d52621429f749c969f41
+      monorepo_ref:
+        description: "Branch or commit of the private repo that holds the patches"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: majun-core-build-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  EMSCRIPTEN_VERSION: "6.0.12"
+  CMAKE_VERSION: "4.4.4"
+  # emscripten-core/emsdk at tag 6.0.12
+  EMSDK_COMMIT: 35ff8a6d150541276abbc6bae512ca90bcfbe220
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: "Build pcsx2-wasm"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}/upstream
+      CCACHE_MAXSIZE: 1G
+      EM_COMPILER_WRAPPER: ccache
+    steps:
+      - name: Check out patches (private repo, core-src only)
+        id: private
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO || github.repository }}
+          ref: ${{ inputs.monorepo_ref || 'main' }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: monorepo
+          sparse-checkout: cloudflare-projects/majun/core-src
+          persist-credentials: false
+
+      - name: Fail if the patches are missing
+        env:
+          PATCH_DIR: monorepo/cloudflare-projects/majun/core-src/patches
+        run: |
+          if [ "${{ steps.private.outcome }}" != "success" ] || ! ls "$PATCH_DIR"/*.patch >/dev/null 2>&1; then
+            echo "::error::Private checkout failed or core-src/patches has no .patch files. Check secrets PRIVATE_REPO and PRIVATE_REPO_TOKEN and the monorepo_ref input."
+            exit 1
+          fi
+
+      - name: Check out upstream
+        uses: actions/checkout@v4
+        with:
+          repository: TabStationToo/TabStationToo
+          ref: ${{ inputs.ref || '5a9a7b489e428f3cea87d52621429f749c969f41' }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: upstream
+        run: |
+          shopt -s nullglob
+          patches=("$GITHUB_WORKSPACE"/monorepo/cloudflare-projects/majun/core-src/patches/*.patch)
+          echo "upstream commit: $(git rev-parse HEAD)"
+          echo "patches: ${#patches[@]}"
+          for p in "${patches[@]}"; do
+            name="$(basename "$p")"
+            if ! out="$(git apply --check "$p" 2>&1 && git apply "$p" 2>&1)"; then
+              echo "::error::Patch $name does not apply to upstream $(git rev-parse --short HEAD)"
+              printf '%s\n' "$out" | sed "s#$GITHUB_WORKSPACE/##g" | tail -20
+              exit 1
+            fi
+            echo "applied $name"
+          done
+          {
+            echo "UPSTREAM_SHA=$(git rev-parse HEAD)"
+            echo "PATCHES_HASH=$(cat "${patches[@]}" /dev/null | sha256sum | cut -c1-16)"
+          } >> "$GITHUB_ENV"
+          {
+            echo "upstream: TabStationToo/TabStationToo $(git rev-parse HEAD)"
+            echo "patches (sha256):"
+            for p in "${patches[@]}"; do echo "  $(sha256sum "$p" | cut -c1-64)  $(basename "$p")"; done
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "$RUNNER_TEMP/build.txt"
+
+      - name: Install CMake, Ninja and ccache
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends ninja-build ccache
+          PIPX_BIN_DIR="$HOME/.local/bin" pipx install "cmake==$CMAKE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cmake" --version | head -1
+          ninja --version
+          ccache --version | head -1
+
+      - name: Restore Emscripten
+        id: emsdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ env.EMSCRIPTEN_VERSION }}-${{ env.EMSDK_COMMIT }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Emscripten ${{ env.EMSCRIPTEN_VERSION }}
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git init -q ~/emsdk
+          git -C ~/emsdk fetch -q --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK_COMMIT"
+          git -C ~/emsdk checkout -q --detach FETCH_HEAD
+          test "$(git -C ~/emsdk rev-parse HEAD)" = "$EMSDK_COMMIT"
+          ~/emsdk/emsdk install "$EMSCRIPTEN_VERSION"
+          ~/emsdk/emsdk activate "$EMSCRIPTEN_VERSION"
+
+      - name: Restore the third-party libraries
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: upstream/deps-wasm
+          key: deps-wasm-${{ env.EMSCRIPTEN_VERSION }}-cmake${{ env.CMAKE_VERSION }}-${{ runner.os }}-${{ hashFiles('upstream/tools/wasm/build-dependencies-wasm.sh') }}
+
+      - name: Build the third-party libraries
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        working-directory: upstream
+        env:
+          EM_COMPILER_WRAPPER: ""
+        run: |
+          source ~/emsdk/emsdk_env.sh > /dev/null
+          tools/wasm/build-dependencies-wasm.sh deps-wasm
+          rm -rf deps-build-wasm
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}-${{ env.UPSTREAM_SHA }}-${{ env.PATCHES_HASH }}
+          restore-keys: ccache-${{ env.EMSCRIPTEN_VERSION }}-${{ runner.os }}-
+
+      - name: Build pcsx2-wasm
+        working-directory: upstream
+        run: |
+          source ~/emsdk/emsdk_env.sh > /dev/null
+          ccache --zero-stats > /dev/null
+
+          # Compiler output can quote patched private files: show only a stripped tail on failure.
+          tail_stripped() {
+            echo "::error::$1 failed. Last 200 lines (runner paths removed):"
+            tail -200 build.log | sed -e "s#$GITHUB_WORKSPACE/monorepo/cloudflare-projects/majun/core-src/#core-src/#g" -e "s#$GITHUB_WORKSPACE/upstream/##g" -e "s#$GITHUB_WORKSPACE/##g"
+          }
+          if ! emcmake cmake -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DCMAKE_PREFIX_PATH="$PWD/deps-wasm" -DCMAKE_FIND_ROOT_PATH="$PWD/deps-wasm" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 > build.log 2>&1; then
+            tail_stripped "CMake configure"
+            exit 1
+          fi
+          if ! ninja -C build-wasm pcsx2-wasm >> build.log 2>&1; then
+            tail_stripped "The build"
+            exit 1
+          fi
+          ccache --show-stats
+          if grep -n "signature mismatch" build.log; then
+            echo "::error::The link reported signature mismatches"
+            exit 1
+          fi
+
+      - name: Assemble the site
+        working-directory: upstream
+        run: |
+          source ~/emsdk/emsdk_env.sh > /dev/null
+          python3 tools/wasm/assemble-site.py --out _site | tee site.txt
+          cp "$RUNNER_TEMP/build.txt" _site/build.txt
+          { echo '### Site'; echo '```'; cat site.txt; echo '```'; echo '### build.txt'; echo '```'; cat _site/build.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          (cd _site && sha256sum pcsx2-wasm.wasm pcsx2-wasm.js pcsx2-wasm.data && ls -l pcsx2-wasm.*) | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test in headless Chrome
+        working-directory: upstream
+        run: |
+          source ~/emsdk/emsdk_env.sh > /dev/null
+          chrome="$(command -v google-chrome)"
+          "$chrome" --version
+          "$EMSDK_NODE" tools/wasm/smoke-test.mjs --site _site --chrome "$chrome" -- --no-sandbox
+          "$EMSDK_NODE" tools/wasm/smoke-test.mjs --site _site --chrome "$chrome" --headers -- --no-sandbox
+
+      - name: Upload the site
+        uses: actions/upload-artifact@v4
+        with:
+          name: majun-core
+          path: upstream/_site
+          if-no-files-found: error
+          retention-days: 30

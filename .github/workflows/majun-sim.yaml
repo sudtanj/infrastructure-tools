@@ -1,0 +1,185 @@
+name: "Majun core simulation"
+
+# ---------------------------------------------------------------------------
+# Runs the real Majun PS2 emulator in headless Chromium (software Vulkan, so
+# WebGPU works without a GPU) and compares the stock core with the patched
+# build. BIOS only, no game: the checks are "did not crash or freeze" and
+# old-vs-new speed from PCSX2Web.stats(). Runs on this PUBLIC repo's unmetered
+# runners because the private repo is out of Actions minutes.
+#
+#   OLD core  cloudflare-projects/majun/public/core/ps2 (private repo, sparse)
+#   NEW core  artifact `majun-core` of a "Majun core build" run
+#   BIOS      newest release asset ps2.bios.*.bin of release `majun-data` in
+#             the private repo
+#
+# Software-rendered speed numbers are only comparable between the two cores
+# of one run, not with a real device. A shared runner adds noise: read a gap
+# of a few percent as nothing.
+#
+# SECURITY MODEL -- read before enabling:
+#   * This file is in a PUBLIC repo: visible to everyone, and forkable.
+#   * PRIVATE_REPO_TOKEN can READ the private repo (its contents and release).
+#   * The BIOS is the owner's own file. It lives on the runner only, in
+#     RUNNER_TEMP, is never printed (not its bytes, name or size beyond a
+#     byte count) and is deleted at the end, also when the job fails.
+#   * Uploaded artifacts hold samples and the core's own log lines. The core
+#     logs the BIOS file name it was given; the file is passed as bios.bin and
+#     the log is scrubbed of the real name before upload.
+#
+# SETUP
+#   secret PRIVATE_REPO_TOKEN      read access to the private repo (required)
+#   secret PRIVATE_REPO            "owner/name" (defaults to this repo)
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_run_id:
+        description: "Run id of a Majun core build whose artifact to test (empty: latest successful)"
+        required: false
+        default: ""
+      seconds:
+        description: "Seconds to sample each core"
+        required: false
+        default: "90"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: majun-sim-${{ github.repository }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sim:
+    name: "Old vs new core"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PLAYWRIGHT_VERSION: "1.55.0"
+      SIM_DIR: ${{ github.workspace }}/sim
+    steps:
+      - name: Check out this repository (simulation script)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Validate inputs
+        env:
+          SECONDS_IN: ${{ inputs.seconds }}
+          RUN_IN: ${{ inputs.core_run_id }}
+        run: |
+          printf '%s' "${SECONDS_IN:-90}" | grep -Eq '^[0-9]+$' && [ "${SECONDS_IN:-90}" -ge 10 ] && [ "${SECONDS_IN:-90}" -le 600 ] \
+            || { echo "::error::seconds must be 10..600"; exit 1; }
+          printf '%s' "$RUN_IN" | grep -Eq '^[0-9]*$' || { echo "::error::core_run_id must be a number"; exit 1; }
+
+      - name: Download the new core (artifact majun-core)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_IN: ${{ inputs.core_run_id }}
+        run: |
+          RUN_ID="$RUN_IN"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh run list -R "$GITHUB_REPOSITORY" --workflow majun-core-build.yaml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::No successful Majun core build to test. Run \"Majun core build\" first or pass core_run_id."
+            exit 1
+          fi
+          echo "new core: build run $RUN_ID"
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n majun-core -D "$SIM_DIR/new"
+          cat "$SIM_DIR/new/build.txt" 2>/dev/null || echo "::warning::artifact has no build.txt"
+
+      - name: Check out the old core (private repo, public/core/ps2 only)
+        id: private
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO || github.repository }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: monorepo
+          sparse-checkout: cloudflare-projects/majun/public/core/ps2
+          persist-credentials: false
+
+      - name: Fetch the BIOS and the old core
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO || github.repository }}
+          CHECKOUT: ${{ steps.private.outcome }}
+        run: |
+          set -euo pipefail
+          old=monorepo/cloudflare-projects/majun/public/core/ps2
+          if [ "$CHECKOUT" != "success" ] || [ ! -f "$old/index.html" ]; then
+            echo "::error::Private checkout failed or the old core is missing. Check secrets PRIVATE_REPO and PRIVATE_REPO_TOKEN."
+            exit 1
+          fi
+          mkdir -p "$SIM_DIR"
+          mv "$old" "$SIM_DIR/old"
+
+          assets="$(gh api "repos/${PRIVATE_REPO}/releases/tags/majun-data" --jq '[.assets[] | select(.name | test("^ps2\\.bios\\..*\\.bin$"))] | sort_by(.name | split(".")[2] | tonumber) | last | [.id, .name] | @tsv' 2>/dev/null)" \
+            || { echo "::error::Cannot read release majun-data (token access or release missing)."; exit 1; }
+          if [ -z "$assets" ]; then
+            echo "::error::Release majun-data has no asset matching ps2.bios.*.bin"
+            exit 1
+          fi
+          id="${assets%%$'\t'*}"
+          echo "::add-mask::${assets#*$'\t'}"
+          umask 077
+          mkdir -p "$RUNNER_TEMP/bios"
+          gh api -H 'Accept: application/octet-stream' "repos/${PRIVATE_REPO}/releases/assets/${id}" > "$RUNNER_TEMP/bios/bios.bin"
+          echo "bios: $(stat -c %s "$RUNNER_TEMP/bios/bios.bin") bytes"
+          echo "BIOS_NAME=${assets#*$'\t'}" >> "$GITHUB_ENV"
+
+      - name: Install Playwright Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/play"
+          cd "$RUNNER_TEMP/play"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION" > /dev/null
+          npx playwright install --with-deps chromium > /dev/null
+          cp "$GITHUB_WORKSPACE/.github/scripts/majun-sim.mjs" .
+
+      - name: Run both cores
+        env:
+          SECONDS_IN: ${{ inputs.seconds }}
+        run: |
+          cd "$RUNNER_TEMP/play"
+          node majun-sim.mjs "$RUNNER_TEMP/bios/bios.bin" "$RUNNER_TEMP/out" "${SECONDS_IN:-90}" \
+            "old=$SIM_DIR/old" "new=$SIM_DIR/new"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Majun core simulation"
+            echo
+            cat "$RUNNER_TEMP/out/summary.md" 2>/dev/null || echo "No result: the run stopped before sampling."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scrub the logs
+        if: always()
+        run: |
+          [ -d "$RUNNER_TEMP/out" ] || exit 0
+          if [ -n "${BIOS_NAME:-}" ]; then
+            pat="$(printf '%s' "$BIOS_NAME" | sed 's/[][\.*^$#/]/\\&/g')"
+            find "$RUNNER_TEMP/out" -type f -exec sed -i "s#$pat#bios.bin#g" {} +
+          fi
+
+      - name: Upload samples and core logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: majun-sim
+          path: ${{ runner.temp }}/out
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Delete the BIOS
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/bios"
