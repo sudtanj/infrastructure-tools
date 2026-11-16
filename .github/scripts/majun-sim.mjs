@@ -61,7 +61,7 @@ async function runCore(browser, name, dir) {
     await page.setInputFiles('#bios-input', biosPath);
     await page.waitForFunction(() => document.body.dataset.bios === 'set', null, { timeout: 90_000 });
     await page.waitForFunction(() => document.body.dataset.state === 'ready', null, { timeout: BOOT_TIMEOUT_MS });
-    await page.click('#slate-primary');
+    await page.evaluate(() => document.getElementById('slate-primary').click());
     await page.waitForFunction(() => document.body.dataset.state === 'running', null, { timeout: BOOT_TIMEOUT_MS });
 
     let prev = await stats();
