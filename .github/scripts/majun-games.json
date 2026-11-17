@@ -5,7 +5,7 @@
     "license": "GPL-2.0-or-later (upstream)",
     "kind": "iso-zip",
     "url": "https://archive.org/download/jumpnbump-1.50-ps2iso/jumpnbump-1.50-ps2iso.zip",
-    "sha256": ""
+    "sha256": "f4f62a54113796d7286ffbac1f235914e0abdb69d48bf3464ad7db68cef7b1eb"
   },
   {
     "name": "dungeon",
@@ -14,7 +14,7 @@
     "kind": "elf",
     "elf": "DUNGEON.ELF",
     "url": "https://github.com/glampert/ps2-homebrew/raw/refs/heads/main/source/demos/bin/dungeon_game.elf",
-    "sha256": ""
+    "sha256": "f4f62a54113796d7286ffbac1f235914e0abdb69d48bf3464ad7db68cef7b1eb"
   },
   {
     "name": "tyracraft",
@@ -23,8 +23,8 @@
     "kind": "elf",
     "elf": "TYRACRAFT.ELF",
     "url": "https://github.com/Wellinator/tyracraft/releases/download/v0.86.140/Tyracraft.-.v0.86.140-pre-alpha.elf",
-    "sha256": "",
+    "sha256": "f4f62a54113796d7286ffbac1f235914e0abdb69d48bf3464ad7db68cef7b1eb",
     "assets_url": "https://github.com/Wellinator/tyracraft/releases/download/v0.86.140/ASSETS.7z",
-    "assets_sha256": ""
+    "assets_sha256": "2505a87bcd23b1d125c4cac9b97e54dc44c9ba21f6fe6c04a73981dc5ea8a661"
   }
 ]
