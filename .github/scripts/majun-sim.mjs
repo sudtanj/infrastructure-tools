@@ -77,6 +77,12 @@ async function runCore(browser, name, dir, query) {
     result.problems.push(String(e.message).split('\n')[0]);
     try { result.last = await stats(); } catch { /* page gone */ }
   }
+  // A clean stop makes the core print its end-of-run stats (EE JIT idle loops and the like) into the log.
+  try {
+    await page.evaluate(() => document.getElementById('btn-stop').click());
+    await page.waitForFunction(() => document.body.dataset.state !== 'running', null, { timeout: 30_000 });
+    await sleep(2000);
+  } catch { /* already stopped or gone */ }
   try { result.log = await page.evaluate(() => window.PCSX2Web.logText()); } catch { /* page gone */ }
   fs.writeFileSync(path.join(outDir, `${name}.core.log`), `${result.log}\n--- browser console ---\n${consoleLines.join('\n')}\n`);
   await context.close();
