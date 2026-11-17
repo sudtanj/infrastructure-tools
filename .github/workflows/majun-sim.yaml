@@ -3,7 +3,7 @@ name: "Majun core simulation"
 # ---------------------------------------------------------------------------
 # Runs the real Majun PS2 emulator in headless Chromium (software Vulkan, so
 # WebGPU works without a GPU) and compares the stock core with the patched
-# build. BIOS only, no game: the checks are "did not crash or freeze" and
+# build. By default BIOS only, no game: the checks are "did not crash or freeze" and
 # old-vs-new speed from PCSX2Web.stats(). Runs on this PUBLIC repo's unmetered
 # runners because the private repo is out of Actions minutes.
 #
@@ -11,6 +11,9 @@ name: "Majun core simulation"
 #   NEW core  artifact `majun-core` of a "Majun core build" run
 #   BIOS      newest release asset ps2.bios.*.bin of release `majun-data` in
 #             the private repo
+#   GAME      input `game`: a freely licensed homebrew from scripts/majun-games.json,
+#             downloaded, sha256-checked, wrapped in an ISO on the runner and deleted
+#             at the end. It is never committed or uploaded.
 #
 # Software-rendered speed numbers are only comparable between the two cores
 # of one run, not with a real device. A shared runner adds noise: read a gap
@@ -46,6 +49,10 @@ on:
         description: "Extra query string for the new core only, e.g. set=EmuCore/Speedhacks/SyscallSpin=true"
         required: false
         default: ""
+      game:
+        description: "Boot a freely licensed homebrew game after the BIOS: none (BIOS only), random, or a name from .github/scripts/majun-games.json"
+        required: false
+        default: "none"
       profile:
         description: "Record a CPU profile of every worker (EE thread included) and print the top functions"
         required: false
@@ -153,6 +160,21 @@ jobs:
           npx playwright install --with-deps chromium > /dev/null
           cp "$GITHUB_WORKSPACE/.github/scripts/majun-sim.mjs" .
 
+      - name: Fetch the game
+        if: ${{ inputs.game != '' && inputs.game != 'none' }}
+        env:
+          GAME_IN: ${{ inputs.game }}
+        run: |
+          set -euo pipefail
+          list=.github/scripts/majun-games.json
+          if [ "$GAME_IN" = random ]; then GAME_IN="$(jq -r '.[].name' "$list" | shuf -n1)"; fi
+          jq -e --arg n "$GAME_IN" 'any(.[]; .name == $n)' "$list" > /dev/null \
+            || { echo "::error::game must be none, random or one of: $(jq -r '[.[].name] | join(", ")' "$list")"; exit 1; }
+          sudo apt-get install -y -qq genisoimage p7zip-full > /dev/null
+          echo "game: $GAME_IN ($(jq -r --arg n "$GAME_IN" '.[] | select(.name == $n) | .license' "$list"))"
+          echo "GAME_NAME=$GAME_IN" >> "$GITHUB_ENV"
+          echo "GAME_ISO=$(.github/scripts/majun-game.sh "$GAME_IN" "$RUNNER_TEMP/game")" >> "$GITHUB_ENV"
+
       - name: Run both cores
         env:
           SECONDS_IN: ${{ inputs.seconds }}
@@ -190,6 +212,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Delete the BIOS
+      - name: Delete the BIOS and the game
         if: always()
-        run: rm -rf "$RUNNER_TEMP/bios"
+        run: rm -rf "$RUNNER_TEMP/bios" "$RUNNER_TEMP/game"

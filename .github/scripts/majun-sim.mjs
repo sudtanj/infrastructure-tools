@@ -1,5 +1,6 @@
-// Runs the Majun PS2 core pages in headless Chromium, BIOS only, and samples PCSX2Web.stats().
+// Runs the Majun PS2 core pages in headless Chromium and samples PCSX2Web.stats().
 // usage: node majun-sim.mjs <bios file> <out dir> <seconds> <name=dir> [<name=dir> ...]
+// GAME_ISO=<file> (with GAME_NAME) boots that disc after the BIOS; without it the run is BIOS only.
 // PROFILE=true also writes a CPU profile per worker (<name>.worker<i>.cpuprofile) and <name>.profile.md.
 import { chromium } from 'playwright';
 import http from 'node:http';
@@ -9,6 +10,8 @@ import path from 'node:path';
 const [biosPath, outDir, secondsArg, ...cores] = process.argv.slice(2);
 const seconds = Number(secondsArg);
 const PROFILE = process.env.PROFILE === 'true';
+const GAME_ISO = process.env.GAME_ISO;
+const GAME_NAME = process.env.GAME_NAME;
 const TOP_N = 40;
 const SAMPLE_MS = 10_000;
 const BOOT_TIMEOUT_MS = 180_000;
@@ -127,6 +130,13 @@ async function runCore(browser, name, dir, query) {
     await page.waitForSelector('#bios-input', { state: 'attached', timeout: 60_000 });
     await page.setInputFiles('#bios-input', biosPath);
     await page.waitForFunction(() => document.body.dataset.bios === 'set', null, { timeout: 90_000 });
+    if (GAME_ISO) {
+      await page.setInputFiles('#disc-input', GAME_ISO);
+      await page.waitForFunction(() => document.body.dataset.disc === 'set' || document.getElementById('slate-error')?.offsetParent, null, { timeout: 90_000 });
+      if (await page.evaluate(() => document.body.dataset.disc !== 'set')) {
+        throw new Error(`disc rejected: ${await page.evaluate(() => document.getElementById('slate-error').textContent.trim())}`);
+      }
+    }
     await page.waitForFunction(() => document.body.dataset.state === 'ready', null, { timeout: BOOT_TIMEOUT_MS });
     await page.evaluate(() => document.getElementById('slate-primary').click());
     await page.waitForFunction(() => document.body.dataset.state === 'running', null, { timeout: BOOT_TIMEOUT_MS });
@@ -160,6 +170,10 @@ async function runCore(browser, name, dir, query) {
     await sleep(2000);
   } catch { /* already stopped or gone */ }
   try { result.log = await page.evaluate(() => window.PCSX2Web.logText()); } catch { /* page gone */ }
+  if (GAME_ISO) {
+    try { result.disc = await page.evaluate(() => window.PCSX2WebDisc.stats()); } catch { /* page gone */ }
+    if (!/Disc boot/.test(result.log)) result.problems.push('core log has no "Disc boot" line');
+  }
   fs.writeFileSync(path.join(outDir, `${name}.core.log`), `${result.log}\n--- browser console ---\n${consoleLines.join('\n')}\n`);
   await context.close();
   server.close();
@@ -174,6 +188,7 @@ async function runCore(browser, name, dir, query) {
     vu: mean(result.samples.map((s) => s.vu).filter((v) => v !== null)),
     presented: last?.presented ?? NaN,
     display: last ? `${last.display}${result.webgpu ? '' : ' (no WebGPU)'}` : 'n/a',
+    game: result.log.match(/Game: (.+)/)?.[1] ?? GAME_NAME,
     pass: result.problems.length === 0 && result.samples.length > 0,
   };
   return result;
@@ -198,11 +213,12 @@ await browser.close();
 
 fs.writeFileSync(path.join(outDir, 'samples.json'), JSON.stringify(results.map(({ log, row, ...r }) => ({ ...r, row })), null, 1));
 const lines = [
-  `BIOS only, ${seconds} s per core, sampled every ${SAMPLE_MS / 1000} s.`, '',
-  '| core | mean speed % | min speed % | EE busy % | GS busy % | VU busy % | frames presented | display | result |',
-  '|---|---|---|---|---|---|---|---|---|',
-  ...results.map(({ row: r }) => `| ${r.core} | ${fmt(r.meanSpeed)} | ${fmt(r.minSpeed)} | ${fmt(r.ee)} | ${fmt(r.gs)} | ${fmt(r.vu)} | ${fmt(r.presented)} | ${r.display} | ${r.pass ? 'PASS' : 'FAIL'} |`),
+  `${GAME_ISO ? `Game ${GAME_NAME}` : 'BIOS only'}, ${seconds} s per core, sampled every ${SAMPLE_MS / 1000} s.`, '',
+  `| core |${GAME_ISO ? ' game |' : ''} mean speed % | min speed % | EE busy % | GS busy % | VU busy % | frames presented | display | result |`,
+  `|---|${GAME_ISO ? '---|' : ''}---|---|---|---|---|---|---|---|`,
+  ...results.map(({ row: r }) => `| ${r.core} |${GAME_ISO ? ` ${r.game} |` : ''} ${fmt(r.meanSpeed)} | ${fmt(r.minSpeed)} | ${fmt(r.ee)} | ${fmt(r.gs)} | ${fmt(r.vu)} | ${fmt(r.presented)} | ${r.display} | ${r.pass ? 'PASS' : 'FAIL'} |`),
 ];
+if (GAME_ISO) for (const r of results) lines.push('', `- ${r.name} disc: ${JSON.stringify(r.disc)}`);
 for (const r of results) for (const p of r.problems) lines.push('', `- ${r.name}: ${p}`);
 fs.writeFileSync(path.join(outDir, 'summary.md'), `${lines.join('\n')}\n`);
 console.log(lines.join('\n'));

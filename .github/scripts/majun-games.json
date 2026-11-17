@@ -1,0 +1,30 @@
+[
+  {
+    "name": "jumpnbump",
+    "title": "Jump 'n Bump 1.50 (PS2)",
+    "license": "GPL-2.0-or-later (upstream)",
+    "kind": "iso-zip",
+    "url": "https://archive.org/download/jumpnbump-1.50-ps2iso/jumpnbump-1.50-ps2iso.zip",
+    "sha256": ""
+  },
+  {
+    "name": "dungeon",
+    "title": "glampert/ps2-homebrew dungeon_game",
+    "license": "MIT",
+    "kind": "elf",
+    "elf": "DUNGEON.ELF",
+    "url": "https://github.com/glampert/ps2-homebrew/raw/refs/heads/main/source/demos/bin/dungeon_game.elf",
+    "sha256": ""
+  },
+  {
+    "name": "tyracraft",
+    "title": "TyraCraft v0.86.140",
+    "license": "Apache-2.0",
+    "kind": "elf",
+    "elf": "TYRACRAFT.ELF",
+    "url": "https://github.com/Wellinator/tyracraft/releases/download/v0.86.140/Tyracraft.-.v0.86.140-pre-alpha.elf",
+    "sha256": "",
+    "assets_url": "https://github.com/Wellinator/tyracraft/releases/download/v0.86.140/ASSETS.7z",
+    "assets_sha256": ""
+  }
+]
