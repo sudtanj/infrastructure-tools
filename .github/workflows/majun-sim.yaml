@@ -173,7 +173,8 @@ jobs:
           sudo apt-get install -y -qq genisoimage p7zip-full > /dev/null
           echo "game: $GAME_IN ($(jq -r --arg n "$GAME_IN" '.[] | select(.name == $n) | .license' "$list"))"
           echo "GAME_NAME=$GAME_IN" >> "$GITHUB_ENV"
-          echo "GAME_ISO=$(.github/scripts/majun-game.sh "$GAME_IN" "$RUNNER_TEMP/game")" >> "$GITHUB_ENV"
+          iso="$(.github/scripts/majun-game.sh "$GAME_IN" "$RUNNER_TEMP/game")"
+          echo "GAME_ISO=$iso" >> "$GITHUB_ENV"
 
       - name: Run both cores
         env:
