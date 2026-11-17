@@ -54,9 +54,9 @@ on:
         required: false
         default: "none"
       cpus:
-        description: "vCPUs the browser may use (taskset pin; the target PC has 2 cores / 4 threads)"
+        description: "vCPUs the browser may use (taskset pin). Default 1: below the target PC (2 cores / 4 threads)"
         required: false
-        default: "2"
+        default: "1"
       cpu_throttle:
         description: "CDP CPU throttling rate of the page main thread (1 = none)"
         required: false
