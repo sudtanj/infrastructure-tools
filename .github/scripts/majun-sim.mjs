@@ -1,10 +1,12 @@
 // Runs the Majun PS2 core pages in headless Chromium and samples PCSX2Web.stats().
 // usage: node majun-sim.mjs <bios file> <out dir> <seconds> <name=dir> [<name=dir> ...]
 // GAME_ISO=<file> (with GAME_NAME) boots that disc after the BIOS; without it the run is BIOS only.
+// CPU_THROTTLE=<n> slows the page's main thread n times (CDP); the caller pins the vCPUs with taskset.
 // PROFILE=true also writes a CPU profile per worker (<name>.worker<i>.cpuprofile) and <name>.profile.md.
 import { chromium } from 'playwright';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const [biosPath, outDir, secondsArg, ...cores] = process.argv.slice(2);
@@ -12,6 +14,8 @@ const seconds = Number(secondsArg);
 const PROFILE = process.env.PROFILE === 'true';
 const GAME_ISO = process.env.GAME_ISO;
 const GAME_NAME = process.env.GAME_NAME;
+const CPU_THROTTLE = Number(process.env.CPU_THROTTLE || 1);
+const VCPUS = os.availableParallelism();
 const TOP_N = 40;
 const SAMPLE_MS = 10_000;
 const BOOT_TIMEOUT_MS = 180_000;
@@ -123,6 +127,7 @@ async function runCore(browser, name, dir, query) {
       ee: threads ? Number(threads[1]) : null, gs: threads ? Number(threads[2]) : null, vu: threads ? Number(threads[3]) : null,
     };
   });
+  await (await context.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
   const profiler = PROFILE ? await attachWorkers(context, page) : null;
   try {
     await page.goto(`${base}/index.html?threads=1${query ? "&" + query : ""}`, { waitUntil: 'load' });
@@ -199,7 +204,7 @@ const browser = await chromium.launch({
   channel: 'chromium',
   args: [
     '--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
-    '--use-vulkan=swiftshader', '--ignore-gpu-blocklist',
+    '--use-vulkan=swiftshader', '--ignore-gpu-blocklist', '--js-flags=--max-old-space-size=2048',
   ],
 });
 const results = [];
@@ -213,7 +218,7 @@ await browser.close();
 
 fs.writeFileSync(path.join(outDir, 'samples.json'), JSON.stringify(results.map(({ log, row, ...r }) => ({ ...r, row })), null, 1));
 const lines = [
-  `${GAME_ISO ? `Game ${GAME_NAME}` : 'BIOS only'}, ${seconds} s per core, sampled every ${SAMPLE_MS / 1000} s.`, '',
+  `${GAME_ISO ? `Game ${GAME_NAME}` : 'BIOS only'}, ${seconds} s per core, ${VCPUS} vCPU, CPU throttle x${CPU_THROTTLE}, sampled every ${SAMPLE_MS / 1000} s.`, '',
   `| core |${GAME_ISO ? ' game |' : ''} mean speed % | min speed % | EE busy % | GS busy % | VU busy % | frames presented | display | result |`,
   `|---|${GAME_ISO ? '---|' : ''}---|---|---|---|---|---|---|---|`,
   ...results.map(({ row: r }) => `| ${r.core} |${GAME_ISO ? ` ${r.game} |` : ''} ${fmt(r.meanSpeed)} | ${fmt(r.minSpeed)} | ${fmt(r.ee)} | ${fmt(r.gs)} | ${fmt(r.vu)} | ${fmt(r.presented)} | ${r.display} | ${r.pass ? 'PASS' : 'FAIL'} |`),

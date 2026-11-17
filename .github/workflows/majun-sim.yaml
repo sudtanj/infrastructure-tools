@@ -53,6 +53,14 @@ on:
         description: "Boot a freely licensed homebrew game after the BIOS: none (BIOS only), random, or a name from .github/scripts/majun-games.json"
         required: false
         default: "none"
+      cpus:
+        description: "vCPUs the browser may use (taskset pin; the target PC has 2 cores / 4 threads)"
+        required: false
+        default: "2"
+      cpu_throttle:
+        description: "CDP CPU throttling rate of the page main thread (1 = none)"
+        required: false
+        default: "2"
       profile:
         description: "Record a CPU profile of every worker (EE thread included) and print the top functions"
         required: false
@@ -89,7 +97,13 @@ jobs:
         env:
           SECONDS_IN: ${{ inputs.seconds }}
           RUN_IN: ${{ inputs.core_run_id }}
+          CPUS_IN: ${{ inputs.cpus }}
+          THROTTLE_IN: ${{ inputs.cpu_throttle }}
         run: |
+          printf '%s' "${CPUS_IN:-2}" | grep -Eq '^[1-9]$' && [ "${CPUS_IN:-2}" -le "$(nproc)" ] \
+            || { echo "::error::cpus must be 1..$(nproc)"; exit 1; }
+          printf '%s' "${THROTTLE_IN:-2}" | grep -Eq '^[0-9]+(\.[0-9]+)?$' && awk "BEGIN{exit !(${THROTTLE_IN:-2} >= 1)}" \
+            || { echo "::error::cpu_throttle must be a number >= 1"; exit 1; }
           printf '%s' "${SECONDS_IN:-90}" | grep -Eq '^[0-9]+$' && [ "${SECONDS_IN:-90}" -ge 10 ] && [ "${SECONDS_IN:-90}" -le 600 ] \
             || { echo "::error::seconds must be 10..600"; exit 1; }
           printf '%s\n' "$RUN_IN" | grep -Eq '^[0-9]*$' || { echo "::error::core_run_id must be a number"; exit 1; }
@@ -181,9 +195,12 @@ jobs:
           SECONDS_IN: ${{ inputs.seconds }}
           NEW_QUERY: ${{ inputs.new_query }}
           PROFILE: ${{ inputs.profile }}
+          CPUS_IN: ${{ inputs.cpus }}
+          CPU_THROTTLE: ${{ inputs.cpu_throttle }}
         run: |
           cd "$RUNNER_TEMP/play"
-          node majun-sim.mjs "$RUNNER_TEMP/bios/bios.bin" "$RUNNER_TEMP/out" "${SECONDS_IN:-90}" \
+          # The browser and its workers inherit the affinity mask.
+          taskset -c "0-$(( ${CPUS_IN:-2} - 1 ))" node majun-sim.mjs "$RUNNER_TEMP/bios/bios.bin" "$RUNNER_TEMP/out" "${SECONDS_IN:-90}" \
             "old=$SIM_DIR/old" "new=$SIM_DIR/new?$NEW_QUERY"
 
       - name: Summary
