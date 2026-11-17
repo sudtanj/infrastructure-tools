@@ -46,6 +46,10 @@ on:
         description: "Extra query string for the new core only, e.g. set=EmuCore/Speedhacks/SyscallSpin=true"
         required: false
         default: ""
+      profile:
+        description: "Record a CPU profile of every worker (EE thread included) and print the top functions"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -153,6 +157,7 @@ jobs:
         env:
           SECONDS_IN: ${{ inputs.seconds }}
           NEW_QUERY: ${{ inputs.new_query }}
+          PROFILE: ${{ inputs.profile }}
         run: |
           cd "$RUNNER_TEMP/play"
           node majun-sim.mjs "$RUNNER_TEMP/bios/bios.bin" "$RUNNER_TEMP/out" "${SECONDS_IN:-90}" \

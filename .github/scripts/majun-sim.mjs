@@ -1,5 +1,6 @@
 // Runs the Majun PS2 core pages in headless Chromium, BIOS only, and samples PCSX2Web.stats().
 // usage: node majun-sim.mjs <bios file> <out dir> <seconds> <name=dir> [<name=dir> ...]
+// PROFILE=true also writes a CPU profile per worker (<name>.worker<i>.cpuprofile) and <name>.profile.md.
 import { chromium } from 'playwright';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -7,6 +8,8 @@ import path from 'node:path';
 
 const [biosPath, outDir, secondsArg, ...cores] = process.argv.slice(2);
 const seconds = Number(secondsArg);
+const PROFILE = process.env.PROFILE === 'true';
+const TOP_N = 40;
 const SAMPLE_MS = 10_000;
 const BOOT_TIMEOUT_MS = 180_000;
 const TYPES = {
@@ -35,6 +38,69 @@ function serve(root) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
+// Playwright's CDPSession cannot address child targets, so workers are attached without
+// flatten mode and driven through Target.sendMessageToTarget.
+async function attachWorkers(context, page) {
+  const session = await context.newCDPSession(page);
+  const workers = [];
+  const pending = new Map();
+  let nextId = 0;
+  const send = (worker, method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++nextId;
+    pending.set(id, { resolve, reject });
+    session.send('Target.sendMessageToTarget', { sessionId: worker.sessionId, message: JSON.stringify({ id, method, params }) }).catch(reject);
+  });
+  session.on('Target.attachedToTarget', (e) => {
+    if (e.targetInfo.type === 'worker') workers.push({ sessionId: e.sessionId, url: e.targetInfo.url });
+  });
+  session.on('Target.receivedMessageFromTarget', (e) => {
+    const m = JSON.parse(e.message);
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    if (m.error) p.reject(new Error(m.error.message)); else p.resolve(m.result);
+  });
+  await session.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: false });
+  return {
+    workers,
+    async start() {
+      await Promise.all(workers.map(async (w) => {
+        await send(w, 'Profiler.enable');
+        await send(w, 'Profiler.setSamplingInterval', { interval: 1000 });
+        await send(w, 'Profiler.start');
+      }));
+    },
+    stop: () => Promise.all(workers.map((w) => send(w, 'Profiler.stop').then((r) => r.profile, () => null))),
+  };
+}
+
+// Self time per function: each sample owns the interval up to the next sample.
+function selfTimes(profile) {
+  const byId = new Map(profile.nodes.map((n) => [n.id, n.callFrame]));
+  const totals = new Map();
+  profile.samples.forEach((id, i) => {
+    const f = byId.get(id);
+    const key = `${f.functionName || '(anonymous)'}${f.url ? ` (${path.basename(f.url)})` : ''}`;
+    totals.set(key, (totals.get(key) ?? 0) + (profile.timeDeltas[i + 1] ?? 0) / 1000);
+  });
+  return [...totals].sort((a, b) => b[1] - a[1]);
+}
+
+function profileReport(name, profiles) {
+  const lines = [`## ${name} core CPU profile`, ''];
+  const sampleCount = (p) => (p ? p.samples.length : -1);
+  const eeIndex = profiles.reduce((best, p, i) => (sampleCount(p) > sampleCount(profiles[best]) ? i : best), 0);
+  profiles.forEach((p, i) => {
+    if (!p) { lines.push(`### worker ${i}: no profile`, ''); return; }
+    const rows = selfTimes(p);
+    const total = rows.reduce((a, r) => a + r[1], 0);
+    lines.push(`### worker ${i}${i === eeIndex ? ' (EE: most samples)' : ''}: ${p.samples.length} samples, ${fmt(total)} ms`, '',
+      '| function | self ms | self % |', '|---|---|---|',
+      ...rows.slice(0, TOP_N).map(([fn, ms]) => `| \`${fn.replace(/\|/g, '/')}\` | ${fmt(ms)} | ${fmt((100 * ms) / total, 1)} |`), '');
+  });
+  return lines.join('\n');
+}
+
 async function runCore(browser, name, dir, query) {
   const server = await serve(path.resolve(dir));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -54,6 +120,7 @@ async function runCore(browser, name, dir, query) {
       ee: threads ? Number(threads[1]) : null, gs: threads ? Number(threads[2]) : null, vu: threads ? Number(threads[3]) : null,
     };
   });
+  const profiler = PROFILE ? await attachWorkers(context, page) : null;
   try {
     await page.goto(`${base}/index.html?threads=1${query ? "&" + query : ""}`, { waitUntil: 'load' });
     result.webgpu = await page.evaluate(async () => !!(navigator.gpu && (await navigator.gpu.requestAdapter())));
@@ -64,6 +131,7 @@ async function runCore(browser, name, dir, query) {
     await page.evaluate(() => document.getElementById('slate-primary').click());
     await page.waitForFunction(() => document.body.dataset.state === 'running', null, { timeout: BOOT_TIMEOUT_MS });
 
+    await profiler?.start();
     let prev = await stats();
     for (let t = SAMPLE_MS / 1000; t <= seconds && !result.problems.length; t += SAMPLE_MS / 1000) {
       await sleep(SAMPLE_MS);
@@ -76,6 +144,14 @@ async function runCore(browser, name, dir, query) {
   } catch (e) {
     result.problems.push(String(e.message).split('\n')[0]);
     try { result.last = await stats(); } catch { /* page gone */ }
+  }
+  if (profiler) {
+    const profiles = await profiler.stop();
+    profiles.forEach((p, i) => p && fs.writeFileSync(path.join(outDir, `${name}.worker${i}.cpuprofile`), JSON.stringify(p)));
+    const report = profileReport(name, profiles);
+    fs.writeFileSync(path.join(outDir, `${name}.profile.md`), `${report}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${report}\n`);
+    console.log(`${name}: ${profiler.workers.length} workers profiled`);
   }
   // A clean stop makes the core print its end-of-run stats (EE JIT idle loops and the like) into the log.
   try {
