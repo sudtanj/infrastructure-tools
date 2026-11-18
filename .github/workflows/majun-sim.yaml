@@ -199,6 +199,14 @@ jobs:
           iso="$(.github/scripts/majun-game.sh "$GAME_IN" "$RUNNER_TEMP/game")"
           echo "GAME_ISO=$iso" >> "$GITHUB_ENV"
 
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y -qq pulseaudio pulseaudio-utils > /dev/null
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=majun > /dev/null
+          pactl set-default-sink majun
+          pactl info | grep -E "Default Sink"
+
       - name: Run both cores
         env:
           SECONDS_IN: ${{ inputs.seconds }}

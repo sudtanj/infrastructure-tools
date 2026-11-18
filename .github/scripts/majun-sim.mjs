@@ -154,8 +154,6 @@ async function runCore(browser, name, dir, query) {
   page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
   page.on('requestfailed', (r) => consoleLines.push(`[requestfailed] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')} ${r.failure()?.errorText}`));
   page.on('response', (r) => { if (r.status() >= 400) consoleLines.push(`[http ${r.status()}] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')}`); });
-  page.on('requestfinished', (r) => { if (/\.js$/.test(r.url())) consoleLines.push(`[fetched] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')} (${r.frame()?.url() ? 'frame' : 'other'})`); });
-  page.on('request', (r) => { if (/audio-tap|pcsx2-wasm\.js/.test(r.url())) consoleLines.push(`[request] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')}`); });
   page.on('crash', () => result.problems.push('page crashed'));
   const stats = () => page.evaluate(() => {
     const s = window.PCSX2Web.stats();
@@ -209,24 +207,6 @@ async function runCore(browser, name, dir, query) {
   result.audio = {};
   try {
     result.audio.stats = await page.evaluate(() => window.PCSX2WebAudio?.stats() ?? null);
-    result.audio.probe2 = await page.evaluate(async () => {
-      const c = new AudioContext();
-      const url = URL.createObjectURL(new Blob(['registerProcessor("x", class extends AudioWorkletProcessor { process() { return true; } });'], { type: 'text/javascript' }));
-      try {
-        await Promise.race([c.audioWorklet.addModule(url), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 10s')), 10000))]);
-        return 'blob ok';
-      } catch (e) { return `blob ${e.name}: ${e.message}`; }
-    });
-    result.audio.probe = await page.evaluate(async () => {
-      const c = new AudioContext();
-      const t0 = performance.now();
-      const out = { state: c.state, isolated: crossOriginIsolated, sab: typeof SharedArrayBuffer };
-      try {
-        await Promise.race([c.audioWorklet.addModule('audio-tap.js').then(() => { out.tap = `ok ${Math.round(performance.now() - t0)} ms`; return c.audioWorklet.addModule('pcsx2-wasm.js'); }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 20s')), 20000))]);
-        out.addModule = `ok ${Math.round(performance.now() - t0)} ms`;
-      } catch (e) { out.addModule = `${e.name}: ${e.message}`; }
-      return out;
-    });
     const capture = await page.evaluate(() => window.PCSX2WebAudio?.takeCapture() ?? null);
     if (capture?.frames) {
       result.audio.analysis = { frames: capture.frames, rate: capture.rate, dropped: capture.dropped, gaps: capture.gaps, ...analyseCapture(capture) };
@@ -278,7 +258,7 @@ fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({
   channel: 'chromium',
   args: [
-    '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-audio-output', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
+    '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--use-vulkan=swiftshader', '--ignore-gpu-blocklist', '--js-flags=--max-old-space-size=2048',
   ],
 });
