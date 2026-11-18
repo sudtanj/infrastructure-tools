@@ -152,6 +152,8 @@ async function runCore(browser, name, dir, query) {
   const consoleLines = [];
   page.on('console', (m) => consoleLines.push(`[console.${m.type()}] ${m.text()}`));
   page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
+  page.on('requestfailed', (r) => consoleLines.push(`[requestfailed] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')} ${r.failure()?.errorText}`));
+  page.on('response', (r) => { if (r.status() >= 400) consoleLines.push(`[http ${r.status()}] ${r.url().replace(/^http:\/\/127.0.0.1:\d+/, '')}`); });
   page.on('crash', () => result.problems.push('page crashed'));
   const stats = () => page.evaluate(() => {
     const s = window.PCSX2Web.stats();
