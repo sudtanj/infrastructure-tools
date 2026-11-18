@@ -45,6 +45,10 @@ on:
         description: "Seconds to sample each core"
         required: false
         default: "90"
+      new_core:
+        description: "Where the new core comes from: artifact (a Majun core build) or ps2-fast (the one committed in the private repo)"
+        required: false
+        default: "artifact"
       new_query:
         description: "Extra query string for the new core only, e.g. set=EmuCore/Speedhacks/SyscallSpin=true"
         required: false
@@ -109,6 +113,7 @@ jobs:
           printf '%s\n' "$RUN_IN" | grep -Eq '^[0-9]*$' || { echo "::error::core_run_id must be a number"; exit 1; }
 
       - name: Download the new core (artifact majun-core)
+        if: ${{ inputs.new_core != 'ps2-fast' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_IN: ${{ inputs.core_run_id }}
@@ -133,7 +138,9 @@ jobs:
           repository: ${{ secrets.PRIVATE_REPO || github.repository }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: monorepo
-          sparse-checkout: cloudflare-projects/majun/public/core/ps2
+          sparse-checkout: |
+            cloudflare-projects/majun/public/core/ps2
+            cloudflare-projects/majun/public/core/ps2-fast
           persist-credentials: false
 
       - name: Fetch the BIOS and the old core
@@ -141,6 +148,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO || github.repository }}
           CHECKOUT: ${{ steps.private.outcome }}
+          NEW_CORE: ${{ inputs.new_core }}
         run: |
           set -euo pipefail
           old=monorepo/cloudflare-projects/majun/public/core/ps2
@@ -150,6 +158,7 @@ jobs:
           fi
           mkdir -p "$SIM_DIR"
           mv "$old" "$SIM_DIR/old"
+          if [ "$NEW_CORE" = ps2-fast ]; then mv "$old-fast" "$SIM_DIR/new"; fi
 
           assets="$(gh api "repos/${PRIVATE_REPO}/releases/tags/majun-data" --jq '[.assets[] | select(.name | test("^ps2\\.bios\\..*\\.bin$"))] | sort_by(.name | split(".")[2] | tonumber) | last | [.id, .name] | @tsv' 2>/dev/null)" \
             || { echo "::error::Cannot read release majun-data (token access or release missing)."; exit 1; }
