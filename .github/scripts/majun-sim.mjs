@@ -269,7 +269,7 @@ fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({
   channel: 'chromium',
   args: [
-    '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
+    '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-audio-output', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--use-vulkan=swiftshader', '--ignore-gpu-blocklist', '--js-flags=--max-old-space-size=2048',
   ],
 });
