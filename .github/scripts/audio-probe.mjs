@@ -1,4 +1,8 @@
 import { chromium } from 'playwright';
+import http from 'node:http';
+const server = http.createServer((q, s) => s.writeHead(200, { 'Content-Type': 'text/html' }).end('<html></html>'));
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const origin = `http://127.0.0.1:${server.address().port}/`;
 const variants = {
   A_headless_chromium: { channel: 'chromium', args: ['--no-sandbox'] },
   B_headless_shell: { args: ['--no-sandbox'] },
@@ -12,7 +16,7 @@ for (const [name, opts] of Object.entries(variants)) {
   try {
     const browser = await chromium.launch(opts);
     const page = await browser.newPage();
-    await page.goto('about:blank');
+    await page.goto(origin);
     out = await page.evaluate(async () => {
       const c = new AudioContext();
       const url = URL.createObjectURL(new Blob(['registerProcessor("x", class extends AudioWorkletProcessor { process() { return true; } });'], { type: 'text/javascript' }));
@@ -26,3 +30,4 @@ for (const [name, opts] of Object.entries(variants)) {
   } catch (e) { out = `launch failed: ${String(e.message).split('\n')[0]}`; }
   console.log(`${name}: ${out}`);
 }
+server.close();
