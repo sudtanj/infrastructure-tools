@@ -257,7 +257,6 @@ async function runCore(browser, name, dir, query) {
 fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({
   channel: 'chromium',
-  ignoreDefaultArgs: ['--mute-audio'],
   args: [
     '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--use-vulkan=swiftshader', '--ignore-gpu-blocklist', '--js-flags=--max-old-space-size=2048',
