@@ -20,5 +20,3 @@ jobs:
           cp "$GITHUB_WORKSPACE/.github/scripts/audio-probe.mjs" .
           sudo apt-get install -y -qq xvfb pulseaudio pulseaudio-utils > /dev/null
           echo "--- no pulse"; xvfb-run -a node audio-probe.mjs
-          pulseaudio --start --exit-idle-time=-1; pactl load-module module-null-sink sink_name=majun > /dev/null; pactl set-default-sink majun
-          echo "--- pulse null sink"; xvfb-run -a node audio-probe.mjs
