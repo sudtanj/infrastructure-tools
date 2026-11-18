@@ -7,30 +7,24 @@ const server = http.createServer((q, s) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}/`;
 const variants = {
-  A_default: { channel: 'chromium', args: ['--no-sandbox'] },
-  B_no_rt_priority: { channel: 'chromium', args: ['--no-sandbox', '--disable-features=AudioWorkletThreadRealtimePriority'] },
-  C_rt_priority: { channel: 'chromium', args: ['--no-sandbox', '--enable-features=AudioWorkletThreadRealtimePriority'] },
-  D_gpu_off: { channel: 'chromium', args: ['--no-sandbox', '--disable-gpu'] },
-  E_single_process_audio: { channel: 'chromium', args: ['--no-sandbox', '--disable-features=AudioServiceOutOfProcess,AudioServiceSandbox'] },
-  F_fake: { channel: 'chromium', args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] },
+  A_chromium: { channel: 'chromium', args: ['--no-sandbox'] },
+  B_chrome_stable: { channel: 'chrome', args: ['--no-sandbox'] },
+  C_headless_new_flag: { channel: 'chrome', args: ['--no-sandbox', '--headless=new'] },
 };
 for (const [name, opts] of Object.entries(variants)) {
   let out;
   try {
     const browser = await chromium.launch(opts);
     const page = await browser.newPage();
-    page.on('console', (m) => console.log(`  [${name} console] ${m.text().slice(0, 150)}`));
     await page.goto(origin);
-    out = await page.evaluate(async () => {
+    out = `v${browser.version()} ` + await page.evaluate(async () => {
       const res = [];
-      for (const kind of ['served', 'blob']) {
-        const c = new AudioContext();
-        const url = kind === 'blob' ? URL.createObjectURL(new Blob(['registerProcessor("x", class extends AudioWorkletProcessor { process() { return true; } });'], { type: 'text/javascript' })) : '/w.js';
-        try {
-          await Promise.race([c.audioWorklet.addModule(url), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 6s')), 6000))]);
-          res.push(`${kind} ok`);
-        } catch (e) { res.push(`${kind} ${e.message}`); }
-      }
+      const race = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 6s')), 6000))]);
+      const offline = new OfflineAudioContext(2, 48000, 48000);
+      try { await race(offline.audioWorklet.addModule('/w.js')); res.push('offline ok'); } catch (e) { res.push(`offline ${e.message}`); }
+      const c = new AudioContext();
+      try { await race(c.audioWorklet.addModule('/w.js')); res.push('realtime ok'); } catch (e) { res.push(`realtime ${e.message}`); }
+      res.push(`sink ${JSON.stringify(c.sinkId)} t=${c.currentTime.toFixed(2)} out=${c.outputLatency}`);
       return res.join('; ');
     });
     await browser.close();

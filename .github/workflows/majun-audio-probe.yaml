@@ -16,7 +16,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/play" && cd "$RUNNER_TEMP/play"
           npm init -y > /dev/null
           npm install --no-audit --no-fund playwright@1.55.0 > /dev/null
-          npx playwright install --with-deps chromium chromium-headless-shell > /dev/null
+          npx playwright install --with-deps chromium chrome > /dev/null
           cp "$GITHUB_WORKSPACE/.github/scripts/audio-probe.mjs" .
           sudo apt-get install -y -qq xvfb pulseaudio pulseaudio-utils > /dev/null
           echo "--- no pulse"; xvfb-run -a node audio-probe.mjs
