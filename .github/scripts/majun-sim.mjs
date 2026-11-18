@@ -208,6 +208,16 @@ async function runCore(browser, name, dir, query) {
   result.audio = {};
   try {
     result.audio.stats = await page.evaluate(() => window.PCSX2WebAudio?.stats() ?? null);
+    result.audio.probe = await page.evaluate(async () => {
+      const c = new AudioContext();
+      const t0 = performance.now();
+      const out = { state: c.state, isolated: crossOriginIsolated, sab: typeof SharedArrayBuffer };
+      try {
+        await Promise.race([c.audioWorklet.addModule('pcsx2-wasm.js'), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 20s')), 20000))]);
+        out.addModule = `ok ${Math.round(performance.now() - t0)} ms`;
+      } catch (e) { out.addModule = `${e.name}: ${e.message}`; }
+      return out;
+    });
     const capture = await page.evaluate(() => window.PCSX2WebAudio?.takeCapture() ?? null);
     if (capture?.frames) {
       result.audio.analysis = { frames: capture.frames, rate: capture.rate, dropped: capture.dropped, gaps: capture.gaps, ...analyseCapture(capture) };
