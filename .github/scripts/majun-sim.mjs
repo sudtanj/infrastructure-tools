@@ -213,7 +213,7 @@ async function runCore(browser, name, dir, query) {
       const t0 = performance.now();
       const out = { state: c.state, isolated: crossOriginIsolated, sab: typeof SharedArrayBuffer };
       try {
-        await Promise.race([c.audioWorklet.addModule('pcsx2-wasm.js'), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 20s')), 20000))]);
+        await Promise.race([c.audioWorklet.addModule('audio-tap.js').then(() => { out.tap = `ok ${Math.round(performance.now() - t0)} ms`; return c.audioWorklet.addModule('pcsx2-wasm.js'); }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 20s')), 20000))]);
         out.addModule = `ok ${Math.round(performance.now() - t0)} ms`;
       } catch (e) { out.addModule = `${e.name}: ${e.message}`; }
       return out;
