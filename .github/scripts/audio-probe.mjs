@@ -8,11 +8,11 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}/`;
 const ign = (...a) => ({ channel: 'chromium', args: ['--no-sandbox'], ignoreDefaultArgs: a });
 const variants = {
-  A: ign(),
-  B_field_trial: ign('--disable-field-trial-config'),
-  C_throttle: ign('--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'),
-  D_ipc: ign('--disable-ipc-flooding-protection', '--disable-hang-monitor'),
-  E_features: ign('--disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker'),
+  A: { channel: "chromium", args: ["--no-sandbox"] },
+  B_no_dbus: { channel: "chromium", args: ["--no-sandbox"], env: { ...process.env, DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/nonexistent", DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent" } },
+  C_no_zygote_single: { channel: "chromium", args: ["--no-sandbox", "--no-zygote"] },
+  D_in_process_gpu: { channel: "chromium", args: ["--no-sandbox", "--in-process-gpu", "--disable-gpu"] },
+  E_site_isolation_off: { channel: "chromium", args: ["--no-sandbox", "--disable-site-isolation-trials", "--disable-features=IsolateOrigins,site-per-process"] },
 };
 for (const [name, opts] of Object.entries(variants)) {
   let out;
