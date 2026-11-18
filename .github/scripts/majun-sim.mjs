@@ -2,6 +2,7 @@
 // usage: node majun-sim.mjs <bios file> <out dir> <seconds> <name=dir> [<name=dir> ...]
 // GAME_ISO=<file> (with GAME_NAME) boots that disc after the BIOS; without it the run is BIOS only.
 // CPU_THROTTLE=<n> slows the page's main thread n times (CDP); the caller pins the vCPUs with taskset.
+// Every page records its sound (?audiotap); the audio column says whether the core produced any.
 // PROFILE=true also writes a CPU profile per worker (<name>.worker<i>.cpuprofile) and <name>.profile.md.
 import { chromium } from 'playwright';
 import http from 'node:http';
@@ -23,6 +24,7 @@ const TYPES = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
   '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.txt': 'text/plain',
 };
+const LOUD_RMS = 0.001;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
 const fmt = (n, d = 0) => (Number.isFinite(n) ? n.toFixed(d) : 'n/a');
@@ -108,6 +110,38 @@ function profileReport(name, profiles) {
   return lines.join('\n');
 }
 
+// Peak, RMS and the share of 1 s windows louder than LOUD_RMS in a base64 interleaved stereo Float32 capture.
+function analyseCapture({ data, rate }) {
+  const raw = Buffer.from(data, 'base64');
+  const samples = new Float32Array(raw.buffer, raw.byteOffset, raw.length / 4);
+  const windowLength = rate * 2;
+  let peak = 0;
+  let sumSq = 0;
+  let windows = 0;
+  let loud = 0;
+  for (let from = 0; from < samples.length; from += windowLength) {
+    const to = Math.min(from + windowLength, samples.length);
+    let windowSq = 0;
+    for (let i = from; i < to; i++) {
+      windowSq += samples[i] * samples[i];
+      peak = Math.max(peak, Math.abs(samples[i]));
+    }
+    sumSq += windowSq;
+    windows++;
+    if (Math.sqrt(windowSq / (to - from)) > LOUD_RMS) loud++;
+  }
+  return { peak, rms: Math.sqrt(sumSq / samples.length), loudPct: (100 * loud) / windows };
+}
+
+function audioVerdict({ stats, analysis }) {
+  if (!stats) return { text: 'no audio hooks', fail: false };
+  if (stats.off || stats.failed) return { text: `unavailable (${stats.failed || 'off'})`, fail: false };
+  const state = stats.context?.state;
+  if (state !== 'running') return { text: `no context (${state ?? 'none'})`, fail: false };
+  if (!analysis || analysis.loudPct === 0) return { text: 'SILENT', fail: true };
+  return { text: `ok (rms ${fmt(analysis.rms, 3)}, ${fmt(analysis.loudPct)}% loud)`, fail: false };
+}
+
 async function runCore(browser, name, dir, query) {
   const server = await serve(path.resolve(dir));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -130,7 +164,7 @@ async function runCore(browser, name, dir, query) {
   await (await context.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
   const profiler = PROFILE ? await attachWorkers(context, page) : null;
   try {
-    await page.goto(`${base}/index.html?threads=1${query ? "&" + query : ""}`, { waitUntil: 'load' });
+    await page.goto(`${base}/index.html?threads=1&audiotap=${seconds + 600}${query ? "&" + query : ""}`, { waitUntil: 'load' });
     result.webgpu = await page.evaluate(async () => !!(navigator.gpu && (await navigator.gpu.requestAdapter())));
     await page.waitForSelector('#bios-input', { state: 'attached', timeout: 60_000 });
     await page.setInputFiles('#bios-input', biosPath);
@@ -145,6 +179,11 @@ async function runCore(browser, name, dir, query) {
     await page.waitForFunction(() => document.body.dataset.state === 'ready', null, { timeout: BOOT_TIMEOUT_MS });
     await page.evaluate(() => document.getElementById('slate-primary').click());
     await page.waitForFunction(() => document.body.dataset.state === 'running', null, { timeout: BOOT_TIMEOUT_MS });
+    // The click above is synthetic and grants no user activation; a real one releases a context the browser still holds.
+    if ((await page.evaluate(() => window.PCSX2WebAudio?.stats().context?.state)) === 'suspended') {
+      await page.mouse.click(5, 5);
+      await sleep(1000);
+    }
 
     await profiler?.start();
     let prev = await stats();
@@ -159,6 +198,16 @@ async function runCore(browser, name, dir, query) {
   } catch (e) {
     result.problems.push(String(e.message).split('\n')[0]);
     try { result.last = await stats(); } catch { /* page gone */ }
+  }
+  result.audio = {};
+  try {
+    result.audio.stats = await page.evaluate(() => window.PCSX2WebAudio?.stats() ?? null);
+    const capture = await page.evaluate(() => window.PCSX2WebAudio?.takeCapture() ?? null);
+    if (capture?.frames) {
+      result.audio.analysis = { frames: capture.frames, rate: capture.rate, dropped: capture.dropped, gaps: capture.gaps, ...analyseCapture(capture) };
+    }
+  } catch (e) {
+    result.problems.push(`audio capture: ${String(e.message).split('\n')[0]}`);
   }
   if (profiler) {
     const profiles = await profiler.stop();
@@ -194,7 +243,8 @@ async function runCore(browser, name, dir, query) {
     presented: last?.presented ?? NaN,
     display: last ? `${last.display}${result.webgpu ? '' : ' (no WebGPU)'}` : 'n/a',
     game: result.log.match(/Game: (.+)/)?.[1] ?? GAME_NAME,
-    pass: result.problems.length === 0 && result.samples.length > 0,
+    audio: audioVerdict(result.audio),
+    pass: result.problems.length === 0 && result.samples.length > 0 && !audioVerdict(result.audio).fail,
   };
   return result;
 }
@@ -203,7 +253,7 @@ fs.mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({
   channel: 'chromium',
   args: [
-    '--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
+    '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan',
     '--use-vulkan=swiftshader', '--ignore-gpu-blocklist', '--js-flags=--max-old-space-size=2048',
   ],
 });
@@ -219,9 +269,9 @@ await browser.close();
 fs.writeFileSync(path.join(outDir, 'samples.json'), JSON.stringify(results.map(({ log, row, ...r }) => ({ ...r, row })), null, 1));
 const lines = [
   `${GAME_ISO ? `Game ${GAME_NAME}` : 'BIOS only'}, ${seconds} s per core, ${VCPUS} vCPU, CPU throttle x${CPU_THROTTLE}, sampled every ${SAMPLE_MS / 1000} s.`, '',
-  `| core |${GAME_ISO ? ' game |' : ''} mean speed % | min speed % | EE busy % | GS busy % | VU busy % | frames presented | display | result |`,
-  `|---|${GAME_ISO ? '---|' : ''}---|---|---|---|---|---|---|---|`,
-  ...results.map(({ row: r }) => `| ${r.core} |${GAME_ISO ? ` ${r.game} |` : ''} ${fmt(r.meanSpeed)} | ${fmt(r.minSpeed)} | ${fmt(r.ee)} | ${fmt(r.gs)} | ${fmt(r.vu)} | ${fmt(r.presented)} | ${r.display} | ${r.pass ? 'PASS' : 'FAIL'} |`),
+  `| core |${GAME_ISO ? ' game |' : ''} mean speed % | min speed % | EE busy % | GS busy % | VU busy % | frames presented | display | audio | result |`,
+  `|---|${GAME_ISO ? '---|' : ''}---|---|---|---|---|---|---|---|---|`,
+  ...results.map(({ row: r }) => `| ${r.core} |${GAME_ISO ? ` ${r.game} |` : ''} ${fmt(r.meanSpeed)} | ${fmt(r.minSpeed)} | ${fmt(r.ee)} | ${fmt(r.gs)} | ${fmt(r.vu)} | ${fmt(r.presented)} | ${r.display} | ${r.audio.text} | ${r.pass ? 'PASS' : 'FAIL'} |`),
 ];
 if (GAME_ISO) for (const r of results) lines.push('', `- ${r.name} disc: ${JSON.stringify(r.disc)}`);
 for (const r of results) for (const p of r.problems) lines.push('', `- ${r.name}: ${p}`);
