@@ -138,6 +138,7 @@ function audioVerdict({ stats, analysis }) {
   if (stats.off || stats.failed) return { text: `unavailable (${stats.failed || 'off'})`, fail: false };
   const state = stats.context?.state;
   if (state !== 'running') return { text: `no context (${state ?? 'none'})`, fail: false };
+  if (!stats.node) return { text: `no worklet (${stats.block?.worklet ?? 'unknown'})`, fail: false };
   if (!analysis || analysis.loudPct === 0) return { text: 'SILENT', fail: true };
   return { text: `ok (rms ${fmt(analysis.rms, 3)}, ${fmt(analysis.loudPct)}% loud)`, fail: false };
 }
@@ -154,10 +155,12 @@ async function runCore(browser, name, dir, query) {
   page.on('crash', () => result.problems.push('page crashed'));
   const stats = () => page.evaluate(() => {
     const s = window.PCSX2Web.stats();
+    const a = window.PCSX2WebAudio?.stats();
     const threads = document.getElementById('r-threads')?.textContent.match(/EE (\d+)%\s+GS (\d+)%\s+VU (\d+)%/);
     return {
       state: s.state, view: s.view, speed: s.speed, vps: s.vps, fps: s.displayFps, presented: s.framesPresented,
       dropped: s.framesDropped, display: s.display, gpuMode: s.gpuMode, gpuFallback: s.gpuFallback,
+      sound: a ? { ctx: a.context?.state, worklet: a.block?.worklet, node: a.node, tapFrames: a.tap?.frames } : null,
       ee: threads ? Number(threads[1]) : null, gs: threads ? Number(threads[2]) : null, vu: threads ? Number(threads[3]) : null,
     };
   });
