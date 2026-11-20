@@ -346,7 +346,7 @@ jobs:
           cores: 4
           ram-size: 6144M
           heap-size: 512M
-          disk-size: 8G
+          disk-size: 16G
           # No -no-window: the window is drawn on Xvfb for VNC. -no-snapshot:
           # every run cold boots (a few minutes) from the saved disk, which
           # keeps all app data and logins. Quick-resume snapshots hung the boot

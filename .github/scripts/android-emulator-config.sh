@@ -6,12 +6,14 @@
 set -euo pipefail
 
 cfg="${ANDROID_AVD_HOME:-$HOME/.android/avd}/session.avd/config.ini"
-sed -i -E '/^(hw\.lcd\.(width|height|density)|hw\.ramSize|showDeviceFrame)=/d' "$cfg"
+sed -i -E '/^(hw\.lcd\.(width|height|density)|hw\.ramSize|disk\.dataPartition\.size|showDeviceFrame)=/d' "$cfg"
 # The AVD is created once and restored after that, so the RAM size is set here
 # too, not only by `ram-size`. With 4 GB the guest swapped constantly once an
-# ARM app ran under translation.
+# ARM app ran under translation. The data disk grows from 8 GB: at 8 GB TikTok
+# had too little free space to download its pages and showed only white.
 cat >> "$cfg" <<'EOF'
 hw.ramSize=6144
+disk.dataPartition.size=16G
 hw.lcd.width=720
 hw.lcd.height=1280
 hw.lcd.density=320
